@@ -40,4 +40,4 @@ jobs:
       - name: release client
         run: cargo build --release -p brolink-client --target aarch64-apple-darwin
       - name: bundle
-        run: ./scripts/bundle-macos.sh
+        run: bash scripts/bundle-macos.sh

@@ -2,10 +2,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-client"
-if [[ ! -x "$BIN" ]]; then
+if [[ ! -f "$BIN" ]]; then
   BIN="$ROOT/target/release/brolink-client"
 fi
-if [[ ! -x "$BIN" ]]; then
+if [[ ! -f "$BIN" ]]; then
   echo "build the client first: cargo build --release -p brolink-client" >&2
   exit 1
 fi
@@ -13,6 +13,7 @@ APP="$ROOT/dist/BroLink.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/BroLink"
+chmod +x "$APP/Contents/MacOS/BroLink"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
