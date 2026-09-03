@@ -86,8 +86,55 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A semver prerelease (v0.1.0-alpha.1) is marked as one, so GitHub
+          # does not present it as the latest stable build.
+          case "${GITHUB_REF_NAME}" in
+            *-*) PRE=--prerelease ;;
+            *)   PRE= ;;
+          esac
+          cat > notes.md <<'EOF'
+          ## Install
+
+          **macOS (Apple Silicon)**
+
+          ```bash
+          tar xzf forgelink-macos-arm64.tar.gz
+          xattr -dr com.apple.quarantine ForgeLink.app
+          RUST_LOG=info ForgeLink.app/Contents/MacOS/ForgeLink
+          ```
+
+          The `xattr` step is required. The bundle is ad-hoc signed rather than
+          Developer ID signed, so Gatekeeper reports it as damaged without it.
+
+          **Windows (host)**
+
+          Unzip, then run `forgelink-host.exe`. Needs
+          [FFmpeg](https://www.gyan.dev/ffmpeg/builds/) on `PATH`. If clients
+          cannot connect, run `fix-firewall.ps1` from an elevated PowerShell --
+          Windows block rules override allow rules and are the usual cause.
+
+          ## What is verified
+
+          - 166 unit tests, clippy clean, on Windows and macOS in CI
+          - End-to-end loopback on one Windows machine: capture, encode,
+            encrypt, fragment, send, reassemble, decrypt, decode, plus audio
+            checked for real signal rather than digital silence
+
+          ## What is not
+
+          - **No Mac has connected to a Windows host.** The client compiles and
+            unit-tests on Apple Silicon; it has never streamed.
+          - Input injection, gamepad, and the relay are unit-tested only
+          - Across the internet, use Tailscale, a self-hosted relay, or a
+            port-forward. The STUN address alone only works on full-cone NAT --
+            see the README.
+
+          Treat this as an alpha: it is for finding out whether it works, not
+          for relying on.
+          EOF
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "ForgeLink ${GITHUB_REF_NAME}" \
-            --generate-notes \
+            --notes-file notes.md \
+            $PRE \
             artifacts/*/*
