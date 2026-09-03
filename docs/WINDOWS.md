@@ -45,7 +45,18 @@ netsh advfirewall firewall add rule name="ForgeLink Host" dir=in action=allow pr
 ### If clients still cannot connect
 
 Two things silently defeat the allow rule above. The host warns about both at
-startup, but they need fixing by hand.
+startup. To fix them, from an **elevated** PowerShell:
+
+```powershell
+.\scripts\fix-firewall.ps1 -DryRun   # show what would change
+.\scripts\fix-firewall.ps1           # remove blocks, add a LocalSubnet allow
+.\scripts\fix-firewall.ps1 -Wan      # ...or open the port to any address
+```
+
+The allow rule is scoped to the local subnet unless you pass `-Wan`, so
+playing on your own network does not expose the port to the internet. The
+script never changes your network category. The details, if you would rather
+do it by hand:
 
 **Block rules win.** Windows evaluates block rules before allow rules, so a
 leftover "Query User" block -- which Windows writes whenever its network
