@@ -42,6 +42,36 @@ ForgeLink tries to add an inbound UDP rule for port **47850**. If you are not el
 netsh advfirewall firewall add rule name="ForgeLink Host" dir=in action=allow protocol=UDP localport=47850
 ```
 
+### If clients still cannot connect
+
+Two things silently defeat the allow rule above. The host warns about both at
+startup, but they need fixing by hand.
+
+**Block rules win.** Windows evaluates block rules before allow rules, so a
+leftover "Query User" block -- which Windows writes whenever its network
+prompt is dismissed or cancelled -- makes the host unreachable no matter what
+allow rules exist. List them, then remove them, from an elevated PowerShell:
+
+```powershell
+$exe = "C:\path\to\forgelink-host.exe"
+Get-NetFirewallApplicationFilter -Program $exe |
+  Get-NetFirewallRule | Where-Object Action -eq Block
+
+Get-NetFirewallApplicationFilter -Program $exe |
+  Get-NetFirewallRule | Where-Object Action -eq Block | Remove-NetFirewallRule
+```
+
+**Public networks.** Windows blocks inbound connections and LAN discovery on
+networks classed as Public. Check with `Get-NetConnectionProfile`, and for a
+network you trust:
+
+```powershell
+Set-NetConnectionProfile -InterfaceAlias "Ethernet" -NetworkCategory Private
+```
+
+Only do this on a network you control. On a cafe or hotel network leave it
+Public and reach the host over Tailscale instead.
+
 ## Games
 
 Use **borderless windowed** (or windowed) mode. Exclusive fullscreen can bypass Desktop Duplication on some titles.

@@ -87,6 +87,9 @@ fn main() -> Result<()> {
     if !args.no_firewall {
         ensure_firewall_rule(cfg.port);
     }
+    // Read-only, so it runs even under --no-firewall: "do not touch my
+    // firewall" is not the same as "do not tell me I am unreachable".
+    warn_if_unreachable();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -198,6 +201,47 @@ fn raise_priority() {
 }
 
 /// Add an inbound UDP allow rule, but only if one is not already there.
+/// Say so when this PC cannot actually be reached.
+///
+/// Windows evaluates block rules before allow rules, so a leftover "Query
+/// User" block -- what Windows writes when its prompt is dismissed -- quietly
+/// defeats the allow rule added above. Without this the host prints a ticket,
+/// logs a healthy startup, and is simply unreachable, which reads as a bug in
+/// the client. Checked on a background thread so it never delays the ticket.
+fn warn_if_unreachable() {
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let exe = exe.to_string_lossy().replace("'", "''");
+        let script = format!(
+            "$b=@(Get-NetFirewallApplicationFilter -Program '{exe}' -ErrorAction SilentlyContinue| Get-NetFirewallRule -ErrorAction SilentlyContinue|Where-Object{{$_.Action -eq 'Block' -and $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound'}}).Count; $p=@(Get-NetConnectionProfile -ErrorAction SilentlyContinue| Where-Object{{$_.NetworkCategory -eq 'Public'}}).Count;Write-Output \"$b $p\""
+        );
+        let Ok(out) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(0x0800_0000)
+            .output()
+        else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut fields = text.split_whitespace();
+        let blocked: u32 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let public: u32 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        if blocked > 0 {
+            tracing::warn!(
+                "{blocked} firewall rule(s) BLOCK inbound traffic to {exe}. Windows applies block rules before allow rules, so no client can reach this PC until they are gone. In an elevated PowerShell: Get-NetFirewallApplicationFilter -Program '{exe}' | Get-NetFirewallRule | Where-Object Action -eq Block | Remove-NetFirewallRule"
+            );
+        }
+        if public > 0 {
+            tracing::warn!(
+                "this PC is on a network Windows classes as Public, where inbound connections and LAN discovery are blocked by default. For a home network: Set-NetConnectionProfile -InterfaceAlias '<adapter>' -NetworkCategory Private"
+            );
+        }
+    });
+}
+
 fn ensure_firewall_rule(port: u16) {
     #[cfg(windows)]
     {
