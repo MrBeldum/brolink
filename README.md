@@ -31,7 +31,7 @@ without replacing the remote-play path.
 - System audio loopback
 - PIN pairing with persistent identities
 - LAN discovery
-- WAN via STUN hole-punch (most home routers), Tailscale `100.x` addresses, or a self-hosted UDP relay
+- Across the internet via Tailscale `100.x` addresses, a self-hosted UDP relay, or a manual port-forward. See [How worldwide access works](#how-worldwide-access-works) -- the STUN address alone is not enough on most routers
 - Native GUIs on both sides (no browser, no Electron)
 
 This is **not** a thin wrapper around Sunshine/Moonlight. Those projects are
@@ -106,10 +106,24 @@ The host binds **one UDP socket** (default `47850`) and:
 4. Packs all of that into a pasteable `flk1_…` ticket
 
 The client sends `Hello` to every candidate. The first `HelloAck` wins.
-Most home NATs (full-cone / restricted-cone) then stream directly.
 
-If both sides are behind symmetric NAT or CGNAT, either install Tailscale
-on both machines or run `forgelink-relay` on a small VPS:
+**The STUN candidate is a bonus, not the internet path.** The host is purely
+reactive -- it only ever replies to an address a packet arrived from, and
+never sends first. So your client's opening packet reaches it only if the
+PC's router uses endpoint-independent filtering ("full cone"). A
+restricted-cone or symmetric NAT drops it, and ForgeLink has no signalling
+channel to coordinate a simultaneous open and no UPnP/NAT-PMP to request a
+forward. On most home routers, expect the WAN candidate to time out.
+
+For reliable access from anywhere, pick one of these three:
+
+| Path | Router changes | Notes |
+|------|----------------|-------|
+| **Tailscale** | none | Easiest. Install on both machines, connect to the `100.x` address. Tailscale handles traversal and falls back to its own relays. |
+| **Self-hosted relay** | none | Both sides send *outbound* to the relay, so no NAT has to accept an unsolicited packet. Costs you a VPS. |
+| **Port-forward** | UDP 47850 | Direct and lowest latency, but exposes the port and needs router access. |
+
+To run the relay yourself:
 
 ```bash
 cargo run --release -p forgelink-relay -- --bind 0.0.0.0:47851

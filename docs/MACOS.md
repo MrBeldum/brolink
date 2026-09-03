@@ -59,6 +59,17 @@ cargo run --release -p forgelink-client
 
 ## Connecting across the world
 
-1. Best: install [Tailscale](https://tailscale.com) on the Mac and the PC, then connect to the `100.x.y.z` address shown on the host.
-2. Good: paste the host ticket. The WAN address inside it is a STUN mapping — works on most home routers.
-3. Fallback: port-forward UDP 47850 on the PC's router, or run `forgelink-relay` on a VPS.
+1. **Best: [Tailscale](https://tailscale.com)** on the Mac and the PC, then connect
+   to the `100.x.y.z` address shown on the host. Tailscale does the NAT
+   traversal, including its own relay fallback, and needs no router changes.
+2. **Self-hosted relay**: run `forgelink-relay` on a VPS and start the host
+   with `--relay host:port`. Both machines send *outbound* to the relay, so
+   no router accepts an unsolicited packet and any NAT works.
+3. **Manual port-forward** of UDP 47850 on the PC's router.
+
+The STUN address in the ticket is **not** a fourth option on its own. It only
+works if the PC's router uses endpoint-independent filtering ("full cone"),
+because the host never sends anything to your Mac before your Mac's first
+packet arrives -- so a restricted-cone or symmetric NAT drops it. There is no
+signalling channel to coordinate a simultaneous open, and no UPnP. Try it if
+you like; if the connection times out on the WAN candidate, that is why.

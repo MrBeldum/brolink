@@ -76,7 +76,7 @@ mix to 48 kHz; the client resamples again if its output device is not 48 kHz.
 
 ## Handshake
 
-1. Client sends `Hello` to every candidate address in the ticket (LAN, STUN-WAN, Tailscale, relay), retransmitting every 400 ms for up to 8 s. The first datagram is also what punches the NAT hole, so losing it must not be fatal.
+1. Client sends `Hello` to every candidate address in the ticket (LAN, STUN-WAN, Tailscale, relay), retransmitting every 400 ms for up to 8 s. Losing it must not be fatal, and it opens the *client's* own NAT for the reply -- it does not open the host's.
 2. Host replies `HelloAck` signed by its persistent Ed25519 identity.
 3. **The client checks the answering host's public key against the one in the ticket** and aborts if they differ, so a machine that has taken over the address cannot impersonate the host.
 4. Both derive directional keys with HKDF-SHA256 over X25519(shared).
@@ -111,10 +111,14 @@ The host refreshes its STUN mapping every 20 s while idle so the WAN port stays
 open. It stops during a session, because reusing the media socket for STUN
 would steal packets from the stream.
 
+The host is purely reactive: it only ever replies to the address a packet
+arrived from, and never sends first. That is what rules out true hole
+punching -- see the NAT section below.
+
 ## NAT
 
 - LAN: UDP broadcast / multicast discovery plus the ticket's LAN address. Beacons carry the full ticket, so a host found by discovery gets the same identity check as a pasted one.
-- WAN: STUN (Google, then Cloudflare) reflexive address in the ticket. Most residential cone NATs work if the host keeps the mapping alive.
+- WAN: STUN (Google, then Cloudflare) reflexive address in the ticket. This keeps the *mapping* alive, but delivery of the client's first packet depends on the router's *filtering*: only endpoint-independent filtering ("full cone") accepts it. Under address- or port-dependent filtering it is dropped, and under symmetric NAT the ticket's port is wrong for the client anyway. There is no signalling channel, so the two peers cannot coordinate a simultaneous open, and no UPnP/NAT-PMP to request a forward. Treat the WAN candidate as an optimisation that sometimes works, not as the internet path.
 - Tailscale: a `100.64/10` address is advertised as its own candidate kind.
 - Hard NAT: run `forgelink-relay` on a VPS and start the host with `--relay host:port`, or install Tailscale on both machines.
 

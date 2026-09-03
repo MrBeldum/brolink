@@ -9,8 +9,8 @@ slice; the transport, pairing, and identity stay the same.
 - [x] Keyboard, relative/absolute mouse, gamepad
 - [x] System audio
 - [x] PIN pairing + allow-list
-- [x] LAN discovery + STUN tickets + Tailscale detection
-- [x] Optional UDP relay, advertised in the ticket and used end to end
+- [x] LAN discovery + STUN tickets + Tailscale detection (no UPnP/NAT-PMP, and no signalling for true hole punching -- see README)
+- [x] Optional UDP relay, advertised in the ticket (routing is unit-tested; not yet exercised over a real network)
 - [x] Host identity verified against the ticket on connect
 - [x] Held keys/buttons released on uncapture and disconnect
 
