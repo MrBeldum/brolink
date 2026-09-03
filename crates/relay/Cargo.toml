@@ -1,17 +1,17 @@
 [package]
-name = "forgelink-relay"
+name = "brolink-relay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Optional UDP relay for ForgeLink when both peers are behind hard NAT"
+description = "Optional UDP relay for BroLink when both peers are behind hard NAT"
 
 [[bin]]
-name = "forgelink-relay"
+name = "brolink-relay"
 path = "src/main.rs"
 
 [dependencies]
-forgelink-core.workspace = true
+brolink-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

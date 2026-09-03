@@ -1,21 +1,25 @@
 //! Host engine: UDP server, pairing, capture/encode, input.
 
 use crate::audio::{AudioCapture, AudioPacket};
+use crate::clipboard::ClipboardBridge;
 use crate::encode::{find_ffmpeg, select_encoder, EncoderInfo, VideoPipeline};
+use crate::ffmpeg_setup;
 use crate::input::InputInjector;
 use anyhow::{anyhow, Result};
-use bytes::BytesMut;
-use forgelink_core::codec::{fragment_frame, keyframe_flag};
-use forgelink_core::config::{primary_lan_v4, tailscale_v4, HostConfig, StreamQuality};
-use forgelink_core::crypto::{
+use brolink_core::abr::{AbrController, COOLDOWN_SECS};
+use brolink_core::codec::{fragment_frame, keyframe_flag};
+use brolink_core::config::{global_v6, primary_lan_v4, tailscale_v4, HostConfig, StreamQuality};
+use brolink_core::crypto::{
     constant_eq, random_bytes, random_pin, sign_handshake, EphKey, ReplayWindow, SessionKeys,
 };
-use forgelink_core::discovery::{announce, Beacon};
-use forgelink_core::identity::{AllowList, Identity};
-use forgelink_core::net::{bind_udp, RelayLink, Transport, RECV_BUF};
-use forgelink_core::proto::*;
-use forgelink_core::stun::discover_wan;
-use forgelink_core::ticket::{Candidate, CandidateKind, RelayHint, Ticket};
+use brolink_core::discovery::{announce, Beacon};
+use brolink_core::identity::{AllowList, Identity};
+use brolink_core::net::{bind_udp, RelayLink, Transport, RECV_BUF};
+use brolink_core::proto::*;
+use brolink_core::stun::discover_wan;
+use brolink_core::ticket::{Candidate, CandidateKind, RelayHint, Ticket};
+use brolink_core::upnp::{map_udp_port, PortMapping};
+use bytes::BytesMut;
 use parking_lot::Mutex;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +35,9 @@ const PAIRING_TIMEOUT: Duration = Duration::from_secs(90);
 const STUN_REFRESH: Duration = Duration::from_secs(20);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(1);
 const RELAY_KEEPALIVE: Duration = Duration::from_secs(10);
+const UPNP_REFRESH: Duration = Duration::from_secs(15 * 60);
+const CLIPBOARD_POLL: Duration = Duration::from_millis(400);
+const HELLO_RATE: Duration = Duration::from_secs(2);
 /// Cap the fragments pushed per pump so input stays responsive under a burst
 /// of large keyframes.
 const MAX_FRAGMENTS_PER_PUMP: usize = 256;
@@ -55,6 +62,11 @@ pub struct HostStatus {
     pub frames_sent: u64,
     pub last_error: Option<String>,
     pub log: Vec<String>,
+    pub upnp: Option<String>,
+    pub internet: String,
+    pub ffmpeg_ok: bool,
+    pub paired: Vec<(String, String)>,
+    pub path: String,
 }
 
 impl Default for HostStatus {
@@ -77,6 +89,11 @@ impl Default for HostStatus {
             frames_sent: 0,
             last_error: None,
             log: Vec::new(),
+            upnp: None,
+            internet: "checking…".into(),
+            ffmpeg_ok: false,
+            paired: Vec::new(),
+            path: String::new(),
         }
     }
 }
@@ -106,11 +123,13 @@ impl HostStatus {
 pub struct Engine {
     pub status: Arc<Mutex<HostStatus>>,
     stop: Arc<AtomicBool>,
+    kick: Arc<AtomicBool>,
     cfg: Arc<Mutex<HostConfig>>,
     identity: Identity,
     /// Probing every encoder costs seconds; a reconnect with unchanged settings
     /// should not pay it again.
     encoder_cache: Arc<Mutex<Option<(EncoderKey, EncoderInfo)>>>,
+    revoke: Arc<Mutex<Vec<String>>>,
 }
 
 /// Everything that would invalidate a cached encoder choice.
@@ -129,9 +148,11 @@ impl Engine {
         Self {
             status: Arc::new(Mutex::new(HostStatus::default())),
             stop: Arc::new(AtomicBool::new(false)),
+            kick: Arc::new(AtomicBool::new(false)),
             cfg: Arc::new(Mutex::new(cfg)),
             identity,
             encoder_cache: Arc::new(Mutex::new(None)),
+            revoke: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -141,6 +162,15 @@ impl Engine {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.kick.store(true, Ordering::Relaxed);
+    }
+
+    pub fn kick_client(&self) {
+        self.kick.store(true, Ordering::Relaxed);
+    }
+
+    pub fn revoke_client(&self, hex: String) {
+        self.revoke.lock().push(hex);
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -170,30 +200,130 @@ impl Engine {
         }
 
         // Learn our public address before advertising a ticket.
-        let wan = discover_wan(transport.socket()).await;
+        let mut wan = discover_wan(transport.socket()).await;
         self.publish_ticket(local.port(), wan, relay);
 
-        let ffmpeg = find_ffmpeg(&cfg.ffmpeg_path);
-        match ffmpeg.as_ref() {
-            Some(ff) => self
-                .status
-                .lock()
-                .push_log(format!("FFmpeg: {}", ff.display())),
-            None => self.status.lock().push_log(
-                "FFmpeg not found — install it or place ffmpeg.exe next to forgelink-host",
-            ),
+        if cfg.enable_upnp {
+            if let Some(mapped) = map_udp_port(local.port(), 3600).await {
+                wan = Some(merge_upnp_wan(wan, &mapped));
+                {
+                    let mut st = self.status.lock();
+                    st.upnp = Some(format!("{} via {}", mapped.external, mapped.via.as_str()));
+                    st.push_log(format!(
+                        "Internet: mapped {} ({})",
+                        mapped.external,
+                        mapped.via.as_str()
+                    ));
+                }
+                self.publish_ticket(local.port(), wan, relay);
+            } else {
+                self.status.lock().push_log(
+                    "Router did not map the port (UPnP/NAT-PMP). Worldwide access needs Tailscale, a relay, or a manual forward.",
+                );
+            }
         }
 
-        let allowlist_path = forgelink_core::config::allowlist_path()?;
+        let ffmpeg = find_ffmpeg(&cfg.ffmpeg_path).or_else(ffmpeg_setup::bundled_ffmpeg);
+        match ffmpeg.as_ref() {
+            Some(ff) => {
+                {
+                    let mut st = self.status.lock();
+                    st.ffmpeg_ok = true;
+                    st.push_log(format!("FFmpeg: {}", ff.display()));
+                }
+                // Probe while idle so the first Mac is not stuck behind 12s
+                // timeouts on every encoder that is not installed.
+                let q = cfg.quality.clone();
+                let monitor = cfg.monitor_index;
+                let prefer = cfg.encoder.clone();
+                let ffmpeg = ff.clone();
+                let cache = self.encoder_cache.clone();
+                let status = self.status.clone();
+                tokio::task::spawn_blocking(move || {
+                    match select_encoder(&ffmpeg, &q, monitor, &prefer) {
+                        Ok(info) => {
+                            let key = EncoderKey {
+                                width: q.width,
+                                height: q.height,
+                                fps: q.fps,
+                                bitrate_kbps: q.bitrate_kbps,
+                                monitor,
+                                prefer,
+                            };
+                            status
+                                .lock()
+                                .push_log(format!("Encoder ready: {}", info.name));
+                            *cache.lock() = Some((key, info));
+                        }
+                        Err(e) => status.lock().push_log(format!("Encoder probe: {e:#}")),
+                    }
+                });
+            }
+            None => {
+                self.status.lock().push_log(
+                    "FFmpeg not found — downloading a local copy into %LOCALAPPDATA%\\BroLink…",
+                );
+                let status = self.status.clone();
+                let cfg_slot = self.cfg.clone();
+                tokio::spawn(async move {
+                    let bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    match tokio::task::spawn_blocking(move || {
+                        ffmpeg_setup::download_ffmpeg(&bytes, &total)
+                    })
+                    .await
+                    {
+                        Ok(Ok(p)) => {
+                            let mut cfg_now = cfg_slot.lock().clone();
+                            cfg_now.ffmpeg_path = p.display().to_string();
+                            let _ = cfg_now.save();
+                            *cfg_slot.lock() = cfg_now;
+                            let mut st = status.lock();
+                            st.ffmpeg_ok = true;
+                            st.push_log(format!("FFmpeg ready: {}", p.display()));
+                        }
+                        Ok(Err(e)) => status.lock().push_log(format!(
+                            "Could not download FFmpeg ({e:#}). Place ffmpeg.exe next to brolink-host.exe."
+                        )),
+                        Err(e) => status
+                            .lock()
+                            .push_log(format!("FFmpeg download task failed: {e}")),
+                    }
+                });
+            }
+        }
+        self.refresh_internet_label(wan, relay);
+
+        let allowlist_path = brolink_core::config::allowlist_path()?;
         let mut allow = AllowList::load(&allowlist_path).unwrap_or_default();
         let mut buf = vec![0u8; RECV_BUF];
         let mut session: Option<LiveSession> = None;
         let mut last_announce = Instant::now() - ANNOUNCE_INTERVAL;
         let mut last_stun = Instant::now();
+        let mut last_upnp = Instant::now();
         let mut last_relay_ka = Instant::now() - RELAY_KEEPALIVE;
+        let mut last_hello_from: Option<(SocketAddr, Instant)> = None;
         let mut seq_out = SeqCounter::new();
 
         while !self.stop.load(Ordering::Relaxed) {
+            {
+                let hexes: Vec<String> = self.revoke.lock().drain(..).collect();
+                for hex in hexes {
+                    if allow.remove_hex(&hex) {
+                        let _ = allow.save(&allowlist_path);
+                        self.status
+                            .lock()
+                            .push_log(format!("Revoked paired client {hex}"));
+                    }
+                }
+                let mut st = self.status.lock();
+                st.paired = allow
+                    .clients
+                    .iter()
+                    .map(|c| (c.name.clone(), c.public.clone()))
+                    .collect();
+            }
+
             if last_announce.elapsed() >= ANNOUNCE_INTERVAL {
                 last_announce = Instant::now();
                 let (name, ticket, encoder) = {
@@ -227,9 +357,30 @@ impl Engine {
             if session.is_none() && last_stun.elapsed() >= STUN_REFRESH {
                 last_stun = Instant::now();
                 let fresh = discover_wan(transport.socket()).await;
-                if fresh != self.status.lock().wan {
-                    self.publish_ticket(local.port(), fresh, relay);
+                if fresh != self.status.lock().wan && self.status.lock().upnp.is_none() {
+                    wan = fresh;
+                    self.publish_ticket(local.port(), wan, relay);
+                    self.refresh_internet_label(wan, relay);
                 }
+            }
+            if session.is_none()
+                && self.cfg.lock().enable_upnp
+                && last_upnp.elapsed() >= UPNP_REFRESH
+            {
+                last_upnp = Instant::now();
+                if let Some(mapped) = map_udp_port(local.port(), 3600).await {
+                    wan = Some(merge_upnp_wan(wan, &mapped));
+                    self.status.lock().upnp =
+                        Some(format!("{} via {}", mapped.external, mapped.via.as_str()));
+                    self.publish_ticket(local.port(), wan, relay);
+                    self.refresh_internet_label(wan, relay);
+                }
+            }
+
+            if self.kick.swap(false, Ordering::Relaxed) && session.take().is_some() {
+                self.status
+                    .lock()
+                    .end_session("Disconnected from the host UI");
             }
 
             if let Some(sess) = session.as_mut() {
@@ -255,6 +406,10 @@ impl Engine {
                     if session.is_some() {
                         continue;
                     }
+                    if last_hello_from.is_some_and(|(a, t)| a == from && t.elapsed() < HELLO_RATE) {
+                        continue;
+                    }
+                    last_hello_from = Some((from, Instant::now()));
                     match self
                         .handle_hello(
                             &transport,
@@ -315,30 +470,31 @@ impl Engine {
         if let Some(ip) = primary_lan_v4() {
             candidates.push(Candidate {
                 kind: CandidateKind::Lan,
-                addr: SocketAddrV4::new(ip, port),
+                addr: SocketAddr::V4(SocketAddrV4::new(ip, port)),
             });
         }
-        if let Some(SocketAddr::V4(v4)) = wan {
+        if let Some(w) = wan {
             candidates.push(Candidate {
                 kind: CandidateKind::Wan,
-                addr: v4,
+                addr: w,
             });
         }
-        let ts = tailscale_v4().map(|ip| SocketAddrV4::new(ip, port));
+        let ts = tailscale_v4().map(|ip| SocketAddr::V4(SocketAddrV4::new(ip, port)));
         if let Some(addr) = ts {
             candidates.push(Candidate {
                 kind: CandidateKind::Tailscale,
                 addr,
             });
         }
-        let relay_hint = relay.and_then(|r| match r.addr {
-            SocketAddr::V4(v4) => Some(RelayHint {
-                addr: v4,
-                token: r.token,
-            }),
-            // The ticket format carries IPv4 only; an IPv6 relay still works
-            // for this host but cannot be advertised.
-            SocketAddr::V6(_) => None,
+        for ip in global_v6() {
+            candidates.push(Candidate {
+                kind: CandidateKind::Wan,
+                addr: SocketAddr::from((ip, port)),
+            });
+        }
+        let relay_hint = relay.map(|r| RelayHint {
+            addr: r.addr,
+            token: r.token,
         });
         let ticket = Ticket::new(&self.identity, candidates, relay_hint, &name);
 
@@ -346,14 +502,14 @@ impl Engine {
         let first_publish = st.ticket.is_empty();
         st.lan = ticket.lan().map(SocketAddr::V4);
         st.wan = wan;
-        st.tailscale = ts.map(SocketAddr::V4);
+        st.tailscale = ts;
         st.ticket = ticket.encode();
         st.ticket_display = ticket.display_code();
         if first_publish {
             match wan {
-                Some(w) => st.push_log(format!("Public address (STUN): {w}")),
+                Some(w) => st.push_log(format!("Public address: {w}")),
                 None => st.push_log(
-                    "STUN did not return a public address — WAN needs Tailscale, a relay, or a port-forward",
+                    "No public address yet — WAN needs UPnP, Tailscale, a relay, or a port-forward",
                 ),
             }
             if let Some(t) = ts {
@@ -362,6 +518,22 @@ impl Engine {
         } else {
             st.push_log("Public address changed — ticket refreshed");
         }
+    }
+
+    fn refresh_internet_label(&self, wan: Option<SocketAddr>, relay: Option<RelayLink>) {
+        let mut st = self.status.lock();
+        st.internet = if st.upnp.is_some() {
+            "Reachable from the internet (router port mapping)".into()
+        } else if st.tailscale.is_some() {
+            "Reachable over Tailscale".into()
+        } else if relay.is_some() {
+            "Reachable through your relay".into()
+        } else if wan.is_some() {
+            "Public address known — may still need UPnP, Tailscale, or a relay on many home routers"
+                .into()
+        } else {
+            "Local network only. Enable UPnP, add a relay, or install Tailscale for worldwide access.".into()
+        };
     }
 
     /// Pick an encoder, reusing the previous choice when nothing relevant changed.
@@ -445,12 +617,17 @@ impl Engine {
             signature: sig,
         };
         let payload = json_payload(&ack)?;
-        transport
-            .send_to(
-                &encode_plain(PacketType::HelloAck, seq_out.next_seq()?, &payload),
-                from,
-            )
-            .await?;
+        let ack_pkt = encode_plain(PacketType::HelloAck, seq_out.next_seq()?, &payload);
+        transport.send_to(&ack_pkt, from).await?;
+        if let Some(wan) = hello
+            .client_wan
+            .as_deref()
+            .and_then(|s| s.parse::<SocketAddr>().ok())
+        {
+            if wan != from {
+                let _ = transport.send_to(&ack_pkt, wan).await;
+            }
+        }
 
         let shared = eph.shared(&hello.client_eph);
         let keys = SessionKeys::derive(&shared, &hello.nonce, &server_nonce, true)?;
@@ -496,9 +673,11 @@ impl Engine {
         }
         let quality = quality.sanitized();
 
-        let ffmpeg = find_ffmpeg(&cfg.ffmpeg_path).ok_or_else(|| {
-            anyhow!("FFmpeg not found — install it, or put ffmpeg.exe next to forgelink-host.exe")
-        })?;
+        let ffmpeg = find_ffmpeg(&cfg.ffmpeg_path)
+            .or_else(ffmpeg_setup::bundled_ffmpeg)
+            .ok_or_else(|| {
+                anyhow!("FFmpeg not found — the host is still installing it, or place ffmpeg.exe next to brolink-host.exe")
+            })?;
         let enc = self
             .resolve_encoder(ffmpeg, &quality, cfg.monitor_index, &cfg.encoder)
             .await?;
@@ -537,8 +716,11 @@ impl Engine {
             hello.name,
             keys,
             enc,
+            quality.bitrate_kbps,
             cfg.enable_audio,
             cfg.enable_gamepad,
+            cfg.enable_clipboard,
+            cfg.adaptive_bitrate,
             self.status.clone(),
         )
     }
@@ -621,6 +803,16 @@ impl Engine {
     }
 }
 
+fn merge_upnp_wan(stun: Option<SocketAddr>, mapped: &PortMapping) -> SocketAddr {
+    if !mapped.external.ip().is_unspecified() {
+        return SocketAddr::V4(mapped.external);
+    }
+    match stun {
+        Some(s) => SocketAddr::new(s.ip(), mapped.external.port()),
+        None => SocketAddr::V4(mapped.external),
+    }
+}
+
 /// Resolve the configured relay to an address plus a fresh pairing token.
 fn resolve_relay(spec: &str) -> Option<RelayLink> {
     let spec = spec.trim();
@@ -671,10 +863,11 @@ struct LiveSession {
     peer: SocketAddr,
     client_name: String,
     keys: SessionKeys,
-    video_rx: crossbeam_channel::Receiver<forgelink_core::codec::EncodedFrame>,
+    video_rx: crossbeam_channel::Receiver<brolink_core::codec::EncodedFrame>,
     audio_rx: Option<crossbeam_channel::Receiver<AudioPacket>>,
     _video: VideoPipeline,
     _audio: Option<AudioCapture>,
+    enc: EncoderInfo,
     input: InputInjector,
     replay: ReplayWindow,
     status: Arc<Mutex<HostStatus>>,
@@ -685,6 +878,10 @@ struct LiveSession {
     window_start: Instant,
     last_client: Instant,
     scratch: Vec<u8>,
+    clipboard: Option<ClipboardBridge>,
+    last_clip: Instant,
+    abr: Option<AbrController>,
+    last_abr: Instant,
 }
 
 impl LiveSession {
@@ -694,12 +891,15 @@ impl LiveSession {
         client_name: String,
         keys: SessionKeys,
         enc: EncoderInfo,
+        bitrate_kbps: u32,
         enable_audio: bool,
         enable_gamepad: bool,
+        enable_clipboard: bool,
+        adaptive: bool,
         status: Arc<Mutex<HostStatus>>,
     ) -> Result<Self> {
         let (vtx, vrx) = crossbeam_channel::bounded(8);
-        let video = VideoPipeline::start(enc, vtx)?;
+        let video = VideoPipeline::start(enc.clone(), vtx)?;
         let (audio, audio_rx) = if enable_audio {
             let (atx, arx) = crossbeam_channel::bounded(64);
             match AudioCapture::start(atx) {
@@ -714,6 +914,10 @@ impl LiveSession {
         } else {
             (None, None)
         };
+        {
+            let mut st = status.lock();
+            st.path = classify_peer(peer);
+        }
         Ok(Self {
             peer,
             client_name,
@@ -722,6 +926,7 @@ impl LiveSession {
             audio_rx,
             _video: video,
             _audio: audio,
+            enc,
             input: InputInjector::new(enable_gamepad),
             replay: ReplayWindow::default(),
             status,
@@ -732,6 +937,10 @@ impl LiveSession {
             window_start: Instant::now(),
             last_client: Instant::now(),
             scratch: Vec::new(),
+            clipboard: enable_clipboard.then(ClipboardBridge::new),
+            last_clip: Instant::now(),
+            abr: adaptive.then(|| AbrController::new(bitrate_kbps, bitrate_kbps)),
+            last_abr: Instant::now() - Duration::from_secs(COOLDOWN_SECS),
         })
     }
 
@@ -790,6 +999,23 @@ impl LiveSession {
             self.bytes_window = 0;
             self.window_start = Instant::now();
         }
+        if self.last_clip.elapsed() >= CLIPBOARD_POLL {
+            self.last_clip = Instant::now();
+            if let Some(clip) = self.clipboard.as_mut() {
+                if let Some(msg) = clip.poll_outgoing() {
+                    let _ = send_sealed(
+                        transport,
+                        &self.keys,
+                        seq,
+                        PacketType::Control,
+                        0,
+                        &json_payload(&msg)?,
+                        self.peer,
+                    )
+                    .await;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -812,7 +1038,7 @@ impl LiveSession {
             }
             PacketType::Control => {
                 let msg: ControlMsg = json_from_slice(payload)?;
-                self.on_control(msg);
+                self.on_control(transport, seq, msg).await?;
             }
             PacketType::Ping => {
                 send_sealed(
@@ -832,29 +1058,74 @@ impl LiveSession {
         Ok(true)
     }
 
-    fn on_control(&mut self, msg: ControlMsg) {
+    async fn on_control(
+        &mut self,
+        _transport: &Transport,
+        _seq: &mut SeqCounter,
+        msg: ControlMsg,
+    ) -> Result<()> {
         match msg {
             ControlMsg::MouseCaptured { relative, captured } => {
                 self.input.set_relative(relative);
                 if !captured {
-                    // Releasing the mouse should not leave keys held down on
-                    // this machine.
                     self.input.release_all();
                 }
             }
             ControlMsg::ReleaseAllInput => self.input.release_all(),
-            // Bitrate and frame rate are baked into the ffmpeg command line, so
-            // they change on reconnect rather than mid-stream. Same for IDR:
-            // the short GOP recovers a corrupted picture within one second.
-            ControlMsg::SetBitrate { kbps } => {
-                tracing::debug!("client asked for {kbps} kbps; applies on reconnect")
-            }
+            ControlMsg::SetBitrate { kbps } => self.adapt_bitrate(kbps, "client request")?,
             ControlMsg::SetFps { fps } => {
                 tracing::debug!("client asked for {fps} fps; applies on reconnect")
             }
             ControlMsg::RequestIdr => tracing::debug!("client requested IDR; next GOP will serve"),
-            ControlMsg::Stats { .. } | ControlMsg::ClientQuality { .. } => {}
+            ControlMsg::Stats {
+                loss_pct, rtt_ms, ..
+            } => {
+                if let Some(abr) = self.abr.as_mut() {
+                    if let Some(kbps) = abr.observe(loss_pct, rtt_ms) {
+                        if self.last_abr.elapsed() >= Duration::from_secs(COOLDOWN_SECS) {
+                            self.adapt_bitrate(
+                                kbps,
+                                &format!("loss {loss_pct:.1}% rtt {rtt_ms:.0}ms"),
+                            )?;
+                        }
+                    }
+                }
+            }
+            ControlMsg::ClientQuality { bitrate_kbps, .. } => {
+                if bitrate_kbps > 0 {
+                    self.adapt_bitrate(bitrate_kbps, "quality preset")?;
+                }
+            }
+            ControlMsg::Clipboard { text } => {
+                if let Some(clip) = self.clipboard.as_mut() {
+                    clip.apply_remote(&text);
+                }
+            }
         }
+        Ok(())
+    }
+
+    fn adapt_bitrate(&mut self, kbps: u32, why: &str) -> Result<()> {
+        self.last_abr = Instant::now();
+        let next = self.enc.with_bitrate(kbps);
+        let (vtx, vrx) = crossbeam_channel::bounded(8);
+        let pipe = VideoPipeline::start(next.clone(), vtx)?;
+        self._video = pipe;
+        self.enc = next;
+        self.video_rx = vrx;
+        self.status
+            .lock()
+            .push_log(format!("Bitrate adapted to {kbps} kbps ({why})"));
+        Ok(())
+    }
+}
+
+fn classify_peer(peer: SocketAddr) -> String {
+    match peer.ip() {
+        std::net::IpAddr::V4(v4) if v4.is_loopback() || v4.is_private() => "LAN".into(),
+        std::net::IpAddr::V4(v4) if brolink_core::config::is_cgnat_v4(v4) => "Tailscale".into(),
+        std::net::IpAddr::V6(v6) if v6.is_loopback() => "LAN".into(),
+        _ => "Internet".into(),
     }
 }
 
@@ -907,6 +1178,45 @@ mod tests {
         assert_eq!(
             st.log.last().unwrap(),
             &format!("line {}", LOG_LINES * 3 - 1)
+        );
+    }
+
+    #[test]
+    fn upnp_mapping_prefers_the_routers_public_ip() {
+        let stun: SocketAddr = "203.0.113.9:47850".parse().unwrap();
+        let mapped = PortMapping {
+            external: "198.51.100.7:40000".parse::<SocketAddrV4>().unwrap(),
+            via: brolink_core::upnp::MappingVia::Upnp,
+        };
+        assert_eq!(
+            merge_upnp_wan(Some(stun), &mapped),
+            "198.51.100.7:40000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn nat_pmp_without_an_ip_keeps_stuns_address_and_the_mapped_port() {
+        let stun: SocketAddr = "203.0.113.9:47850".parse().unwrap();
+        let mapped = PortMapping {
+            external: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 40000),
+            via: brolink_core::upnp::MappingVia::NatPmp,
+        };
+        assert_eq!(
+            merge_upnp_wan(Some(stun), &mapped),
+            "203.0.113.9:40000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn classify_peer_names_the_path() {
+        assert_eq!(classify_peer("192.168.1.5:47850".parse().unwrap()), "LAN");
+        assert_eq!(
+            classify_peer("100.64.0.30:47850".parse().unwrap()),
+            "Tailscale"
+        );
+        assert_eq!(
+            classify_peer("203.0.113.9:47850".parse().unwrap()),
+            "Internet"
         );
     }
 

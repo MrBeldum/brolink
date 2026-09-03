@@ -1,4 +1,4 @@
-# Make this PC reachable by a ForgeLink client, with the smallest change that
+# Make this PC reachable by a BroLink client, with the smallest change that
 # works. Run from an ELEVATED PowerShell.
 #
 # Two things block a client, and neither is obvious from the host's own logs:
@@ -37,7 +37,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 if (-not $HostExe) {
     $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-    $HostExe = Join-Path $root "target\release\forgelink-host.exe"
+    $HostExe = Join-Path $root "target\release\brolink-host.exe"
 }
 if (-not (Test-Path $HostExe)) { throw "no host binary at $HostExe -- pass -HostExe" }
 $HostExe = (Resolve-Path $HostExe).Path
@@ -61,7 +61,7 @@ if ($blocks.Count -eq 0) {
 
 # 2. An inbound allow rule for the stream itself.
 $scope = if ($Wan) { "Any" } else { "LocalSubnet" }
-$ruleName = "ForgeLink Host (UDP $Port)"
+$ruleName = "BroLink Host (UDP $Port)"
 $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Host "replacing the existing '$ruleName' rule"

@@ -67,8 +67,8 @@ try {
     }
 
     $BinDir = Join-Path $Root "target\$Configuration"
-    $HostExe = Join-Path $BinDir "forgelink-host.exe"
-    $ClientExe = Join-Path $BinDir "forgelink-client.exe"
+    $HostExe = Join-Path $BinDir "brolink-host.exe"
+    $ClientExe = Join-Path $BinDir "brolink-client.exe"
     foreach ($exe in @($HostExe, $ClientExe)) {
         if (-not (Test-Path $exe)) { throw "missing $exe -- build the workspace first" }
     }
@@ -92,7 +92,7 @@ try {
         $ready = $false
         while ((Get-Date) -lt $deadline) {
             if ($hp.HasExited) { throw "host exited early with code $($hp.ExitCode)" }
-            if ((Test-Path $HostOut) -and (Select-String -Path $HostOut -Pattern "ForgeLink ticket" -Quiet)) {
+            if ((Test-Path $HostOut) -and (Select-String -Path $HostOut -Pattern "BroLink ticket" -Quiet)) {
                 $ready = $true
                 break
             }
@@ -100,9 +100,9 @@ try {
         }
         if (-not $ready) { throw "host did not publish a ticket within 45s" }
 
-        # The ticket is printed on the line after the "ForgeLink ticket:" header.
+        # The ticket is printed on the line after the "BroLink ticket:" header.
         $lines = Get-Content $HostOut
-        $idx = ($lines | Select-String -Pattern "ForgeLink ticket" | Select-Object -First 1).LineNumber
+        $idx = ($lines | Select-String -Pattern "BroLink ticket" | Select-Object -First 1).LineNumber
         $Ticket = ($lines[$idx]).Trim()
         if (-not $Ticket) { throw "could not read the ticket from the host output" }
         Write-Host "ticket $($Ticket.Substring(0, [Math]::Min(24, $Ticket.Length)))..."

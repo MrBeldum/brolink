@@ -31,7 +31,7 @@ impl SessionKeys {
         salt[16..].copy_from_slice(server_nonce);
         let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
         let mut okm = [0u8; 64];
-        hk.expand(b"forgelink v1 session", &mut okm)
+        hk.expand(b"brolink v1 session", &mut okm)
             .map_err(|_| anyhow!("hkdf expand"))?;
         let c2s = ChaCha20Poly1305::new(Key::from_slice(&okm[..32]));
         let s2c = ChaCha20Poly1305::new(Key::from_slice(&okm[32..]));

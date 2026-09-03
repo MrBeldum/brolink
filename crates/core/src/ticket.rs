@@ -1,14 +1,23 @@
 //! Human-pasteable connection tickets.
 //!
-//! Format: `flk1_` + unpadded base32 of a compact binary blob.
+//! Format: `blk1_` + unpadded base32 of a compact binary blob.
 //!
-//! Version 2 (current):
+//! Version 2 (IPv4-only, still emitted when every address is v4):
 //!   version u8 = 2
 //!   host_id [32]
 //!   name_len u8 + name utf8
 //!   candidate_count u8
 //!     repeated: kind u8 | ip [4] | port u16
 //!   relay u8   (0 = none, 1 = followed by ip [4] | port u16 | token [16])
+//!
+//! Version 3 (emitted when any address is IPv6):
+//!   version u8 = 3
+//!   host_id [32]
+//!   name_len u8 + name utf8
+//!   candidate_count u8
+//!     repeated: kind u8 | family u8 (4|6) | ip [4|16] | port u16
+//!   relay u8
+//!     if 1: family u8 | ip | port u16 | token [16]
 //!
 //! Version 1 (still decoded, no longer emitted) carried only a LAN address and
 //! an optional WAN address.
@@ -17,9 +26,9 @@ use crate::identity::Identity;
 use anyhow::{anyhow, bail, Result};
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 
-pub const TICKET_PREFIX: &str = "flk1_";
+pub const TICKET_PREFIX: &str = "blk1_";
 /// A name longer than this is truncated when the ticket is built.
 pub const MAX_NAME_BYTES: usize = 48;
 /// Refuse absurd tickets early rather than allocating from attacker input.
@@ -55,13 +64,13 @@ impl CandidateKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub kind: CandidateKind,
-    pub addr: SocketAddrV4,
+    pub addr: SocketAddr,
 }
 
 /// A relay rendezvous: both peers send to `addr` prefixed with `token`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayHint {
-    pub addr: SocketAddrV4,
+    pub addr: SocketAddr,
     pub token: [u8; 16],
 }
 
@@ -92,40 +101,80 @@ impl Ticket {
         }
     }
 
+    fn uses_v6(&self) -> bool {
+        self.candidates.iter().any(|c| c.addr.is_ipv6())
+            || self.relay.as_ref().is_some_and(|r| r.addr.is_ipv6())
+    }
+
     pub fn encode(&self) -> String {
-        let mut buf = Vec::with_capacity(96);
-        buf.push(2u8);
+        let raw = if self.uses_v6() {
+            self.encode_v3()
+        } else {
+            self.encode_v2()
+        };
+        let enc = BASE32_NOPAD.encode(&raw).to_ascii_lowercase();
+        format!("{TICKET_PREFIX}{enc}")
+    }
+
+    fn encode_header(&self, version: u8, buf: &mut Vec<u8>) {
+        buf.push(version);
         buf.extend_from_slice(&self.host_id);
         let name = self.name.as_bytes();
         let n = name.len().min(MAX_NAME_BYTES);
-        // `n` may land mid-codepoint; the decoder is lossy, so only bytes matter here.
         buf.push(n as u8);
         buf.extend_from_slice(&name[..n]);
+    }
+
+    fn encode_v2(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(96);
+        self.encode_header(2, &mut buf);
+        let cands: Vec<&Candidate> = self
+            .candidates
+            .iter()
+            .filter(|c| c.addr.is_ipv4())
+            .take(MAX_CANDIDATES)
+            .collect();
+        buf.push(cands.len() as u8);
+        for c in cands {
+            buf.push(c.kind as u8);
+            write_v4(&mut buf, c.addr);
+        }
+        match &self.relay {
+            Some(r) if r.addr.is_ipv4() => {
+                buf.push(1);
+                write_v4(&mut buf, r.addr);
+                buf.extend_from_slice(&r.token);
+            }
+            _ => buf.push(0),
+        }
+        buf
+    }
+
+    fn encode_v3(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(160);
+        self.encode_header(3, &mut buf);
         let cands = &self.candidates[..self.candidates.len().min(MAX_CANDIDATES)];
         buf.push(cands.len() as u8);
         for c in cands {
             buf.push(c.kind as u8);
-            buf.extend_from_slice(&c.addr.ip().octets());
-            buf.extend_from_slice(&c.addr.port().to_le_bytes());
+            write_addr(&mut buf, c.addr);
         }
         match &self.relay {
             Some(r) => {
                 buf.push(1);
-                buf.extend_from_slice(&r.addr.ip().octets());
-                buf.extend_from_slice(&r.addr.port().to_le_bytes());
+                write_addr(&mut buf, r.addr);
                 buf.extend_from_slice(&r.token);
             }
             None => buf.push(0),
         }
-        let enc = BASE32_NOPAD.encode(&buf).to_ascii_lowercase();
-        format!("{TICKET_PREFIX}{enc}")
+        buf
     }
 
     pub fn decode(s: &str) -> Result<Self> {
         let s = s.trim().replace([' ', '\n', '\r', '\t', '-'], "");
         let rest = s
             .strip_prefix(TICKET_PREFIX)
-            .or_else(|| s.strip_prefix("FLK1_"))
+            .or_else(|| s.strip_prefix("BLK1_"))
             .unwrap_or(&s);
         if rest.is_empty() {
             bail!("empty ticket");
@@ -136,6 +185,7 @@ impl Ticket {
         match raw.first() {
             Some(1) => decode_v1(&raw),
             Some(2) => decode_v2(&raw),
+            Some(3) => decode_v3(&raw),
             Some(v) => bail!("unsupported ticket version {v}"),
             None => bail!("empty ticket"),
         }
@@ -150,19 +200,23 @@ impl Ticket {
             if c.addr.ip().is_unspecified() || c.addr.port() == 0 {
                 continue;
             }
-            let addr = SocketAddr::V4(c.addr);
-            if !out.contains(&addr) {
-                out.push(addr);
+            if !out.contains(&c.addr) {
+                out.push(c.addr);
             }
         }
         out
     }
 
     pub fn lan(&self) -> Option<SocketAddrV4> {
-        self.candidates
-            .iter()
-            .find(|c| c.kind == CandidateKind::Lan)
-            .map(|c| c.addr)
+        self.candidates.iter().find_map(|c| {
+            if c.kind != CandidateKind::Lan {
+                return None;
+            }
+            match c.addr {
+                SocketAddr::V4(v4) => Some(v4),
+                SocketAddr::V6(_) => None,
+            }
+        })
     }
 
     /// The ticket split into dash-separated groups so it survives being read aloud.
@@ -201,12 +255,12 @@ fn decode_v1(raw: &[u8]) -> Result<Ticket> {
     let name = String::from_utf8_lossy(&raw[47..47 + nlen]).into_owned();
     let mut candidates = vec![Candidate {
         kind: CandidateKind::Lan,
-        addr: lan,
+        addr: SocketAddr::V4(lan),
     }];
     if flags & 1 != 0 && !wan_ip.is_unspecified() {
         candidates.push(Candidate {
             kind: CandidateKind::Wan,
-            addr: SocketAddrV4::new(wan_ip, wan_port),
+            addr: SocketAddr::V4(SocketAddrV4::new(wan_ip, wan_port)),
         });
     }
     Ok(Ticket {
@@ -238,7 +292,7 @@ fn decode_v2(raw: &[u8]) -> Result<Ticket> {
         let kind = CandidateKind::from_u8(kind).unwrap_or(CandidateKind::Wan);
         candidates.push(Candidate {
             kind,
-            addr: SocketAddrV4::new(ip, port),
+            addr: SocketAddr::V4(SocketAddrV4::new(ip, port)),
         });
     }
     let relay = if cur.u8()? == 1 {
@@ -247,7 +301,7 @@ fn decode_v2(raw: &[u8]) -> Result<Ticket> {
         let port = cur.u16()?;
         let token: [u8; 16] = cur.take(16)?.try_into().expect("16 bytes");
         Some(RelayHint {
-            addr: SocketAddrV4::new(ip, port),
+            addr: SocketAddr::V4(SocketAddrV4::new(ip, port)),
             token,
         })
     } else {
@@ -259,6 +313,79 @@ fn decode_v2(raw: &[u8]) -> Result<Ticket> {
         relay,
         name,
     })
+}
+
+fn decode_v3(raw: &[u8]) -> Result<Ticket> {
+    let mut cur = Cursor::new(raw);
+    cur.skip(1)?;
+    let host_id: [u8; 32] = cur.take(32)?.try_into().expect("32 bytes");
+    let nlen = cur.u8()? as usize;
+    let name = String::from_utf8_lossy(cur.take(nlen)?).into_owned();
+    let count = cur.u8()? as usize;
+    if count > MAX_CANDIDATES {
+        bail!("ticket lists {count} candidates (max {MAX_CANDIDATES})");
+    }
+    let mut candidates = Vec::with_capacity(count);
+    for _ in 0..count {
+        let kind = CandidateKind::from_u8(cur.u8()?).unwrap_or(CandidateKind::Wan);
+        let addr = read_addr(&mut cur)?;
+        candidates.push(Candidate { kind, addr });
+    }
+    let relay = if cur.u8()? == 1 {
+        let addr = read_addr(&mut cur)?;
+        let token: [u8; 16] = cur.take(16)?.try_into().expect("16 bytes");
+        Some(RelayHint { addr, token })
+    } else {
+        None
+    };
+    Ok(Ticket {
+        host_id,
+        candidates,
+        relay,
+        name,
+    })
+}
+
+fn write_v4(buf: &mut Vec<u8>, addr: SocketAddr) {
+    let SocketAddr::V4(v4) = addr else {
+        return;
+    };
+    buf.extend_from_slice(&v4.ip().octets());
+    buf.extend_from_slice(&v4.port().to_le_bytes());
+}
+
+fn write_addr(buf: &mut Vec<u8>, addr: SocketAddr) {
+    match addr {
+        SocketAddr::V4(v4) => {
+            buf.push(4);
+            buf.extend_from_slice(&v4.ip().octets());
+            buf.extend_from_slice(&v4.port().to_le_bytes());
+        }
+        SocketAddr::V6(v6) => {
+            buf.push(6);
+            buf.extend_from_slice(&v6.ip().octets());
+            buf.extend_from_slice(&v6.port().to_le_bytes());
+        }
+    }
+}
+
+fn read_addr(cur: &mut Cursor<'_>) -> Result<SocketAddr> {
+    match cur.u8()? {
+        4 => {
+            let ip = cur.take(4)?;
+            let ip = Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
+            let port = cur.u16()?;
+            Ok(SocketAddr::from((ip, port)))
+        }
+        6 => {
+            let b = cur.take(16)?;
+            let mut oct = [0u8; 16];
+            oct.copy_from_slice(b);
+            let port = cur.u16()?;
+            Ok(SocketAddr::from((Ipv6Addr::from(oct), port)))
+        }
+        f => bail!("unknown address family {f}"),
+    }
 }
 
 /// Bounds-checked reader so a malformed ticket returns an error instead of panicking.
@@ -312,7 +439,7 @@ pub fn parse_endpoint(s: &str, default_port: u16) -> Result<SocketAddr> {
             return Ok(SocketAddr::new(ip, p));
         }
     }
-    bail!("cannot parse endpoint '{s}' (expected IP, IP:port, or flk1_ ticket)")
+    bail!("cannot parse endpoint '{s}' (expected IP, IP:port, or blk1_ ticket)")
 }
 
 #[cfg(test)]
@@ -320,8 +447,8 @@ mod tests {
     use super::*;
     use crate::identity::Identity;
 
-    fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddrV4 {
-        SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port)
+    fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
     }
 
     #[test]
@@ -351,7 +478,7 @@ mod tests {
         );
         let back = Ticket::decode(&t.display_code()).unwrap();
         assert_eq!(back, t);
-        assert!(t.display_code().starts_with("flk1_"));
+        assert!(t.display_code().starts_with("blk1_"));
     }
 
     #[test]
@@ -383,8 +510,8 @@ mod tests {
         );
         let addrs = t.candidate_addrs();
         assert_eq!(addrs.len(), 2);
-        assert_eq!(addrs[0], SocketAddr::V4(v4(192, 168, 1, 20, 47850)));
-        assert_eq!(addrs[1], SocketAddr::V4(v4(203, 0, 113, 9, 47850)));
+        assert_eq!(addrs[0], v4(192, 168, 1, 20, 47850));
+        assert_eq!(addrs[1], v4(203, 0, 113, 9, 47850));
     }
 
     #[test]
@@ -407,7 +534,10 @@ mod tests {
         assert_eq!(t.name, "PC");
         assert_eq!(t.host_id, [9u8; 32]);
         assert_eq!(t.candidates.len(), 2);
-        assert_eq!(t.lan(), Some(v4(192, 168, 0, 5, 47850)));
+        assert_eq!(
+            t.lan(),
+            Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 5), 47850))
+        );
         assert!(t.relay.is_none());
     }
 
@@ -435,7 +565,7 @@ mod tests {
 
     #[test]
     fn garbage_never_panics() {
-        for s in ["", "flk1_", "flk1_!!!!", "not a ticket", "flk1_aaaaaaaa"] {
+        for s in ["", "blk1_", "blk1_!!!!", "not a ticket", "blk1_aaaaaaaa"] {
             let _ = Ticket::decode(s);
         }
     }
@@ -444,11 +574,11 @@ mod tests {
     fn parse_endpoint_accepts_ip_port_and_ticket() {
         assert_eq!(
             parse_endpoint("192.168.1.5", 47850).unwrap(),
-            SocketAddr::V4(v4(192, 168, 1, 5, 47850))
+            v4(192, 168, 1, 5, 47850)
         );
         assert_eq!(
             parse_endpoint("192.168.1.5:9000", 47850).unwrap(),
-            SocketAddr::V4(v4(192, 168, 1, 5, 9000))
+            v4(192, 168, 1, 5, 9000)
         );
         let id = Identity::generate();
         let t = Ticket::new(
@@ -462,8 +592,35 @@ mod tests {
         );
         assert_eq!(
             parse_endpoint(&t.display_code(), 47850).unwrap(),
-            SocketAddr::V4(v4(10, 1, 2, 3, 47850))
+            v4(10, 1, 2, 3, 47850)
         );
         assert!(parse_endpoint("nonsense", 47850).is_err());
+    }
+
+    #[test]
+    fn ipv6_tickets_roundtrip_as_v3() {
+        let id = Identity::generate();
+        let v6: SocketAddr = "[2001:db8::10]:47850".parse().unwrap();
+        let t = Ticket::new(
+            &id,
+            vec![
+                Candidate {
+                    kind: CandidateKind::Lan,
+                    addr: v4(10, 0, 0, 5, 47850),
+                },
+                Candidate {
+                    kind: CandidateKind::Wan,
+                    addr: v6,
+                },
+            ],
+            None,
+            "PC",
+        );
+        assert!(t.uses_v6());
+        let back = Ticket::decode(&t.encode()).unwrap();
+        assert_eq!(back, t);
+        let addrs = back.candidate_addrs();
+        assert!(addrs.contains(&v6));
+        assert!(addrs.contains(&v4(10, 0, 0, 5, 47850)));
     }
 }

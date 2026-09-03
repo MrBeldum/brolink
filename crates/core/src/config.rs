@@ -128,9 +128,18 @@ pub struct HostConfig {
     pub allow_unpaired_with_pin: bool,
     pub auto_trust: bool,
     pub bind: String,
-    /// `host:port` of a `forgelink-relay` to advertise in the ticket. Empty
+    /// `host:port` of a `brolink-relay` to advertise in the ticket. Empty
     /// disables relaying.
     pub relay: String,
+    /// Ask the home router (UPnP / NAT-PMP) to forward the UDP port so a Mac
+    /// on another network can reach this PC without Tailscale.
+    pub enable_upnp: bool,
+    /// Launch the host when this Windows user signs in.
+    pub start_with_windows: bool,
+    /// Bidirectional clipboard with the client.
+    pub enable_clipboard: bool,
+    /// Restart the encoder at a new bitrate when the client reports loss.
+    pub adaptive_bitrate: bool,
 }
 
 impl Default for HostConfig {
@@ -148,8 +157,20 @@ impl Default for HostConfig {
             auto_trust: false,
             bind: "0.0.0.0".into(),
             relay: String::new(),
+            enable_upnp: true,
+            start_with_windows: false,
+            enable_clipboard: true,
+            adaptive_bitrate: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedHost {
+    pub name: String,
+    pub ticket: String,
+    #[serde(default)]
+    pub last_connected_unix: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +182,11 @@ pub struct ClientConfig {
     pub vsync: bool,
     /// Output gain applied to received audio, 0.0..=2.0.
     pub volume: f32,
+    /// PCs this Mac has connected to, most-recent first.
+    pub saved_hosts: Vec<SavedHost>,
+    pub auto_reconnect: bool,
+    pub enable_clipboard: bool,
+    pub show_hud: bool,
 }
 
 impl Default for ClientConfig {
@@ -171,12 +197,44 @@ impl Default for ClientConfig {
             quality: StreamQuality::competitive(),
             vsync: false,
             volume: 1.0,
+            saved_hosts: Vec::new(),
+            auto_reconnect: true,
+            enable_clipboard: true,
+            show_hud: true,
         }
     }
 }
 
+impl ClientConfig {
+    /// Remember a successful connection, moving it to the front of the list.
+    pub fn remember_host(&mut self, name: &str, ticket: &str) {
+        let ticket = ticket.trim();
+        if ticket.is_empty() {
+            return;
+        }
+        self.saved_hosts.retain(|h| h.ticket != ticket);
+        self.saved_hosts.insert(
+            0,
+            SavedHost {
+                name: name.trim().to_string(),
+                ticket: ticket.to_string(),
+                last_connected_unix: crate::proto::now_us() / 1_000_000,
+            },
+        );
+        const MAX_SAVED: usize = 16;
+        if self.saved_hosts.len() > MAX_SAVED {
+            self.saved_hosts.truncate(MAX_SAVED);
+        }
+        self.last_ticket = ticket.to_string();
+    }
+
+    pub fn forget_host(&mut self, ticket: &str) {
+        self.saved_hosts.retain(|h| h.ticket != ticket);
+    }
+}
+
 fn default_host_name() -> String {
-    hostname::get_opt().unwrap_or_else(|| "ForgeLink-PC".into())
+    hostname::get_opt().unwrap_or_else(|| "BroLink-PC".into())
 }
 
 mod hostname {
@@ -339,6 +397,43 @@ pub fn primary_lan_v4() -> Option<std::net::Ipv4Addr> {
     }
 }
 
+/// Globally-routable IPv6 addresses on this machine (not link-local, not ULA).
+///
+/// A host with a real IPv6 prefix can be reached from anywhere without UPnP,
+/// because there is no NAT in the way.
+pub fn global_v6() -> Vec<std::net::Ipv6Addr> {
+    use local_ip_address::list_afinet_netifas;
+    let Ok(ifaces) = list_afinet_netifas() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (_name, ip) in ifaces {
+        let std::net::IpAddr::V6(v6) = ip else {
+            continue;
+        };
+        if is_global_v6(v6) && !out.contains(&v6) {
+            out.push(v6);
+        }
+    }
+    out
+}
+
+fn is_global_v6(ip: std::net::Ipv6Addr) -> bool {
+    // 2000::/3 is the global unicast range. Skip loopback, link-local (fe80::/10),
+    // ULA (fc00::/7), and multicast.
+    let segs = ip.segments();
+    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+        return false;
+    }
+    if (segs[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    if (segs[0] & 0xfe00) == 0xfc00 {
+        return false;
+    }
+    (segs[0] & 0xe000) == 0x2000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +522,8 @@ mod tests {
         assert!(h.relay.is_empty());
         let c: ClientConfig = toml::from_str("").expect("client config from empty file");
         assert_eq!(c.volume, 1.0);
+        assert!(c.auto_reconnect);
+        assert!(h.enable_upnp);
     }
 
     #[test]
@@ -443,7 +540,7 @@ mod tests {
         assert_eq!(back.quality.bitrate_kbps, h.quality.bitrate_kbps);
 
         let c = ClientConfig {
-            last_ticket: "flk1_xyz".into(),
+            last_ticket: "blk1_xyz".into(),
             volume: 0.25,
             ..Default::default()
         };
@@ -463,5 +560,29 @@ mod tests {
     #[test]
     fn host_name_is_never_empty() {
         assert!(!default_host_name().trim().is_empty());
+    }
+
+    #[test]
+    fn remembering_a_host_dedupes_and_caps() {
+        let mut c = ClientConfig::default();
+        c.remember_host("Office", "blk1_aaa");
+        c.remember_host("Office", "blk1_aaa");
+        c.remember_host("Home", "blk1_bbb");
+        assert_eq!(c.saved_hosts.len(), 2);
+        assert_eq!(c.saved_hosts[0].name, "Home", "most recent first");
+        assert_eq!(c.last_ticket, "blk1_bbb");
+        c.forget_host("blk1_bbb");
+        assert_eq!(c.saved_hosts.len(), 1);
+        assert_eq!(c.saved_hosts[0].ticket, "blk1_aaa");
+    }
+
+    #[test]
+    fn global_v6_filter_is_exact() {
+        use std::net::Ipv6Addr;
+        assert!(is_global_v6("2001:db8::1".parse().unwrap()));
+        assert!(!is_global_v6(Ipv6Addr::LOCALHOST));
+        assert!(!is_global_v6("fe80::1".parse().unwrap()));
+        assert!(!is_global_v6("fd12:3456::1".parse().unwrap()));
+        assert!(!is_global_v6("ff02::1".parse().unwrap()));
     }
 }

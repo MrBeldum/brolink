@@ -2,46 +2,42 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  windows:
+  test-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: formatting
-        run: cargo fmt --all --check
+      - name: fmt
+        run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # The whole workspace, not just core: the host and client crates hold
-      # the input mapping, audio resampling and encoder flags, and testing
-      # only core let regressions there through.
       - name: test
         run: cargo test --workspace
-      - name: build
-        run: cargo build --release --workspace
+      - name: release build
+        run: cargo build --workspace --release
 
-  macos:
+  test-macos:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: clippy (core + client)
-        run: cargo clippy -p forgelink-core -p forgelink-client --all-targets -- -D warnings
-      - name: test
-        run: cargo test -p forgelink-core -p forgelink-client
-      - name: build client
-        run: cargo build --release -p forgelink-client --target aarch64-apple-darwin
+      - name: test client + core + relay
+        run: cargo test -p brolink-core -p brolink-client -p brolink-relay
+      - name: release client
+        run: cargo build --release -p brolink-client --target aarch64-apple-darwin
+      - name: bundle
+        run: ./scripts/bundle-macos.sh

@@ -1,14 +1,14 @@
-//! Map egui / gilrs input onto ForgeLink `InputEvent`s (Windows scancodes + XInput).
+//! Map egui / gilrs input onto BroLink `InputEvent`s (Windows scancodes + XInput).
 
+use brolink_core::proto::InputEvent;
 use egui::{InputState, Key, PointerButton};
-use forgelink_core::proto::InputEvent;
 use gilrs::{Axis, Button, Gilrs};
 
 /// Keys the client swallows because they drive the client UI itself. Sending
 /// them on would mean pressing F8 to release the mouse also pressed F8 in the
 /// game you were playing.
 fn is_client_hotkey(key: Key, mods: &egui::Modifiers) -> bool {
-    matches!(key, Key::F8 | Key::F11) || (mods.ctrl && mods.shift && key == Key::Q)
+    matches!(key, Key::F8 | Key::F11 | Key::F7) || (mods.ctrl && mods.shift && key == Key::Q)
 }
 
 /// Modifier scancode/virtual-key pairs, in the order they are reported.

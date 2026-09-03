@@ -1,8 +1,8 @@
-//! Tiny UDP relay for two ForgeLink peers that cannot hole-punch.
+//! Tiny UDP relay for two BroLink peers that cannot hole-punch.
 //!
 //! Wire format is `16-byte token || payload`. The first two distinct sources
 //! sharing a token are paired; each subsequent datagram from one is forwarded
-//! to the other with the token stripped, so peers speak the ordinary ForgeLink
+//! to the other with the token stripped, so peers speak the ordinary BroLink
 //! protocol inside the tunnel and the relay never sees plaintext. It cannot:
 //! everything inside the tunnel is already authenticated and encrypted
 //! end-to-end, so a relay operator can drop or delay traffic but not read or
@@ -11,15 +11,15 @@
 //! Run it on any VPS with a public UDP port:
 //!
 //! ```text
-//! forgelink-relay --bind 0.0.0.0:47851
+//! brolink-relay --bind 0.0.0.0:47851
 //! ```
 //!
 //! then start the host with `--relay your.vps:47851`. The relay address and
 //! token travel inside the ticket, so clients pick it up automatically.
 
 use anyhow::{Context, Result};
+use brolink_core::proto::MAX_DATAGRAM;
 use clap::Parser;
-use forgelink_core::proto::MAX_DATAGRAM;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -37,9 +37,9 @@ const GC_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "forgelink-relay",
+    name = "brolink-relay",
     version,
-    about = "Optional UDP relay for ForgeLink when both peers are behind hard NAT"
+    about = "Optional UDP relay for BroLink when both peers are behind hard NAT"
 )]
 struct Args {
     /// Address to listen on.
@@ -217,7 +217,7 @@ async fn main() -> Result<()> {
         .map(|a| a.to_string())
         .unwrap_or_else(|_| args.bind.clone());
     tracing::info!(
-        "ForgeLink relay listening on {listening} (max {} sessions)",
+        "BroLink relay listening on {listening} (max {} sessions)",
         args.max_sessions
     );
 

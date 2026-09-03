@@ -1,8 +1,8 @@
 //! H.264 decode via OpenH264, into reusable RGBA buffers.
 
 use anyhow::{anyhow, Result};
-use forgelink_core::codec::EncodedFrame;
-use forgelink_core::yuv;
+use brolink_core::codec::EncodedFrame;
+use brolink_core::yuv;
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 use parking_lot::Mutex;

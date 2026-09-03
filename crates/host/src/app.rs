@@ -1,10 +1,11 @@
 //! Host control panel.
 
 use crate::engine::{Engine, HostStatus};
-use eframe::egui;
-use forgelink_core::config::{
+use crate::windows_setup;
+use brolink_core::config::{
     HostConfig, QualityPreset, StreamQuality, MAX_BITRATE_KBPS, MAX_FPS, MIN_BITRATE_KBPS, MIN_FPS,
 };
+use eframe::egui;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,8 +50,8 @@ impl eframe::App for HostApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                ui.heading("ForgeLink Host");
-                ui.label(egui::RichText::new("  Remote Play").weak());
+                ui.heading("BroLink Host");
+                ui.label(egui::RichText::new("  Your PC, from your Mac").weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
                     status_pill(ui, &status);
@@ -76,7 +77,19 @@ impl eframe::App for HostApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
+                if !status.ffmpeg_ok {
+                    ui.add_space(8.0);
+                    card(ui, "Encoder setup", |ui| {
+                        ui.label(
+                            "FFmpeg is required to capture this desktop. The host downloads it \
+                             automatically the first time; leave this window open until the log \
+                             says it is ready. You can also drop ffmpeg.exe next to the app.",
+                        );
+                    });
+                }
                 self.ticket_card(ui, &status);
+                ui.add_space(12.0);
+                self.internet_card(ui, &status);
                 if let Some(pin) = status.pending_pin.clone() {
                     ui.add_space(12.0);
                     card(ui, "Pairing PIN", |ui| {
@@ -90,6 +103,8 @@ impl eframe::App for HostApp {
                 }
                 ui.add_space(12.0);
                 self.session_card(ui, &status);
+                ui.add_space(12.0);
+                self.paired_card(ui, &status);
                 ui.add_space(12.0);
                 self.quality_card(ui, &status);
                 ui.add_space(12.0);
@@ -115,8 +130,8 @@ impl HostApp {
     fn ticket_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
         card(ui, "Connect from your Mac", |ui| {
             ui.label(
-                "On the client, paste this ticket. It carries every address this PC \
-                 can be reached on — LAN, public (STUN), Tailscale, and relay.",
+                "On your Mac, paste this ticket and click Connect. It carries every \
+                 address this PC can be reached on.",
             );
             ui.add_space(8.0);
             let mut ticket = if status.ticket_display.is_empty() {
@@ -168,7 +183,51 @@ impl HostApp {
             if let Some(relay) = status.relay {
                 kv(ui, "Relay", relay.to_string());
             }
+            if let Some(upnp) = &status.upnp {
+                kv(ui, "Port mapping", upnp.clone());
+            }
         });
+    }
+
+    fn internet_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
+        card(ui, "Internet access", |ui| {
+            ui.label(&status.internet);
+            ui.add_space(6.0);
+            if ui
+                .checkbox(
+                    &mut self.cfg.enable_upnp,
+                    "Ask my router to open the port (UPnP / NAT-PMP)",
+                )
+                .changed()
+            {
+                self.dirty = true;
+            }
+            ui.weak(
+                "If this stays on “local network only”, add a relay below or install Tailscale \
+                 on both machines. CGNAT (many mobile ISPs) cannot be mapped.",
+            );
+        });
+    }
+
+    fn paired_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
+        if status.paired.is_empty() {
+            return;
+        }
+        let mut revoke = None;
+        card(ui, "Paired Macs", |ui| {
+            for (name, hex) in &status.paired {
+                ui.horizontal(|ui| {
+                    ui.strong(name);
+                    ui.weak(&hex[..hex.len().min(12)]);
+                    if ui.small_button("Revoke").clicked() {
+                        revoke = Some(hex.clone());
+                    }
+                });
+            }
+        });
+        if let Some(hex) = revoke {
+            self.engine.revoke_client(hex);
+        }
     }
 
     fn session_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
@@ -190,8 +249,14 @@ impl HostApp {
                     );
                 }
                 None => {
-                    ui.label("Waiting for a client… keep this window open while you play.");
+                    ui.label("Waiting for a Mac… keep this window open (or Start with Windows).");
                 }
+            }
+            if !status.path.is_empty() {
+                kv(ui, "Path", status.path.clone());
+            }
+            if status.client.is_some() && ui.button("Disconnect Mac").clicked() {
+                self.engine.kick_client();
             }
             if let Some(err) = &status.last_error {
                 ui.colored_label(egui::Color32::from_rgb(248, 81, 73), err);
@@ -273,6 +338,37 @@ impl HostApp {
                 self.dirty = true;
             }
             if ui
+                .checkbox(&mut self.cfg.enable_clipboard, "Share the clipboard")
+                .changed()
+            {
+                self.dirty = true;
+            }
+            if ui
+                .checkbox(
+                    &mut self.cfg.adaptive_bitrate,
+                    "Adapt bitrate when the Mac reports loss",
+                )
+                .changed()
+            {
+                self.dirty = true;
+            }
+            if ui
+                .checkbox(
+                    &mut self.cfg.start_with_windows,
+                    "Start with Windows (this user)",
+                )
+                .changed()
+            {
+                self.dirty = true;
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Err(e) =
+                        windows_setup::set_start_with_windows(self.cfg.start_with_windows, &exe)
+                    {
+                        tracing::warn!("start with Windows: {e:#}");
+                    }
+                }
+            }
+            if ui
                 .checkbox(
                     &mut self.cfg.auto_trust,
                     "Skip the PIN for new clients (LAN only — anyone who can reach this PC can connect)",
@@ -349,6 +445,8 @@ fn kv(ui: &mut egui::Ui, k: &str, v: String) {
 fn status_pill(ui: &mut egui::Ui, st: &HostStatus) {
     let (label, color) = if st.streaming {
         ("STREAMING", egui::Color32::from_rgb(63, 185, 80))
+    } else if !st.ffmpeg_ok {
+        ("NEEDS SETUP", egui::Color32::from_rgb(248, 81, 73))
     } else if st.running {
         ("READY", GOLD)
     } else {

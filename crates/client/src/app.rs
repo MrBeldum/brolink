@@ -1,17 +1,18 @@
 //! Client lobby + stream view.
 
+use crate::clipboard::ClipboardBridge;
 use crate::decode::VideoSink;
 use crate::input_map::InputCollector;
 use crate::session::{ClientCmd, ClientEvent, ConnectRequest};
+use brolink_core::config::{ClientConfig, QualityPreset, StreamQuality};
+use brolink_core::discovery::{decode_beacon, join_multicast, prune, upsert, DiscoveredHost};
+use brolink_core::identity::Identity;
+use brolink_core::net::bind_udp_blocking_reuse;
+use brolink_core::proto::{ControlMsg, DEFAULT_PORT};
 use eframe::egui;
-use forgelink_core::config::{ClientConfig, QualityPreset, StreamQuality};
-use forgelink_core::discovery::{decode_beacon, join_multicast, prune, upsert, DiscoveredHost};
-use forgelink_core::identity::Identity;
-use forgelink_core::net::bind_udp_blocking_reuse;
-use forgelink_core::proto::{ControlMsg, DEFAULT_PORT};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const GOLD: egui::Color32 = egui::Color32::from_rgb(245, 165, 36);
@@ -48,6 +49,13 @@ pub struct ClientApp {
     encoder: String,
     host_name: String,
     discovered: Arc<parking_lot::Mutex<Vec<DiscoveredHost>>>,
+    clipboard: ClipboardBridge,
+    last_clip: Instant,
+    user_hangup: bool,
+    ever_ready: bool,
+    reconnect_at: Option<Instant>,
+    reconnect_attempt: u32,
+    show_hud: bool,
 }
 
 impl ClientApp {
@@ -61,6 +69,7 @@ impl ClientApp {
     ) -> Self {
         apply_theme(&cc.egui_ctx);
         let target = cfg.last_ticket.clone();
+        let show_hud = cfg.show_hud;
         let discovered = Arc::new(parking_lot::Mutex::new(Vec::new()));
         spawn_discovery(discovered.clone());
         Self {
@@ -72,7 +81,7 @@ impl ClientApp {
             target,
             pin: String::new(),
             mode: Mode::Lobby,
-            log: vec!["ForgeLink client ready.".into()],
+            log: vec!["BroLink client ready.".into()],
             error: None,
             hosts: Vec::new(),
             video_tex: None,
@@ -84,6 +93,13 @@ impl ClientApp {
             encoder: String::new(),
             host_name: String::new(),
             discovered,
+            clipboard: ClipboardBridge::new(),
+            last_clip: Instant::now(),
+            user_hangup: false,
+            ever_ready: false,
+            reconnect_at: None,
+            reconnect_attempt: 0,
+            show_hud,
         }
     }
 
@@ -95,6 +111,8 @@ impl ClientApp {
 
     fn connect(&mut self) {
         self.error = None;
+        self.user_hangup = false;
+        self.reconnect_at = None;
         self.cfg.last_ticket = self.target.clone();
         if let Err(e) = self.cfg.save() {
             tracing::warn!("could not save client config: {e:#}");
@@ -155,6 +173,10 @@ impl ClientApp {
                     self.video_size = [r.width as usize, r.height as usize];
                     self.mode = Mode::Stream;
                     self.pin.clear();
+                    self.ever_ready = true;
+                    self.reconnect_attempt = 0;
+                    self.cfg.remember_host(&self.host_name, &self.target);
+                    let _ = self.cfg.save();
                     self.log.push(format!(
                         "Streaming {}x{} @ {} fps via {}",
                         r.width, r.height, r.fps, r.encoder
@@ -176,6 +198,7 @@ impl ClientApp {
                 ClientEvent::Error(e) => {
                     self.log.push(format!("error: {e}"));
                     self.error = Some(e);
+                    self.schedule_reconnect();
                 }
                 ClientEvent::Disconnected => {
                     if self.mode != Mode::Lobby {
@@ -184,7 +207,9 @@ impl ClientApp {
                     self.mode = Mode::Lobby;
                     self.captured = false;
                     self.stats.clear();
+                    self.schedule_reconnect();
                 }
+                ClientEvent::Clipboard { text } => self.clipboard.apply_remote(&text),
             }
         }
         if self.log.len() > 200 {
@@ -208,6 +233,32 @@ impl ClientApp {
         }
         self.video.recycle(pic.rgba);
     }
+
+    fn schedule_reconnect(&mut self) {
+        if self.user_hangup || !self.cfg.auto_reconnect || !self.ever_ready {
+            return;
+        }
+        if self.reconnect_attempt >= 6 {
+            self.log
+                .push("Gave up reconnecting. Click Connect when the PC is back.".into());
+            self.ever_ready = false;
+            return;
+        }
+        let wait = 1u64 << self.reconnect_attempt.min(4);
+        self.reconnect_attempt += 1;
+        self.reconnect_at = Some(Instant::now() + Duration::from_secs(wait));
+        self.log.push(format!(
+            "Reconnecting in {wait}s… (attempt {})",
+            self.reconnect_attempt
+        ));
+    }
+
+    fn hangup(&mut self) {
+        self.user_hangup = true;
+        self.reconnect_at = None;
+        self.ever_ready = false;
+        let _ = self.cmd.send(ClientCmd::Disconnect);
+    }
 }
 
 impl eframe::App for ClientApp {
@@ -219,6 +270,11 @@ impl eframe::App for ClientApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         self.drain_events();
+        if let Some(at) = self.reconnect_at {
+            if Instant::now() >= at && self.mode == Mode::Lobby {
+                self.connect();
+            }
+        }
 
         if self.mode == Mode::Stream {
             self.refresh_video(ctx);
@@ -243,14 +299,16 @@ impl ClientApp {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                ui.heading("ForgeLink");
-                ui.label(egui::RichText::new("  Remote Play").weak());
+                ui.heading("BroLink");
+                ui.label(egui::RichText::new("  Play your Windows PC").weak());
             });
             ui.add_space(8.0);
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
+                self.saved_card(ui);
+                ui.add_space(12.0);
                 self.connect_card(ui);
                 if self.mode == Mode::Pin {
                     ui.add_space(12.0);
@@ -278,14 +336,14 @@ impl ClientApp {
     }
 
     fn connect_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, "Connect to your Windows PC", |ui| {
-            ui.label("Paste a ForgeLink ticket, or type an IP / Tailscale address.");
+        card(ui, "Have a ticket?", |ui| {
+            ui.label("Paste the ticket from BroLink Host, or type an IP / Tailscale address.");
             ui.add_space(6.0);
             ui.add(
                 egui::TextEdit::multiline(&mut self.target)
                     .desired_width(f32::INFINITY)
                     .desired_rows(3)
-                    .hint_text("flk1_… or 192.168.1.20 or 100.x.y.z"),
+                    .hint_text("blk1_… or 192.168.1.20 or 100.x.y.z"),
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -300,7 +358,7 @@ impl ClientApp {
                     ui.spinner();
                     ui.label("Connecting…");
                     if ui.button("Cancel").clicked() {
-                        let _ = self.cmd.send(ClientCmd::Disconnect);
+                        self.hangup();
                         self.mode = Mode::Lobby;
                     }
                 }
@@ -341,12 +399,55 @@ impl ClientApp {
         }
     }
 
+    fn saved_card(&mut self, ui: &mut egui::Ui) {
+        if self.cfg.saved_hosts.is_empty() && self.reconnect_at.is_none() {
+            return;
+        }
+        let mut connect_to: Option<String> = None;
+        let mut forget: Option<String> = None;
+        card(ui, "Your PCs", |ui| {
+            if let Some(at) = self.reconnect_at {
+                let left = at.saturating_duration_since(Instant::now()).as_secs();
+                ui.label(format!(
+                    "Reconnecting to {} in {left}s…",
+                    short(&self.target)
+                ));
+                if ui.button("Stop reconnecting").clicked() {
+                    self.hangup();
+                }
+            }
+            for h in &self.cfg.saved_hosts {
+                ui.horizontal(|ui| {
+                    ui.strong(&h.name);
+                    ui.weak(short(&h.ticket));
+                    if ui
+                        .add_enabled(self.mode != Mode::Connecting, egui::Button::new("Connect"))
+                        .clicked()
+                    {
+                        connect_to = Some(h.ticket.clone());
+                    }
+                    if ui.small_button("Remove").clicked() {
+                        forget = Some(h.ticket.clone());
+                    }
+                });
+            }
+        });
+        if let Some(t) = forget {
+            self.cfg.forget_host(&t);
+            let _ = self.cfg.save();
+        }
+        if let Some(t) = connect_to {
+            self.target = t;
+            self.connect();
+        }
+    }
+
     fn discovery_card(&mut self, ui: &mut egui::Ui) {
         let mut connect_to: Option<String> = None;
         card(ui, "PCs on this network", |ui| {
             if self.hosts.is_empty() {
                 ui.weak(
-                    "No ForgeLink hosts announcing yet. Make sure the Windows host is running \
+                    "No BroLink hosts announcing yet. Make sure the Windows host is running \
                      and on the same network.",
                 );
             }
@@ -393,22 +494,48 @@ impl ClientApp {
                     let _ = self.cfg.save();
                 }
             });
-            ui.weak("Applied on the next connection. Competitive is best for games.");
+            if ui
+                .checkbox(
+                    &mut self.cfg.auto_reconnect,
+                    "Reconnect if the session drops",
+                )
+                .changed()
+            {
+                let _ = self.cfg.save();
+            }
+            if ui
+                .checkbox(&mut self.cfg.enable_clipboard, "Share the clipboard")
+                .changed()
+            {
+                let _ = self.cfg.save();
+            }
+            if ui
+                .checkbox(&mut self.cfg.show_hud, "Show stream HUD")
+                .changed()
+            {
+                self.show_hud = self.cfg.show_hud;
+                let _ = self.cfg.save();
+            }
+            ui.weak("Quality applies on the next connection. Competitive is best for games.");
         });
     }
 
     fn stream_ui(&mut self, ctx: &egui::Context) {
-        let (release, disconnect, toggle_fs) = ctx.input(|i| {
+        let (release, disconnect, toggle_fs, toggle_hud) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::F8),
                 i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Q),
                 i.key_pressed(egui::Key::F11),
+                i.key_pressed(egui::Key::F7),
             )
         });
         if disconnect {
-            let _ = self.cmd.send(ClientCmd::Disconnect);
+            self.hangup();
             self.leave_stream(ctx);
             return;
+        }
+        if toggle_hud {
+            self.show_hud = !self.show_hud;
         }
         if release {
             let on = !self.captured;
@@ -450,23 +577,35 @@ impl ClientApp {
             self.set_capture(ctx, true);
         }
 
-        egui::Area::new(egui::Id::new("hud"))
-            .fixed_pos(egui::pos2(16.0, 12.0))
-            .show(ctx, |ui| {
-                let hud = if self.captured {
-                    format!(
-                        "F8 release  ·  F11 fullscreen  ·  Ctrl+Shift+Q quit  ·  {}",
-                        self.stats
-                    )
-                } else {
-                    format!("Click to capture mouse  ·  F8 toggle  ·  {}", self.stats)
-                };
-                ui.label(
-                    egui::RichText::new(hud)
-                        .size(13.0)
-                        .color(egui::Color32::from_white_alpha(220)),
-                );
-            });
+        if self.show_hud {
+            egui::Area::new(egui::Id::new("hud"))
+                .fixed_pos(egui::pos2(16.0, 12.0))
+                .show(ctx, |ui| {
+                    let hud = if self.captured {
+                        format!(
+                            "F8 release  ·  F11 fullscreen  ·  F7 HUD  ·  Ctrl+Shift+Q quit  ·  {}",
+                            self.stats
+                        )
+                    } else {
+                        format!(
+                            "Click to capture mouse  ·  F8 toggle  ·  F7 HUD  ·  {}",
+                            self.stats
+                        )
+                    };
+                    ui.label(
+                        egui::RichText::new(hud)
+                            .size(13.0)
+                            .color(egui::Color32::from_white_alpha(220)),
+                    );
+                });
+        }
+
+        if self.cfg.enable_clipboard && self.last_clip.elapsed() >= Duration::from_millis(400) {
+            self.last_clip = Instant::now();
+            if let Some(msg) = self.clipboard.poll_outgoing() {
+                let _ = self.cmd.send(ClientCmd::Control(msg));
+            }
+        }
 
         // Collect input every frame — even uncaptured, so the gamepad works
         // while the pointer is free, and so anything still held gets released.
@@ -517,7 +656,7 @@ fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 /// Listen for host beacons on the LAN.
 pub fn spawn_discovery(hosts: Arc<parking_lot::Mutex<Vec<DiscoveredHost>>>) {
     std::thread::Builder::new()
-        .name("forgelink-discovery".into())
+        .name("brolink-discovery".into())
         .spawn(move || {
             // SO_REUSEADDR matters here: the host's own beacon listener may
             // already hold this port on the same machine, and without it
@@ -540,7 +679,7 @@ pub fn spawn_discovery(hosts: Arc<parking_lot::Mutex<Vec<DiscoveredHost>>>) {
                         upsert(&mut hosts.lock(), b, from);
                     }
                 }
-                prune(&mut hosts.lock(), forgelink_core::discovery::HOST_TIMEOUT);
+                prune(&mut hosts.lock(), brolink_core::discovery::HOST_TIMEOUT);
             }
         })
         .expect("spawn discovery thread");
@@ -553,7 +692,7 @@ mod tests {
     #[test]
     fn long_tickets_are_shortened_for_the_log() {
         assert_eq!(short("  192.168.1.5  "), "192.168.1.5");
-        let long = "flk1_".to_string() + &"a".repeat(200);
+        let long = "blk1_".to_string() + &"a".repeat(200);
         let s = short(&long);
         assert_eq!(s.chars().count(), 33);
         assert!(s.ends_with('…'));

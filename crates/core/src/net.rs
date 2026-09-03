@@ -75,7 +75,7 @@ pub struct RelayLink {
 /// A UDP socket that optionally speaks the relay's `token || payload` framing.
 ///
 /// The relay strips the token before forwarding, so received datagrams are
-/// already plain ForgeLink packets and the relay's own address stands in as the
+/// already plain BroLink packets and the relay's own address stands in as the
 /// peer address for the whole session. That keeps every caller above this layer
 /// identical whether traffic is direct or tunnelled.
 pub struct Transport {

@@ -23,9 +23,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Never ship a binary whose tests were not run.
       - name: test
-        run: cargo test -p forgelink-core -p forgelink-client
+        run: cargo test -p brolink-core -p brolink-client
       - name: build client
-        run: cargo build --release -p forgelink-client --target aarch64-apple-darwin
+        run: cargo build --release -p brolink-client --target aarch64-apple-darwin
       - name: bundle
         run: bash scripts/bundle-macos.sh
       # Apple Silicon refuses to run an unsigned binary outright. The linker
@@ -33,16 +33,16 @@ jobs:
       # bundle itself unsigned, so sign the whole thing here.
       - name: ad-hoc sign
         run: |
-          codesign --force --deep --sign - dist/ForgeLink.app
-          codesign --verify --deep --strict --verbose=2 dist/ForgeLink.app
+          codesign --force --deep --sign - dist/BroLink.app
+          codesign --verify --deep --strict --verbose=2 dist/BroLink.app
       - name: package
         run: |
           cp docs/MACOS.md dist/README-MACOS.md
-          cd dist && tar czf forgelink-macos-arm64.tar.gz ForgeLink.app README-MACOS.md
+          cd dist && tar czf brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md
       - uses: actions/upload-artifact@v4
         with:
-          name: forgelink-macos-arm64
-          path: dist/forgelink-macos-arm64.tar.gz
+          name: brolink-macos-arm64
+          path: dist/brolink-macos-arm64.tar.gz
           if-no-files-found: error
 
   windows:
@@ -59,16 +59,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\forgelink-host.exe dist\
-          Copy-Item target\release\forgelink-client.exe dist\
-          Copy-Item target\release\forgelink-relay.exe dist\
+          Copy-Item target\release\brolink-host.exe dist\
+          Copy-Item target\release\brolink-client.exe dist\
+          Copy-Item target\release\brolink-relay.exe dist\
           Copy-Item docs\WINDOWS.md dist\README-WINDOWS.md
           Copy-Item scripts\install-host.ps1 dist\
-          Compress-Archive -Path dist\* -DestinationPath forgelink-windows-x64.zip
+          Compress-Archive -Path dist\* -DestinationPath brolink-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: forgelink-windows-x64
-          path: forgelink-windows-x64.zip
+          name: brolink-windows-x64
+          path: brolink-windows-x64.zip
           if-no-files-found: error
 
   publish:
@@ -98,9 +98,9 @@ jobs:
           **macOS (Apple Silicon)**
 
           ```bash
-          tar xzf forgelink-macos-arm64.tar.gz
-          xattr -dr com.apple.quarantine ForgeLink.app
-          RUST_LOG=info ForgeLink.app/Contents/MacOS/ForgeLink
+          tar xzf brolink-macos-arm64.tar.gz
+          xattr -dr com.apple.quarantine BroLink.app
+          RUST_LOG=info BroLink.app/Contents/MacOS/BroLink
           ```
 
           The `xattr` step is required. The bundle is ad-hoc signed rather than
@@ -108,7 +108,7 @@ jobs:
 
           **Windows (host)**
 
-          Unzip, then run `forgelink-host.exe`. Needs
+          Unzip, then run `brolink-host.exe`. Needs
           [FFmpeg](https://www.gyan.dev/ffmpeg/builds/) on `PATH`. If clients
           cannot connect, run `fix-firewall.ps1` from an elevated PowerShell --
           Windows block rules override allow rules and are the usual cause.
@@ -134,7 +134,7 @@ jobs:
           EOF
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "ForgeLink ${GITHUB_REF_NAME}" \
+            --title "BroLink ${GITHUB_REF_NAME}" \
             --notes-file notes.md \
             $PRE \
             artifacts/*/*

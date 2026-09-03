@@ -3,14 +3,15 @@
 use crate::audio::{AudioPlayer, AudioStats};
 use crate::decode::{H264Decoder, VideoSink};
 use anyhow::{Context, Result};
+use brolink_core::codec::FrameAssembler;
+use brolink_core::config::ClientConfig;
+use brolink_core::crypto::{random_bytes, verify_handshake, EphKey, ReplayWindow, SessionKeys};
+use brolink_core::identity::Identity;
+use brolink_core::net::{bind_udp_ephemeral, RelayLink, Transport, RECV_BUF};
+use brolink_core::proto::*;
+use brolink_core::stun::discover_wan;
+use brolink_core::ticket::{parse_endpoint, Ticket};
 use bytes::BytesMut;
-use forgelink_core::codec::FrameAssembler;
-use forgelink_core::config::ClientConfig;
-use forgelink_core::crypto::{random_bytes, verify_handshake, EphKey, ReplayWindow, SessionKeys};
-use forgelink_core::identity::Identity;
-use forgelink_core::net::{bind_udp_ephemeral, RelayLink, Transport, RECV_BUF};
-use forgelink_core::proto::*;
-use forgelink_core::ticket::{parse_endpoint, Ticket};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,7 +23,7 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(8);
 /// one punching the NAT hole, and it is the most likely to be dropped.
 const HELLO_RETRY: Duration = Duration::from_millis(400);
 /// The host probes encoders before it can answer, which takes a few seconds.
-const READY_TIMEOUT: Duration = Duration::from_secs(45);
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
 const PING_INTERVAL: Duration = Duration::from_millis(250);
 /// Give up if the host goes completely quiet.
 const HOST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -60,6 +61,9 @@ pub enum ClientEvent {
     },
     Error(String),
     Disconnected,
+    Clipboard {
+        text: String,
+    },
 }
 
 pub fn spawn(
@@ -69,7 +73,7 @@ pub fn spawn(
     audio_stats: Arc<AudioStats>,
 ) {
     std::thread::Builder::new()
-        .name("forgelink-client-net".into())
+        .name("brolink-client-net".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -188,6 +192,7 @@ struct Live {
     window: Instant,
     last_decode_ms: f32,
     awaiting_pin: bool,
+    last_stats_sent: Instant,
 }
 
 /// Work out where to send `Hello`, and which host identity to insist on.
@@ -202,7 +207,7 @@ struct Destination {
 fn resolve_target(target: &str) -> Result<Destination> {
     if let Ok(t) = Ticket::decode(target) {
         let relay = t.relay.map(|r| RelayLink {
-            addr: SocketAddr::V4(r.addr),
+            addr: r.addr,
             token: r.token,
         });
         let mut candidates = t.candidate_addrs();
@@ -254,6 +259,12 @@ async fn connect(
     }
 
     let transport = Transport::new(bind_udp_ephemeral()?, dest.relay);
+    let client_wan = discover_wan(transport.socket())
+        .await
+        .map(|a| a.to_string());
+    if let Some(ref wan) = client_wan {
+        let _ = ev.send(ClientEvent::Log(format!("Our public address: {wan}")));
+    }
     let eph = EphKey::generate();
     let nonce = random_bytes::<16>();
     let quality = cfg.quality.sanitized();
@@ -267,6 +278,7 @@ async fn connect(
         height: Some(quality.height),
         fps: Some(quality.fps),
         bitrate_kbps: Some(quality.bitrate_kbps),
+        client_wan,
     };
     let pkt = encode_plain(PacketType::Hello, 1, &json_payload(&hello)?);
 
@@ -277,8 +289,9 @@ async fn connect(
         let now = Instant::now();
         if now >= deadline {
             anyhow::bail!(
-                "no reply from the host on {} (check the ticket, that the host is running, \
-                 and that UDP is allowed through its firewall)",
+                "No reply from the PC ({}) — is BroLink Host running, is UDP 47850 allowed \
+                 through Windows Firewall, and if you are not on the same network, is UPnP, \
+                 Tailscale, or a relay enabled on the host?",
                 describe(&dest.candidates)
             );
         }
@@ -335,11 +348,7 @@ async fn connect(
     .context("the host's handshake signature did not verify")?;
 
     let keys = SessionKeys::derive(&eph.shared(&ack.server_eph), &nonce, &ack.nonce, false)?;
-    let via = if dest.relay.is_some_and(|r| r.addr == from) {
-        format!("{from} (relay)")
-    } else {
-        from.to_string()
-    };
+    let via = path_name(from, dest.relay.map(|r| r.addr));
     let _ = ev.send(ClientEvent::Log(format!(
         "Connected to {} via {via}",
         ack.host_name
@@ -387,6 +396,7 @@ async fn connect(
         window: Instant::now(),
         last_decode_ms: 0.0,
         awaiting_pin: ack.needs_pin,
+        last_stats_sent: Instant::now(),
     };
 
     if ack.needs_pin {
@@ -397,6 +407,21 @@ async fn connect(
     }
     live.wait_ready().await?;
     Ok(live)
+}
+
+pub fn path_name(peer: SocketAddr, relay: Option<SocketAddr>) -> String {
+    if relay.is_some_and(|r| r == peer) {
+        return format!("{peer} (relay)");
+    }
+    match peer.ip() {
+        std::net::IpAddr::V4(v4) if v4.is_loopback() || v4.is_private() => {
+            format!("{peer} (LAN)")
+        }
+        std::net::IpAddr::V4(v4) if brolink_core::config::is_cgnat_v4(v4) => {
+            format!("{peer} (Tailscale)")
+        }
+        _ => format!("{peer} (internet)"),
+    }
 }
 
 fn describe(addrs: &[SocketAddr]) -> String {
@@ -539,13 +564,25 @@ impl Live {
 
         if self.window.elapsed() >= Duration::from_secs(1) {
             let dt = self.window.elapsed().as_secs_f32().max(0.001);
+            let fps = self.frames as f32 / dt;
+            let loss = self.assembler.loss_pct();
             let _ = ev.send(ClientEvent::Stats {
                 rtt_ms: self.rtt_ms,
-                fps: self.frames as f32 / dt,
+                fps,
                 bitrate_kbps: (self.bytes as f32 * 8.0 / dt) / 1000.0,
-                loss: self.assembler.loss_pct(),
+                loss,
                 decoder_ms: self.last_decode_ms,
             });
+            if self.last_stats_sent.elapsed() >= Duration::from_secs(1) {
+                self.last_stats_sent = Instant::now();
+                let _ = self
+                    .send_control(ControlMsg::Stats {
+                        loss_pct: loss,
+                        rtt_ms: self.rtt_ms,
+                        fps,
+                    })
+                    .await;
+            }
             self.frames = 0;
             self.bytes = 0;
             self.window = Instant::now();
@@ -662,6 +699,11 @@ impl Live {
                     let _ = ev.send(ClientEvent::Ready(ready));
                 }
             }
+            PacketType::Control => {
+                if let Ok(ControlMsg::Clipboard { text }) = json_from_slice(payload) {
+                    let _ = ev.send(ClientEvent::Clipboard { text });
+                }
+            }
             _ => {}
         }
         result
@@ -671,11 +713,11 @@ impl Live {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgelink_core::ticket::{Candidate, CandidateKind, RelayHint};
+    use brolink_core::ticket::{Candidate, CandidateKind, RelayHint};
     use std::net::{Ipv4Addr, SocketAddrV4};
 
-    fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddrV4 {
-        SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port)
+    fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
     }
 
     #[test]
@@ -696,10 +738,7 @@ mod tests {
             Some(id.public),
             "the ticket's identity must be carried into the handshake check"
         );
-        assert_eq!(
-            dest.candidates,
-            vec![SocketAddr::V4(v4(192, 168, 1, 5, 47850))]
-        );
+        assert_eq!(dest.candidates, vec![v4(192, 168, 1, 5, 47850)]);
         assert!(dest.relay.is_none());
         assert_eq!(dest.host_label, "PC");
     }
@@ -707,20 +746,14 @@ mod tests {
     #[test]
     fn a_bare_address_has_no_identity_to_pin() {
         let dest = resolve_target("192.168.1.5").unwrap();
-        assert_eq!(
-            dest.candidates,
-            vec![SocketAddr::V4(v4(192, 168, 1, 5, DEFAULT_PORT))]
-        );
+        assert_eq!(dest.candidates, vec![v4(192, 168, 1, 5, DEFAULT_PORT)]);
         assert!(
             dest.expected_host.is_none(),
             "there is no identity to check when the user typed an address"
         );
 
         let dest = resolve_target("192.168.1.5:9000").unwrap();
-        assert_eq!(
-            dest.candidates,
-            vec![SocketAddr::V4(v4(192, 168, 1, 5, 9000))]
-        );
+        assert_eq!(dest.candidates, vec![v4(192, 168, 1, 5, 9000)]);
     }
 
     #[test]
@@ -751,14 +784,8 @@ mod tests {
         let dest = resolve_target(&t.encode()).unwrap();
         assert_eq!(dest.candidates.len(), 4);
         // LAN first (fastest when it works), relay last (slowest).
-        assert_eq!(
-            dest.candidates[0],
-            SocketAddr::V4(v4(192, 168, 1, 5, 47850))
-        );
-        assert_eq!(
-            *dest.candidates.last().unwrap(),
-            SocketAddr::V4(v4(198, 51, 100, 7, 47851))
-        );
+        assert_eq!(dest.candidates[0], v4(192, 168, 1, 5, 47850));
+        assert_eq!(*dest.candidates.last().unwrap(), v4(198, 51, 100, 7, 47851));
         let relay = dest.relay.expect("relay carried through");
         assert_eq!(relay.token, [3u8; 16]);
     }
@@ -785,12 +812,21 @@ mod tests {
 
     #[test]
     fn describe_lists_every_candidate() {
-        let addrs = vec![
-            SocketAddr::V4(v4(192, 168, 1, 5, 47850)),
-            SocketAddr::V4(v4(203, 0, 113, 9, 47850)),
-        ];
+        let addrs = vec![v4(192, 168, 1, 5, 47850), v4(203, 0, 113, 9, 47850)];
         let s = describe(&addrs);
         assert!(s.contains("192.168.1.5:47850"));
         assert!(s.contains("203.0.113.9:47850"));
+    }
+
+    #[test]
+    fn path_name_labels_lan_tailscale_wan_and_relay() {
+        let lan = v4(192, 168, 1, 5, 47850);
+        assert!(path_name(lan, None).contains("LAN"));
+        let ts = v4(100, 90, 1, 2, 47850);
+        assert!(path_name(ts, None).contains("Tailscale"));
+        let wan = v4(203, 0, 113, 9, 47850);
+        assert!(path_name(wan, None).contains("internet"));
+        let relay = v4(198, 51, 100, 7, 47851);
+        assert!(path_name(relay, Some(relay)).contains("relay"));
     }
 }

@@ -1,15 +1,16 @@
 mod app;
 mod audio;
+mod clipboard;
 mod decode;
 mod input_map;
 mod session;
 
 use anyhow::Result;
 use audio::AudioStats;
+use brolink_core::config::ClientConfig;
+use brolink_core::identity::Identity;
 use clap::Parser;
 use decode::VideoSink;
-use forgelink_core::config::ClientConfig;
-use forgelink_core::identity::Identity;
 use session::{ClientCmd, ClientEvent, ConnectRequest};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 /// Frames the loopback test wants to see before it calls the pipeline healthy.
 const HEADLESS_FRAMES: u64 = 30;
 /// Connect, negotiate, probe the encoder and stream 30 frames inside this.
-const HEADLESS_TIMEOUT: Duration = Duration::from_secs(60);
+const HEADLESS_TIMEOUT: Duration = Duration::from_secs(120);
 /// 100 ms of audio actually handed to the output device. Enough to clear the
 /// 40 ms prebuffer and prove the stream keeps flowing, not just starts.
 const HEADLESS_AUDIO_FRAMES: u64 = 4_800;
@@ -27,9 +28,9 @@ const HEADLESS_AUDIO_PEAK: u64 = 64;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "forgelink-client",
+    name = "brolink-client",
     version,
-    about = "ForgeLink client — play your Windows PC from a Mac"
+    about = "BroLink client — play your Windows PC from a Mac"
 )]
 struct Args {
     /// Ticket, IP, or IP:port to connect to immediately.
@@ -65,7 +66,7 @@ fn main() -> Result<()> {
         cfg.last_ticket = c;
     }
     cfg.quality = cfg.quality.sanitized();
-    let identity = Identity::load_or_create(&forgelink_core::config::client_identity_path()?)?;
+    let identity = Identity::load_or_create(&brolink_core::config::client_identity_path()?)?;
     tracing::info!("client id {}", identity.short_id());
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -95,12 +96,12 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_title("ForgeLink"),
+            .with_title("BroLink"),
         vsync: false,
         ..Default::default()
     };
     eframe::run_native(
-        "ForgeLink",
+        "BroLink",
         native,
         Box::new(move |cc| {
             let mut app = app::ClientApp::new(cc, cfg, identity, cmd_tx, ev_rx, video);
@@ -209,6 +210,7 @@ fn run_headless(
                  loss={loss:.1}% frames={frames}"
             ),
             Ok(ClientEvent::Disconnected) => anyhow::bail!("host disconnected (frames={frames})"),
+            Ok(ClientEvent::Clipboard { .. }) => {}
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                 std::thread::sleep(Duration::from_millis(5));
             }

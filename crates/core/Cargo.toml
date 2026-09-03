@@ -1,10 +1,10 @@
 [package]
-name = "forgelink-core"
+name = "brolink-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Shared protocol, crypto, and networking for ForgeLink"
+description = "Shared protocol, crypto, NAT traversal, and networking for BroLink"
 
 [dependencies]
 anyhow.workspace = true

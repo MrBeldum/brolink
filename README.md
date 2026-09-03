@@ -1,92 +1,89 @@
-# ForgeLink
+# BroLink
 
 **Your Windows PC, from your Mac — at game-streaming quality.**
 
-ForgeLink is an open-source personal-cloud layer for a Windows desktop,
-controlled from an Apple Silicon Mac (or another Windows machine). This
-release is **Remote Play**: a fully working, low-latency H.264 desktop
-stream with keyboard, mouse, gamepad, and system audio, on the LAN and
-across the internet.
+BroLink is a personal remote-play app: sit at an Apple Silicon Mac, play
+and use the Windows desktop in the other room or on another continent. The
+picture is a low-latency H.264 stream (hardware encode on the PC, decode on
+the Mac) with keyboard, mouse, gamepad, system audio, and clipboard. Setup
+is two native apps and a pasteable ticket — no browser, no account, no
+Electron.
 
-Later releases add backup and extra compute on the same pair of apps. The
-protocol, pairing, and networking are built so those features plug in
-without replacing the remote-play path.
+This is bring-your-own-device, not a cloud. The pixels never leave *your*
+machines, and after pairing they are encrypted end-to-end (ChaCha20-Poly1305).
+A relay, if you use one, only ever sees ciphertext.
 
 ```
   MacBook (M-series)                         Windows PC
   ┌──────────────────┐                       ┌──────────────────┐
-  │  ForgeLink       │   encrypted UDP       │  ForgeLink Host  │
+  │  BroLink         │   encrypted UDP       │  BroLink Host    │
   │  Client          │◄──── H.264 + PCM ────►│  DXGI / FFmpeg   │
   │  OpenH264 decode │      input + pad      │  AMF / NVENC     │
   └──────────────────┘                       └──────────────────┘
          ▲                                          ▲
-         └──────── ticket / Tailscale / STUN ───────┘
+         └──── LAN / IPv6 / UPnP / Tailscale / relay ────┘
 ```
 
-## What works right now (v0.1 Remote Play)
+## What you get
 
 - Hardware-accelerated capture and encode on the PC (AMD AMF, NVIDIA NVENC, Intel QSV, Media Foundation, libx264 fallback)
-- 720p–1440p, 30–120 fps, 5–60 Mbps
+- 720p–1440p, 30–120 fps, 5–60 Mbps, with adaptive bitrate when the path gets lossy
 - Keyboard, relative mouse (games), absolute mouse (desktop), Xbox-style gamepad via ViGEmBus
-- System audio loopback
-- PIN pairing with persistent identities
-- LAN discovery
-- Across the internet via Tailscale `100.x` addresses, a self-hosted UDP relay, or a manual port-forward. See [How worldwide access works](#how-worldwide-access-works) -- the STUN address alone is not enough on most routers
-- Native GUIs on both sides (no browser, no Electron)
+- System audio and a shared clipboard
+- PIN pairing with persistent identities; the ticket pins the host key so a machine that stole the IP cannot impersonate it
+- LAN discovery, automatic UPnP/NAT-PMP port mapping, IPv6, Tailscale `100.x`, and an optional self-hosted UDP relay
+- Native GUIs on both sides
 
-This is **not** a thin wrapper around Sunshine/Moonlight. Those projects are
-excellent and inspired the encoder flags and the “short GOP, drop stale
-frames” playbook. ForgeLink is its own protocol, apps, and pairing model so
-backup and compute can share the same session later.
+This is **not** a wrapper around Sunshine/Moonlight. Those projects are
+excellent and inspired the encoder flags. BroLink is its own protocol,
+apps, and pairing model.
 
-## Quick start
+## Install (the real-user path)
 
-### 1. Windows PC (host)
+### Windows PC (host)
 
-Install [Rust](https://rustup.rs) and [FFmpeg](https://www.gyan.dev/ffmpeg/builds/)
-(the essentials build is enough). Then:
+1. Install [Rust](https://rustup.rs) only if you are building from source. A
+   release build of `brolink-host.exe` is enough to run.
+2. From this repo:
 
-```powershell
-git clone https://github.com/MrBeldum/forgelink
-cd forgelink
-cargo build --release -p forgelink-host
-.\target\release\forgelink-host.exe
-```
+   ```powershell
+   cargo build --release -p brolink-host
+   .\scripts\install-host.ps1
+   ```
 
-Leave the window open. Copy the **ticket**.
+   The installer copies the host into `%LOCALAPPDATA%\BroLink`, downloads
+   FFmpeg if it is missing, adds a desktop shortcut, and tries to open the
+   firewall. Double-click **BroLink Host**.
 
-Useful flags:
+3. Optional but recommended for games: [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)
+   (virtual Xbox 360 controller). The host works without it; gamepads just
+   will not reach the PC.
 
-| Flag | Effect |
-|------|--------|
-| `--headless` | No control panel; prints the ticket and logs to stdout |
-| `--name NAME` | Override the advertised PC name |
-| `--port N` | UDP port (default 47850) |
-| `--no-pin` | Trust any client that can reach this PC (LAN testing only) |
-| `--relay HOST:PORT` | Advertise a `forgelink-relay` for hard-NAT clients |
-| `--no-firewall` | Do not try to add a Windows Firewall rule on startup |
-| `--no-audio` | Do not capture or stream system audio for this run |
+Leave the host running (or tick **Start with Windows** in its settings).
+Copy the ticket.
 
-Optional but recommended for games:
-
-- [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) — virtual Xbox 360 controller
-- [Tailscale](https://tailscale.com) — worldwide access with no port-forward
-
-### 2. Mac (client)
-
-On the MacBook:
+### Mac (client)
 
 ```bash
-cargo build --release -p forgelink-client
-./scripts/bundle-macos.sh   # optional .app
-./target/release/forgelink-client
+cargo build --release -p brolink-client --target aarch64-apple-darwin
+./scripts/bundle-macos.sh
+open dist/BroLink.app
 ```
 
-Paste the ticket, click **Connect**, enter the PIN once, click the picture to
-capture the mouse. **F8** releases the mouse. **F11** fullscreen.
-**Ctrl+Shift+Q** disconnects.
+Paste the ticket, click **Connect**, enter the PIN once. Click the picture to
+capture the mouse. **F8** releases it. **F11** fullscreen. **F7** hides the
+HUD. **Ctrl+Shift+Q** disconnects.
 
-Use **borderless windowed** in games.
+Use **borderless windowed** in games. Exclusive fullscreen can bypass Desktop
+Duplication on some titles.
+
+From a browser download of the `.app`, also run:
+
+```bash
+xattr -dr com.apple.quarantine BroLink.app
+```
+
+The app is ad-hoc signed; Gatekeeper otherwise reports it as damaged.
 
 ## Quality presets
 
@@ -96,53 +93,61 @@ Use **borderless windowed** in games.
 | Balanced | 1080p | 60 | 25 Mbps | Default |
 | Quality | 1440p | 60 | 40 Mbps | LAN / fat pipe |
 
+The client can ask the host to step the bitrate down when it sees loss, then
+back up when the path is clean.
+
 ## How worldwide access works
 
-The host binds **one UDP socket** (default `47850`) and:
+The host binds **one UDP socket** (default `47850`) and publishes every
+address it can be reached on inside a pasteable `blk1_…` ticket:
 
-1. Advertises its LAN address on the local broadcast / multicast group
-2. Asks Google/Cloudflare STUN for a reflexive address and keeps the mapping alive
-3. Shows a Tailscale address if a `100.64/10` interface exists
-4. Packs all of that into a pasteable `flk1_…` ticket
+1. LAN IPv4, plus any globally-routable IPv6
+2. A UPnP / NAT-PMP mapping, if the router will create one (this is what
+   makes most home connections work from another country with no extra software)
+3. A STUN reflexive address (Google, then Cloudflare)
+4. A Tailscale `100.64/10` address, if Tailscale is up
+5. An optional `brolink-relay`, if you configured one
 
-The client sends `Hello` to every candidate. The first `HelloAck` wins.
+The client sends `Hello` to every candidate. The first `HelloAck` wins. It
+also includes *its* STUN address so the host can send a packet back and
+finish a hole punch.
 
-**The STUN candidate is a bonus, not the internet path.** The host is purely
-reactive -- it only ever replies to an address a packet arrived from, and
-never sends first. So your client's opening packet reaches it only if the
-PC's router uses endpoint-independent filtering ("full cone"). A
-restricted-cone or symmetric NAT drops it, and ForgeLink has no signalling
-channel to coordinate a simultaneous open and no UPnP/NAT-PMP to request a
-forward. On most home routers, expect the WAN candidate to time out.
+**UPnP is the default internet path.** Enable it in the host (on by default)
+and, if your router allows local applications to map a port, the WAN
+candidate in the ticket is a real forward, not a hope.
 
-For reliable access from anywhere, pick one of these three:
+If UPnP is blocked (CGNAT, locked-down ISP router, campus NAT), pick one of
+these — they all work, none require changing the protocol:
 
 | Path | Router changes | Notes |
 |------|----------------|-------|
-| **Tailscale** | none | Easiest. Install on both machines, connect to the `100.x` address. Tailscale handles traversal and falls back to its own relays. |
-| **Self-hosted relay** | none | Both sides send *outbound* to the relay, so no NAT has to accept an unsolicited packet. Costs you a VPS. |
-| **Port-forward** | UDP 47850 | Direct and lowest latency, but exposes the port and needs router access. |
+| **UPnP / NAT-PMP** | none (router cooperates) | Default. Host does it for you. |
+| **Public IPv6** | none | Advertised automatically when the PC has a global address. |
+| **Tailscale** | none | Install on both machines; connect to the `100.x` address. |
+| **Self-hosted relay** | none | Both sides send *outbound* to the relay. Any NAT works. |
+| **Port-forward** | UDP 47850 | Direct and lowest latency; needs router access. |
 
 To run the relay yourself:
 
 ```bash
-cargo run --release -p forgelink-relay -- --bind 0.0.0.0:47851
+cargo run --release -p brolink-relay -- --bind 0.0.0.0:47851
 ```
 
-then point the host at it:
+then in the host UI set **Relay** to `your.vps.example:47851` (or start with
+`--relay your.vps.example:47851`). The address and a random per-host token
+ride inside the ticket, so the Mac picks the fallback up automatically. The
+relay only ever sees already-encrypted bytes.
 
-```powershell
-.\target\release\forgelink-host.exe --relay your.vps.example:47851
-```
-
-The relay address and a random per-host token ride along inside the ticket, so
-clients pick the fallback up automatically. The relay only ever sees
-already-encrypted bytes.
+The raw STUN candidate without UPnP is a bonus, not the internet path. The
+host is reactive — it replies to the address a packet arrived from. On a
+restricted-cone or symmetric NAT the first client packet is dropped unless
+UPnP, IPv6, Tailscale, a relay, or a manual forward is in play.
 
 ## Testing
 
-Unit tests cover the protocol, crypto, ticket parsing, frame assembly,
-colour conversion, input mapping, audio resampling, and relay routing:
+Unit tests cover the protocol, crypto, ticket parsing (including IPv6),
+UPnP/NAT-PMP message codecs, adaptive bitrate, frame assembly, colour
+conversion, input mapping, audio resampling, and relay routing:
 
 ```powershell
 cargo test --workspace
@@ -155,41 +160,31 @@ host and a real client against the real GPU encoder on one machine:
 .\scripts\test-loopback.ps1
 ```
 
-It builds first, waits for the host to publish a ticket, then connects twice --
-once by bare address and once by ticket -- and requires 30 decoded frames each
-time. On failure it prints the host's log, because most real failures are on
-the capture/encode side.
-
-It also plays a 440 Hz tone for the host to capture and requires 100 ms of it
-to reach the client's output device, with a non-zero peak. The peak matters:
-WASAPI loopback reports silent buffers rather than stopping, so counting
-frames alone would pass on a stream of digital silence. Pass `-NoAudio` on a
-machine with no output device.
+It builds first, waits for the host to publish a ticket, then connects twice —
+once by bare address and once by ticket — and requires 30 decoded frames each
+time. It also plays a 440 Hz tone for the host to capture and requires 100 ms
+of it to reach the client's output device, with a non-zero peak. Pass
+`-NoAudio` on a machine with no output device.
 
 ### What this does not cover
 
 The loopback runs a Windows client against a Windows host over `127.0.0.1`.
 It says nothing about the Mac client, the relay, or NAT traversal, all of
-which are only unit-tested. Treat a green loopback as "the pipeline works",
-not "the product works".
+which are unit-tested. Treat a green loopback as "the pipeline works", not
+"the product works".
 
 ## Repository layout
 
 ```
-crates/core     protocol, crypto, tickets, STUN, discovery
+crates/core     protocol, crypto, tickets, STUN, UPnP, discovery
 crates/host     Windows host (capture / encode / input / GUI)
 crates/client   Mac + Windows client (decode / display / input / GUI)
 crates/relay    optional UDP relay
 docs/           protocol and platform notes
-scripts/        macOS .app bundle, Windows install shortcut
+scripts/        macOS .app bundle, Windows installer, loopback test
 ```
 
 ## License
 
 MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE) (FFmpeg and OpenH264 are
 separate programs/libraries with their own terms).
-
-## Roadmap
-
-See [docs/ROADMAP.md](docs/ROADMAP.md). Next up: backup (the PC as a
-personal file vault) and extra compute (jobs on the Windows box from the Mac).

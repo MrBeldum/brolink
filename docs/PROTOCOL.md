@@ -1,8 +1,8 @@
-# ForgeLink protocol
+# BroLink protocol
 
-Version `FLK1` (byte `1`). Default UDP port **47850**.
+Version `BLK1` (byte `1`). Default UDP port **47850**.
 
-ForgeLink is a 1:1 low-latency desktop streaming protocol. Video and audio
+BroLink is a 1:1 low-latency desktop streaming protocol. Video and audio
 travel as unreliable datagrams (latest frame wins). Input and pairing travel
 on the same UDP socket, encrypted after handshake.
 
@@ -10,7 +10,7 @@ on the same UDP socket, encrypted after handshake.
 
 | Offset | Size | Field |
 |--------|------|--------|
-| 0 | 4 | magic `FLK1` |
+| 0 | 4 | magic `BLK1` |
 | 4 | 1 | version `1` |
 | 5 | 1 | packet type |
 | 6 | 4 | sequence (u32 LE) |
@@ -76,7 +76,7 @@ mix to 48 kHz; the client resamples again if its output device is not 48 kHz.
 
 ## Handshake
 
-1. Client sends `Hello` to every candidate address in the ticket (LAN, STUN-WAN, Tailscale, relay), retransmitting every 400 ms for up to 8 s. Losing it must not be fatal, and it opens the *client's* own NAT for the reply -- it does not open the host's.
+1. Client sends `Hello` to every candidate address in the ticket (LAN, STUN-WAN, Tailscale, relay), retransmitting every 400 ms for up to 8 s. Losing it must not be fatal, and it opens the *client's* own NAT for the reply -- it does not open the host's. `Hello` may include `client_wan`, the client's own STUN address, so the host can send a packet back and finish a hole punch.
 2. Host replies `HelloAck` signed by its persistent Ed25519 identity.
 3. **The client checks the answering host's public key against the one in the ticket** and aborts if they differ, so a machine that has taken over the address cannot impersonate the host.
 4. Both derive directional keys with HKDF-SHA256 over X25519(shared).
@@ -88,10 +88,10 @@ pinned identity to check — and the client says so in its log.
 
 ## Tickets
 
-Human-pasteable `flk1_` + unpadded base32 of:
+Human-pasteable `blk1_` + unpadded base32 of:
 
 ```
-version u8 = 2
+version u8 = 2          (IPv4-only; still emitted when every address is v4)
 host_id[32]
 name_len u8 | name[name_len]
 candidate_count u8
@@ -100,8 +100,17 @@ relay u8
   if relay: { ip[4], port u16, token[16] }
 ```
 
-`kind` is `0` LAN, `1` WAN (STUN), `2` Tailscale. Version 1 tickets (a single
-LAN and WAN address, no relay) still decode.
+Version 3 is emitted when any address is IPv6:
+
+```
+version u8 = 3
+…same header…
+  { kind u8, family u8 (4|6), ip[4|16], port u16 }
+relay: family u8 | ip | port u16 | token[16]
+```
+
+`kind` is `0` LAN, `1` WAN (STUN / UPnP / global v6), `2` Tailscale. Version 1
+tickets (a single LAN and WAN address, no relay) still decode.
 
 Candidates are tried LAN-first, then Tailscale, then WAN, then the relay: a
 direct path is always faster when it works. Unspecified addresses and port-0
@@ -109,18 +118,23 @@ entries are dropped, and duplicates are removed.
 
 The host refreshes its STUN mapping every 20 s while idle so the WAN port stays
 open. It stops during a session, because reusing the media socket for STUN
-would steal packets from the stream.
+would steal packets from the stream. UPnP mappings are refreshed on a longer
+timer (about 15 minutes) and do not use the media socket for SSDP.
 
-The host is purely reactive: it only ever replies to the address a packet
-arrived from, and never sends first. That is what rules out true hole
-punching -- see the NAT section below.
+The host is reactive by default — it replies to the address a packet arrived
+from. Two exceptions make worldwide access work without a signalling server:
+UPnP/NAT-PMP (the router forwards the port) and `Hello.client_wan` (the host
+also sends `HelloAck` to the client's STUN address).
 
 ## NAT
 
 - LAN: UDP broadcast / multicast discovery plus the ticket's LAN address. Beacons carry the full ticket, so a host found by discovery gets the same identity check as a pasted one.
-- WAN: STUN (Google, then Cloudflare) reflexive address in the ticket. This keeps the *mapping* alive, but delivery of the client's first packet depends on the router's *filtering*: only endpoint-independent filtering ("full cone") accepts it. Under address- or port-dependent filtering it is dropped, and under symmetric NAT the ticket's port is wrong for the client anyway. There is no signalling channel, so the two peers cannot coordinate a simultaneous open, and no UPnP/NAT-PMP to request a forward. Treat the WAN candidate as an optimisation that sometimes works, not as the internet path.
+- UPnP / NAT-PMP: the host asks the gateway to forward its UDP port and advertises the mapped address as WAN. This is the default internet path on a cooperative home router.
+- IPv6: globally-routable addresses are advertised as WAN candidates. No NAT, so they work from anywhere the client's ISP has v6.
+- WAN (STUN): Google, then Cloudflare, reflexive address in the ticket. Without UPnP this keeps the *mapping* alive, but delivery of the client's first packet depends on the router's *filtering*: only endpoint-independent filtering ("full cone") accepts it. Treat a STUN-only WAN candidate as an optimisation that sometimes works.
+- Hole punch: the client puts its own STUN address in `Hello.client_wan`. The host also sends `HelloAck` there so a restricted-cone client NAT sees a packet from the host.
 - Tailscale: a `100.64/10` address is advertised as its own candidate kind.
-- Hard NAT: run `forgelink-relay` on a VPS and start the host with `--relay host:port`, or install Tailscale on both machines.
+- Hard NAT / CGNAT: run `brolink-relay` on a VPS and point the host at it, or install Tailscale on both machines.
 
 ## Relay
 
@@ -157,3 +171,7 @@ connection cannot leave a key stuck down on the host.
 
 Gamepad: XInput-compatible report, injected through ViGEmBus when installed.
 Sent only when the pad state changes.
+
+Clipboard: `ControlMsg::Clipboard { text }` in both directions, capped so the
+JSON still fits one datagram. Each side ignores a paste it just applied, so
+the two clipboards cannot oscillate.

@@ -5,8 +5,8 @@
 //! `gdigrab` behind that for machines where Desktop Duplication is unavailable.
 
 use anyhow::{anyhow, Context, Result};
-use forgelink_core::codec::{AnnexBSplitter, EncodedFrame};
-use forgelink_core::config::StreamQuality;
+use brolink_core::codec::{AnnexBSplitter, EncodedFrame};
+use brolink_core::config::{StreamQuality, MAX_BITRATE_KBPS, MIN_BITRATE_KBPS};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -31,6 +31,33 @@ pub struct EncoderInfo {
     pub name: String,
     pub ffmpeg: PathBuf,
     args: Vec<String>,
+}
+
+impl EncoderInfo {
+    /// Rebuild the command line at a new CBR without re-probing the GPU.
+    pub fn with_bitrate(&self, kbps: u32) -> Self {
+        let kbps = kbps.clamp(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS);
+        let mut args = self.args.clone();
+        set_flag(&mut args, "-b:v", format!("{kbps}k"));
+        set_flag(&mut args, "-maxrate", format!("{kbps}k"));
+        set_flag(&mut args, "-bufsize", format!("{}k", (kbps / 4).max(1000)));
+        Self {
+            name: self.name.clone(),
+            ffmpeg: self.ffmpeg.clone(),
+            args,
+        }
+    }
+}
+
+fn set_flag(args: &mut Vec<String>, flag: &str, val: String) {
+    if let Some(i) = args.iter().position(|a| a == flag) {
+        if i + 1 < args.len() {
+            args[i + 1] = val;
+            return;
+        }
+    }
+    args.push(flag.into());
+    args.push(val);
 }
 
 pub struct VideoPipeline {
@@ -512,7 +539,7 @@ fn read_loop<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgelink_core::config::QualityPreset;
+    use brolink_core::config::QualityPreset;
 
     fn quality() -> StreamQuality {
         StreamQuality::balanced()
@@ -601,6 +628,25 @@ mod tests {
         // Unknown preferences fall back to the default order.
         let unknown = candidates(&quality(), 0, "h264_magic");
         assert_eq!(unknown[0].0, all[0].0);
+    }
+
+    #[test]
+    fn with_bitrate_rewrites_the_rate_flags_and_keeps_the_encoder() {
+        let info = EncoderInfo {
+            name: "h264_nvenc".into(),
+            ffmpeg: PathBuf::from("ffmpeg"),
+            args: bitrate_args(25_000, 60),
+        };
+        let next = info.with_bitrate(10_000);
+        assert_eq!(next.name, "h264_nvenc");
+        assert_eq!(arg_after(&next.args, "-b:v"), Some("10000k"));
+        assert_eq!(arg_after(&next.args, "-maxrate"), Some("10000k"));
+        assert_eq!(arg_after(&next.args, "-bufsize"), Some("2500k"));
+        assert_eq!(
+            arg_after(&info.args, "-b:v"),
+            Some("25000k"),
+            "original unchanged"
+        );
     }
 
     #[test]

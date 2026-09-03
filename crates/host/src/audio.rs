@@ -569,8 +569,8 @@ mod tests {
             assert_eq!(p.pcm.len(), FRAME_VALUES * 2);
             // A sealed audio datagram must fit the MTU budget.
             assert!(
-                p.pcm.len() + forgelink_core::proto::AUDIO_HEADER_LEN
-                    <= forgelink_core::proto::MAX_PAYLOAD,
+                p.pcm.len() + brolink_core::proto::AUDIO_HEADER_LEN
+                    <= brolink_core::proto::MAX_PAYLOAD,
                 "audio packet of {} bytes exceeds the datagram budget",
                 p.pcm.len()
             );

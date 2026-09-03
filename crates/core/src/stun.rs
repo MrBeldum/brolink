@@ -75,10 +75,10 @@ fn parse_mapped(msg: &[u8]) -> Result<SocketAddr> {
         }
         let val = &msg[val_start..val_end];
         if atype == XOR_MAPPED_ADDRESS {
-            return decode_address(val, true);
+            return decode_address(val, true, &msg[4..20]);
         }
         if atype == MAPPED_ADDRESS {
-            return decode_address(val, false);
+            return decode_address(val, false, &msg[4..20]);
         }
         i = val_end;
         // 4-byte padding
@@ -89,7 +89,7 @@ fn parse_mapped(msg: &[u8]) -> Result<SocketAddr> {
     bail!("STUN response had no mapped address")
 }
 
-fn decode_address(val: &[u8], xor: bool) -> Result<SocketAddr> {
+fn decode_address(val: &[u8], xor: bool, xor_bytes: &[u8]) -> Result<SocketAddr> {
     if val.len() < 8 {
         bail!("short address attr");
     }
@@ -111,6 +111,23 @@ fn decode_address(val: &[u8], xor: bool) -> Result<SocketAddr> {
                 }
             }
             Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port))
+        }
+        0x02 => {
+            if val.len() < 20 {
+                bail!("short v6");
+            }
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&val[4..20]);
+            if xor {
+                // XOR-MAPPED IPv6 is xored with magic cookie || transaction id.
+                for (dst, src) in ip.iter_mut().zip(xor_bytes.iter()) {
+                    *dst ^= *src;
+                }
+            }
+            Ok(SocketAddr::new(
+                IpAddr::V6(std::net::Ipv6Addr::from(ip)),
+                port,
+            ))
         }
         _ => bail!("unsupported STUN address family {family}"),
     }

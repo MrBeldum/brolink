@@ -8,17 +8,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
-authors = ["ForgeLink Contributors"]
+authors = ["BroLink Contributors"]
 description = "Game-quality remote play from an Apple Silicon Mac to a Windows PC"
-repository = "https://github.com/MrBeldum/forgelink"
-homepage = "https://github.com/MrBeldum/forgelink"
+repository = "https://github.com/MrBeldum/brolink"
+homepage = "https://github.com/MrBeldum/brolink"
 readme = "README.md"
 
 [workspace.dependencies]
-forgelink-core = { path = "crates/core", version = "0.1.0" }
+brolink-core = { path = "crates/core", version = "1.0.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

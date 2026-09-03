@@ -1,4 +1,4 @@
-//! Persistent Ed25519 identity for a ForgeLink node.
+//! Persistent Ed25519 identity for a BroLink node.
 
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -106,6 +106,21 @@ impl AllowList {
         });
     }
 
+    /// Forget a previously paired client. Returns true if it was present.
+    pub fn remove(&mut self, public: &[u8; 32]) -> bool {
+        let hex = data_encoding::HEXLOWER.encode(public);
+        let before = self.clients.len();
+        self.clients.retain(|c| c.public != hex);
+        self.clients.len() != before
+    }
+
+    pub fn remove_hex(&mut self, hex: &str) -> bool {
+        let hex = hex.to_ascii_lowercase();
+        let before = self.clients.len();
+        self.clients.retain(|c| c.public != hex);
+        self.clients.len() != before
+    }
+
     pub fn parse_public(hex: &str) -> Result<[u8; 32]> {
         let v = data_encoding::HEXLOWER
             .decode(hex.as_bytes())
@@ -117,7 +132,7 @@ impl AllowList {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
-    let base = directories::ProjectDirs::from("dev", "ForgeLink", "ForgeLink")
+    let base = directories::ProjectDirs::from("dev", "BroLink", "BroLink")
         .ok_or_else(|| anyhow!("cannot resolve data dir"))?;
     Ok(base.config_dir().to_path_buf())
 }
@@ -128,7 +143,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "forgelink-test-{tag}-{}-{}",
+            "brolink-test-{tag}-{}-{}",
             std::process::id(),
             crate::proto::now_us()
         ));
@@ -196,6 +211,11 @@ mod tests {
         let reloaded = AllowList::load(&path).unwrap();
         assert!(reloaded.contains(&key));
         assert_eq!(reloaded.clients[0].name, "Mac");
+
+        let mut reloaded = reloaded;
+        assert!(reloaded.remove(&key));
+        assert!(!reloaded.contains(&key));
+        assert!(!reloaded.remove(&key), "second remove is a no-op");
         let _ = fs::remove_dir_all(&dir);
     }
 

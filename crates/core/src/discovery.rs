@@ -131,7 +131,7 @@ mod tests {
             port,
             version: "0.1.0".into(),
             encoder: "h264_amf".into(),
-            ticket: "flk1_abc".into(),
+            ticket: "blk1_abc".into(),
         }
     }
 
@@ -206,7 +206,7 @@ mod tests {
             addr: "192.168.1.5:47850".parse().unwrap(),
             last_seen: Instant::now(),
         };
-        assert_eq!(with.connect_target(), "flk1_abc");
+        assert_eq!(with.connect_target(), "blk1_abc");
 
         let mut b = beacon("aa", 47850);
         b.ticket.clear();

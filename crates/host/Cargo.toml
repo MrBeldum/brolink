@@ -1,17 +1,17 @@
 [package]
-name = "forgelink-host"
+name = "brolink-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "ForgeLink Windows host — capture, encode, and stream the desktop"
+description = "BroLink Windows host — capture, encode, and stream the desktop"
 
 [[bin]]
-name = "forgelink-host"
+name = "brolink-host"
 path = "src/main.rs"
 
 [dependencies]
-forgelink-core.workspace = true
+brolink-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true }
@@ -30,6 +30,9 @@ crossbeam-channel.workspace = true
 directories.workspace = true
 local-ip-address.workspace = true
 libloading = "0.8"
+ureq = "2.12"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

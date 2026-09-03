@@ -1,7 +1,8 @@
 # Contributing
 
-Remote Play is the first complete function. Keep changes to the wire
-protocol backward-compatible or bump `PROTO_VERSION`.
+Remote Play is the product. Keep changes to the wire protocol
+backward-compatible or bump `PROTO_VERSION`. Ticket version 2 (IPv4) must
+keep decoding; version 3 is for IPv6.
 
 Before opening a PR:
 
@@ -24,5 +25,5 @@ needs `-x264-params sliced-threads=0:slices=1` for this, and `gdigrab` capture
 needs an explicit `-pix_fmt nv12` or it produces 4:4:4 output the client
 cannot decode.
 
-Please do not wrap Sunshine or Moonlight as a hidden subprocess — ForgeLink
-owns its protocol so backup and compute can share the session later.
+Please do not wrap Sunshine or Moonlight as a hidden subprocess — BroLink
+owns its protocol.

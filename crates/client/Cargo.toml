@@ -1,17 +1,17 @@
 [package]
-name = "forgelink-client"
+name = "brolink-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "ForgeLink client — play your Windows PC from a Mac (or another Windows box)"
+description = "BroLink client — play your Windows PC from a Mac (or another Windows box)"
 
 [[bin]]
-name = "forgelink-client"
+name = "brolink-client"
 path = "src/main.rs"
 
 [dependencies]
-forgelink-core.workspace = true
+brolink-core.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
@@ -24,3 +24,4 @@ clap.workspace = true
 openh264.workspace = true
 cpal.workspace = true
 gilrs.workspace = true
+arboard = "3"

@@ -1,6 +1,6 @@
 //! Keyboard / mouse injection via SendInput, plus optional ViGEm Xbox 360 pad.
 
-use forgelink_core::proto::InputEvent;
+use brolink_core::proto::InputEvent;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 

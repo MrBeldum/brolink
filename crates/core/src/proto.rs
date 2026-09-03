@@ -1,7 +1,7 @@
-//! Binary packet format for ForgeLink.
+//! Binary packet format for BroLink.
 //!
 //! Unencrypted header (12 bytes):
-//!   magic[4] = b"FLK1"
+//!   magic[4] = b"BLK1"
 //!   version[1]
 //!   type[1]
 //!   seq[4] little-endian
@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 
-pub const MAGIC: [u8; 4] = *b"FLK1";
+pub const MAGIC: [u8; 4] = *b"BLK1";
 pub const PROTO_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 12;
 pub const DEFAULT_PORT: u16 = 47850;
@@ -229,6 +229,10 @@ pub struct HelloMsg {
     pub fps: Option<u32>,
     #[serde(default)]
     pub bitrate_kbps: Option<u32>,
+    /// Client's own STUN reflexive address (`ip:port`), so the host can send
+    /// a packet back and complete a UDP hole punch.
+    #[serde(default)]
+    pub client_wan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +307,11 @@ pub enum ControlMsg {
     /// disconnects, so a key held at that moment does not stay down on the
     /// remote machine.
     ReleaseAllInput,
+    /// UTF-8 clipboard. Capped at [`crate::MAX_CLIPBOARD_CHARS`] characters;
+    /// oversized pastes are dropped rather than split across datagrams.
+    Clipboard {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,6 +389,30 @@ pub fn chunk_input_events(events: Vec<InputEvent>) -> Vec<Vec<InputEvent>> {
 
 pub fn json_from_slice<T: for<'de> Deserialize<'de>>(b: &[u8]) -> Result<T> {
     Ok(serde_json::from_slice(b)?)
+}
+
+/// Drop a clipboard paste that cannot fit one datagram of JSON.
+pub fn clipboard_or_skip(text: &str) -> Option<ControlMsg> {
+    let text = text.trim_end_matches('\0');
+    if text.is_empty() {
+        return None;
+    }
+    let mut clipped: String = text.chars().take(crate::MAX_CLIPBOARD_CHARS).collect();
+    loop {
+        let msg = ControlMsg::Clipboard {
+            text: clipped.clone(),
+        };
+        match json_payload(&msg) {
+            Ok(v) if v.len() <= MAX_PAYLOAD => return Some(msg),
+            _ => {
+                let n = clipped.chars().count();
+                if n <= 8 {
+                    return None;
+                }
+                clipped = clipped.chars().take(n - 32).collect();
+            }
+        }
+    }
 }
 
 /// Video payload (not JSON):
@@ -613,5 +646,35 @@ mod tests {
         let chunks = chunk_input_events(events.clone());
         assert_eq!(chunks, vec![events]);
         assert!(chunk_input_events(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn clipboard_skips_empty_and_fits_the_mtu() {
+        assert!(clipboard_or_skip("").is_none());
+        assert!(clipboard_or_skip("   ").is_some());
+        let msg = clipboard_or_skip("hello from the Mac").unwrap();
+        match msg {
+            ControlMsg::Clipboard { text } => assert_eq!(text, "hello from the Mac"),
+            _ => panic!("wrong variant"),
+        }
+        let huge = "x".repeat(crate::MAX_CLIPBOARD_CHARS + 50);
+        let msg = clipboard_or_skip(&huge).expect("oversize is truncated, not dropped");
+        match msg {
+            ControlMsg::Clipboard { text } => {
+                assert!(text.chars().count() <= crate::MAX_CLIPBOARD_CHARS);
+                assert!(
+                    json_payload(&ControlMsg::Clipboard { text }).unwrap().len() <= MAX_PAYLOAD
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn hello_still_decodes_without_the_new_optional_fields() {
+        let json = br#"{"client_id":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"client_eph":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"name":"Mac","app_version":"1.0.0"}"#;
+        let h: HelloMsg = serde_json::from_slice(json).unwrap();
+        assert!(h.client_wan.is_none());
+        assert_eq!(h.name, "Mac");
     }
 }

@@ -1,13 +1,16 @@
 mod app;
 mod audio;
+mod clipboard;
 mod encode;
 mod engine;
+mod ffmpeg_setup;
 mod input;
+mod windows_setup;
 
 use anyhow::Result;
+use brolink_core::config::HostConfig;
+use brolink_core::identity::Identity;
 use clap::Parser;
-use forgelink_core::config::HostConfig;
-use forgelink_core::identity::Identity;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -17,9 +20,9 @@ use std::os::windows::process::CommandExt;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "forgelink-host",
+    name = "brolink-host",
     version,
-    about = "ForgeLink Windows host — game-quality remote play"
+    about = "BroLink Windows host — game-quality remote play"
 )]
 struct Args {
     /// Run without the control panel (prints the ticket and logs to stdout).
@@ -34,7 +37,7 @@ struct Args {
     /// Skip the PIN prompt and auto-trust new clients (LAN testing only).
     #[arg(long)]
     no_pin: bool,
-    /// Advertise a `forgelink-relay` at this `host:port` for hard-NAT clients.
+    /// Advertise a `brolink-relay` at this `host:port` for hard-NAT clients.
     #[arg(long)]
     relay: Option<String>,
     /// Do not try to add a Windows Firewall rule on startup.
@@ -80,7 +83,7 @@ fn main() -> Result<()> {
         tracing::info!("--no-audio: system audio will not be captured");
     }
 
-    let identity = Identity::load_or_create(&forgelink_core::config::host_identity_path()?)?;
+    let identity = Identity::load_or_create(&brolink_core::config::host_identity_path()?)?;
     tracing::info!("host id {}", identity.short_id());
 
     raise_priority();
@@ -93,7 +96,7 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_name("forgelink-host")
+        .thread_name("brolink-host")
         .build()?;
     let engine = Arc::new(engine::Engine::new(cfg.clone(), identity));
     let engine_run = engine.clone();
@@ -114,13 +117,13 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([720.0, 900.0])
             .with_min_inner_size([520.0, 640.0])
-            .with_title("ForgeLink Host"),
+            .with_title("BroLink Host"),
         vsync: true,
         ..Default::default()
     };
     let engine_ui = engine.clone();
     let result = eframe::run_native(
-        "ForgeLink Host",
+        "BroLink Host",
         native,
         Box::new(move |cc| Ok(Box::new(app::HostApp::new(cc, engine_ui, cfg)))),
     );
@@ -141,7 +144,7 @@ fn run_headless(engine: &Arc<engine::Engine>) -> Result<()> {
                 anyhow::bail!("{err}");
             }
             if !st.ticket_display.is_empty() {
-                println!("ForgeLink ticket:\n{}\n", st.ticket_display);
+                println!("BroLink ticket:\n{}\n", st.ticket_display);
                 break;
             }
         }
@@ -161,7 +164,7 @@ fn run_headless(engine: &Arc<engine::Engine>) -> Result<()> {
     // virtual gamepad instead of leaving them behind.
     engine.stop();
     std::thread::sleep(std::time::Duration::from_millis(200));
-    println!("ForgeLink host stopped.");
+    println!("BroLink host stopped.");
     Ok(())
 }
 
@@ -245,7 +248,7 @@ fn warn_if_unreachable() {
 fn ensure_firewall_rule(port: u16) {
     #[cfg(windows)]
     {
-        const RULE: &str = "ForgeLink Host";
+        const RULE: &str = "BroLink Host";
         // Arguments are passed as separate values: splitting a single string on
         // spaces would cut the quoted rule name in half.
         let exists = std::process::Command::new("netsh")

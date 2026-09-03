@@ -1,5 +1,5 @@
-ForgeLink
-Copyright (c) 2026 ForgeLink Contributors
+BroLink
+Copyright (c) 2026 BroLink Contributors
 
 This product may dynamically invoke a local FFmpeg binary for hardware
 capture and encode. FFmpeg is a separate program, typically licensed
