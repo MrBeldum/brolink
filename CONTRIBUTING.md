@@ -9,7 +9,7 @@ Before opening a PR:
 cargo fmt --all
 cargo clippy --workspace --all-targets    # must be warning-free
 cargo test --workspace
-.\scripts\test-loopback.ps1               # the end-to-end check
+.\scripts\test-loopback.ps1               # the end-to-end check (video + audio)
 ```
 
 The loopback script is the one that catches real breakage: it runs a host and

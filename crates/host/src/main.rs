@@ -40,6 +40,9 @@ struct Args {
     /// Do not try to add a Windows Firewall rule on startup.
     #[arg(long)]
     no_firewall: bool,
+    /// Do not capture or stream system audio for this run.
+    #[arg(long)]
+    no_audio: bool,
 }
 
 fn main() -> Result<()> {
@@ -60,13 +63,21 @@ fn main() -> Result<()> {
     if let Some(r) = args.relay {
         cfg.relay = r;
     }
+    cfg.quality = cfg.quality.sanitized();
+    if let Err(e) = cfg.save() {
+        tracing::warn!("could not save host config: {e:#}");
+    }
+
+    // Applied *after* the save, so they last one run. Persisting --no-pin
+    // meant a single test left the host auto-trusting every future client,
+    // with nothing in the UI to say pairing had been turned off.
     if args.no_pin {
         cfg.auto_trust = true;
         tracing::warn!("--no-pin: any client that can reach this PC will be trusted");
     }
-    cfg.quality = cfg.quality.sanitized();
-    if let Err(e) = cfg.save() {
-        tracing::warn!("could not save host config: {e:#}");
+    if args.no_audio {
+        cfg.enable_audio = false;
+        tracing::info!("--no-audio: system audio will not be captured");
     }
 
     let identity = Identity::load_or_create(&forgelink_core::config::host_identity_path()?)?;

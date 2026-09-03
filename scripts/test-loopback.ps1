@@ -10,8 +10,46 @@ param(
     [ValidateSet("release", "debug")]
     [string]$Configuration = "release",
     # Skip `cargo build`. Only pass this if you just built.
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    # Skip the audio assertion. Needed on machines with no output device --
+    # WASAPI loopback has no endpoint to capture from there.
+    [switch]$NoAudio
 )
+
+# A tone to capture. WASAPI loopback delivers nothing on a silent desktop, so
+# without something playing an audio check would fail for the wrong reason.
+function New-ToneWav {
+    param([string]$Path, [int]$Hz = 440, [double]$Seconds = 0.25)
+    $rate = 48000
+    $channels = 2
+    $frames = [int]($rate * $Seconds)
+    $dataBytes = $frames * $channels * 2
+    $fs = [System.IO.File]::Create($Path)
+    $bw = New-Object System.IO.BinaryWriter($fs)
+    try {
+        $bw.Write([char[]]"RIFF")
+        $bw.Write([int](36 + $dataBytes))
+        $bw.Write([char[]]"WAVE")
+        $bw.Write([char[]]"fmt ")
+        $bw.Write([int]16)
+        $bw.Write([int16]1)
+        $bw.Write([int16]$channels)
+        $bw.Write([int]$rate)
+        $bw.Write([int]($rate * $channels * 2))
+        $bw.Write([int16]($channels * 2))
+        $bw.Write([int16]16)
+        $bw.Write([char[]]"data")
+        $bw.Write([int]$dataBytes)
+        for ($i = 0; $i -lt $frames; $i++) {
+            $v = [int16](12000 * [Math]::Sin(2 * [Math]::PI * $Hz * $i / $rate))
+            $bw.Write($v)
+            $bw.Write($v)
+        }
+    } finally {
+        $bw.Dispose()
+        $fs.Dispose()
+    }
+}
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -69,15 +107,27 @@ try {
         if (-not $Ticket) { throw "could not read the ticket from the host output" }
         Write-Host "ticket $($Ticket.Substring(0, [Math]::Min(24, $Ticket.Length)))..."
 
+        # --volume 0 keeps the client's own playback out of the host's
+        # loopback capture; the frame counters still move while muted.
+        $audioArgs = @()
+        if (-not $NoAudio) {
+            $tone = Join-Path $env:TEMP "fl-tone.wav"
+            New-ToneWav -Path $tone
+            $player = New-Object System.Media.SoundPlayer $tone
+            $player.PlayLooping()
+            Write-Host "playing a 440 Hz tone for the host to capture"
+            $audioArgs = @("--require-audio", "--volume", "0")
+        }
+
         # Bare address: no identity to pin, so this is the weakest path.
         Write-Host "--- connecting by address ---"
-        & $ClientExe --connect 127.0.0.1 --headless
+        & $ClientExe --connect 127.0.0.1 --headless @audioArgs
         if ($LASTEXITCODE -ne 0) { throw "client failed over a bare address: $LASTEXITCODE" }
 
         # Ticket: exercises the v2 ticket parse, candidate ordering, and the
         # host-identity check that a bare address cannot do.
         Write-Host "--- connecting by ticket ---"
-        & $ClientExe --connect $Ticket --headless
+        & $ClientExe --connect $Ticket --headless @audioArgs
         if ($LASTEXITCODE -ne 0) { throw "client failed over a ticket: $LASTEXITCODE" }
 
         Write-Host "loopback OK" -ForegroundColor Green
@@ -90,6 +140,7 @@ try {
         if (Test-Path $HostErr) { Get-Content $HostErr }
         throw
     } finally {
+        if ($player) { $player.Stop() }
         if (-not $hp.HasExited) { Stop-Process -Id $hp.Id -Force }
     }
 } finally {

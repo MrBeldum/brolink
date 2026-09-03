@@ -13,8 +13,8 @@ edition = "2021"
 license = "MIT"
 authors = ["ForgeLink Contributors"]
 description = "Game-quality remote play from an Apple Silicon Mac to a Windows PC"
-repository = "https://github.com/forgelink/forgelink"
-homepage = "https://github.com/forgelink/forgelink"
+repository = "https://github.com/MrBeldum/forgelink"
+homepage = "https://github.com/MrBeldum/forgelink"
 readme = "README.md"
 
 [workspace.dependencies]

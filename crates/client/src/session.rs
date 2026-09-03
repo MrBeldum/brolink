@@ -1,6 +1,6 @@
 //! Client connection: handshake, video/audio receive, input send.
 
-use crate::audio::AudioPlayer;
+use crate::audio::{AudioPlayer, AudioStats};
 use crate::decode::{H264Decoder, VideoSink};
 use anyhow::{Context, Result};
 use bytes::BytesMut;
@@ -66,6 +66,7 @@ pub fn spawn(
     cmd_rx: mpsc::UnboundedReceiver<ClientCmd>,
     ev_tx: mpsc::UnboundedSender<ClientEvent>,
     video: Arc<VideoSink>,
+    audio_stats: Arc<AudioStats>,
 ) {
     std::thread::Builder::new()
         .name("forgelink-client-net".into())
@@ -74,7 +75,7 @@ pub fn spawn(
                 .enable_all()
                 .build()
                 .expect("client tokio runtime");
-            rt.block_on(run(cmd_rx, ev_tx, video));
+            rt.block_on(run(cmd_rx, ev_tx, video, audio_stats));
         })
         .expect("spawn client net thread");
 }
@@ -83,6 +84,7 @@ async fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<ClientCmd>,
     ev_tx: mpsc::UnboundedSender<ClientEvent>,
     video: Arc<VideoSink>,
+    audio_stats: Arc<AudioStats>,
 ) {
     let mut live: Option<Live> = None;
     // A fixed cadence rather than a fresh sleep each iteration: recreating the
@@ -100,7 +102,7 @@ async fn run(
                         if let Some(mut old) = live.take() {
                             let _ = old.goodbye().await;
                         }
-                        match connect(&req, &ev_tx, video.clone()).await {
+                        match connect(&req, &ev_tx, video.clone(), audio_stats.clone()).await {
                             Ok(l) => {
                                 if !l.awaiting_pin {
                                     let _ = ev_tx.send(ClientEvent::Ready(l.ready.clone()));
@@ -172,6 +174,7 @@ struct Live {
     decoder: H264Decoder,
     video: Arc<VideoSink>,
     audio: Option<AudioPlayer>,
+    audio_stats: Arc<AudioStats>,
     replay: ReplayWindow,
     scratch: Vec<u8>,
     buf: Vec<u8>,
@@ -232,6 +235,7 @@ async fn connect(
     req: &ConnectRequest,
     ev: &mpsc::UnboundedSender<ClientEvent>,
     video: Arc<VideoSink>,
+    audio_stats: Arc<AudioStats>,
 ) -> Result<Live> {
     let ConnectRequest {
         target,
@@ -341,7 +345,7 @@ async fn connect(
         ack.host_name
     )));
 
-    let audio = match AudioPlayer::start(cfg.volume) {
+    let audio = match AudioPlayer::start(cfg.volume, audio_stats.clone()) {
         Ok(a) => Some(a),
         Err(e) => {
             let _ = ev.send(ClientEvent::Log(format!("Audio output unavailable: {e:#}")));
@@ -369,6 +373,7 @@ async fn connect(
         decoder: H264Decoder::new()?,
         video,
         audio,
+        audio_stats,
         replay: ReplayWindow::default(),
         scratch: Vec::new(),
         buf: vec![0u8; RECV_BUF],
@@ -627,6 +632,9 @@ impl Live {
             }
             PacketType::Audio => {
                 if let Ok((_ts, data)) = parse_audio_payload(payload) {
+                    // Counted before the device check so a missing output
+                    // device stays distinguishable from a silent host.
+                    self.audio_stats.packet();
                     if let Some(a) = self.audio.as_ref() {
                         a.push_s16_48k_stereo(data);
                     }

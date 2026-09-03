@@ -5,6 +5,7 @@ mod input_map;
 mod session;
 
 use anyhow::Result;
+use audio::AudioStats;
 use clap::Parser;
 use decode::VideoSink;
 use forgelink_core::config::ClientConfig;
@@ -18,6 +19,11 @@ use tracing_subscriber::EnvFilter;
 const HEADLESS_FRAMES: u64 = 30;
 /// Connect, negotiate, probe the encoder and stream 30 frames inside this.
 const HEADLESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// 100 ms of audio actually handed to the output device. Enough to clear the
+/// 40 ms prebuffer and prove the stream keeps flowing, not just starts.
+const HEADLESS_AUDIO_FRAMES: u64 = 4_800;
+/// Any real signal clears this easily; a stream of silent buffers never will.
+const HEADLESS_AUDIO_PEAK: u64 = 64;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -35,6 +41,11 @@ struct Args {
     /// Override the saved output volume (0.0–2.0).
     #[arg(long)]
     volume: Option<f32>,
+    /// Headless: also require audio to reach the output device, not just video.
+    /// Needs something playing on the host — WASAPI loopback has nothing to
+    /// capture on a silent desktop.
+    #[arg(long)]
+    require_audio: bool,
 }
 
 fn main() -> Result<()> {
@@ -62,10 +73,22 @@ fn main() -> Result<()> {
     // Decoded video is handed over through a shared latest-frame slot rather
     // than the event channel, so a slow UI cannot build a backlog of frames.
     let video = Arc::new(VideoSink::default());
-    session::spawn(cmd_rx, ev_tx, video.clone());
+    let audio_stats = Arc::new(AudioStats::default());
+    session::spawn(cmd_rx, ev_tx, video.clone(), audio_stats.clone());
 
     if args.headless {
-        return run_headless(cmd_tx, ev_rx, video, cfg, identity, auto);
+        return run_headless(
+            Headless {
+                cmd_tx,
+                ev_rx,
+                video,
+                audio: audio_stats,
+                require_audio: args.require_audio,
+            },
+            cfg,
+            identity,
+            auto,
+        );
     }
 
     let native = eframe::NativeOptions {
@@ -91,15 +114,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// The channels and sinks the headless run reads its verdict from.
+struct Headless {
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<ClientCmd>,
+    ev_rx: tokio::sync::mpsc::UnboundedReceiver<ClientEvent>,
+    video: Arc<VideoSink>,
+    audio: Arc<AudioStats>,
+    require_audio: bool,
+}
+
 /// Connect and confirm decoded frames actually arrive, then exit 0.
 fn run_headless(
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<ClientCmd>,
-    mut ev_rx: tokio::sync::mpsc::UnboundedReceiver<ClientEvent>,
-    video: Arc<VideoSink>,
+    h: Headless,
     cfg: ClientConfig,
     identity: Identity,
     auto: Option<String>,
 ) -> Result<()> {
+    let Headless {
+        cmd_tx,
+        mut ev_rx,
+        video,
+        audio,
+        require_audio,
+    } = h;
     let target = auto.unwrap_or_else(|| cfg.last_ticket.clone());
     if target.trim().is_empty() {
         anyhow::bail!("--headless requires --connect or a saved ticket");
@@ -120,13 +157,26 @@ fn run_headless(
             announced_first = true;
             tracing::info!("first video frame received");
         }
-        if frames >= HEADLESS_FRAMES {
+        let audio_ok = !require_audio
+            || (audio.frames_out() >= HEADLESS_AUDIO_FRAMES && audio.peak() >= HEADLESS_AUDIO_PEAK);
+        if frames >= HEADLESS_FRAMES && audio_ok {
             tracing::info!("received {frames} video frames — pipeline OK");
+            if require_audio {
+                tracing::info!(
+                    "played {} audio frames from {} packets, peak {} — audio OK",
+                    audio.frames_out(),
+                    audio.packets(),
+                    audio.peak()
+                );
+            }
             let _ = cmd_tx.send(ClientCmd::Disconnect);
             std::thread::sleep(Duration::from_millis(200));
             return Ok(());
         }
         if Instant::now() > deadline {
+            if frames >= HEADLESS_FRAMES {
+                anyhow::bail!("headless: video OK but {}", audio_diagnosis(&audio));
+            }
             anyhow::bail!("headless: timed out after {HEADLESS_TIMEOUT:?} (frames={frames})");
         }
         // Drop whatever the UI would have shown so buffers get recycled.
@@ -167,4 +217,33 @@ fn run_headless(
             }
         }
     }
+}
+
+/// Say *where* the audio path stopped, not just that it did. The three stages
+/// fail for entirely different reasons and the fix differs each time.
+fn audio_diagnosis(a: &AudioStats) -> String {
+    let (packets, frames_in, frames_out) = (a.packets(), a.frames_in(), a.frames_out());
+    if packets == 0 {
+        return "no audio packets arrived; is the host running with audio enabled, and is anything actually playing on it?"
+            .into();
+    }
+    if frames_in == 0 {
+        return format!(
+            "{packets} audio packets arrived but none were buffered; no output device opened on this machine"
+        );
+    }
+    if frames_out == 0 {
+        return format!(
+            "{frames_in} audio frames were buffered from {packets} packets but none reached the device; the output stream is not running"
+        );
+    }
+    if frames_out < HEADLESS_AUDIO_FRAMES {
+        return format!(
+            "only {frames_out} of {HEADLESS_AUDIO_FRAMES} audio frames played ({packets} packets, {frames_in} buffered); the stream is starving"
+        );
+    }
+    format!(
+        "{frames_out} audio frames played but every sample was silence (peak {}, need {HEADLESS_AUDIO_PEAK}); the pipeline runs but nothing audible was captured. Is anything playing on the host?",
+        a.peak()
+    )
 }

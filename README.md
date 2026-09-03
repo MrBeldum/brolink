@@ -65,6 +65,7 @@ Useful flags:
 | `--no-pin` | Trust any client that can reach this PC (LAN testing only) |
 | `--relay HOST:PORT` | Advertise a `forgelink-relay` for hard-NAT clients |
 | `--no-firewall` | Do not try to add a Windows Firewall rule on startup |
+| `--no-audio` | Do not capture or stream system audio for this run |
 
 Optional but recommended for games:
 
@@ -144,6 +145,19 @@ It builds first, waits for the host to publish a ticket, then connects twice --
 once by bare address and once by ticket -- and requires 30 decoded frames each
 time. On failure it prints the host's log, because most real failures are on
 the capture/encode side.
+
+It also plays a 440 Hz tone for the host to capture and requires 100 ms of it
+to reach the client's output device, with a non-zero peak. The peak matters:
+WASAPI loopback reports silent buffers rather than stopping, so counting
+frames alone would pass on a stream of digital silence. Pass `-NoAudio` on a
+machine with no output device.
+
+### What this does not cover
+
+The loopback runs a Windows client against a Windows host over `127.0.0.1`.
+It says nothing about the Mac client, the relay, or NAT traversal, all of
+which are only unit-tested. Treat a green loopback as "the pipeline works",
+not "the product works".
 
 ## Repository layout
 

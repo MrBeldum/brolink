@@ -3,6 +3,28 @@
 ForgeLink's client is native Rust (`eframe` + OpenH264). It compiles for
 `aarch64-apple-darwin` and `x86_64-apple-darwin`.
 
+## Install a prebuilt client
+
+Download `forgelink-macos-arm64.tar.gz` from the GitHub Actions **release**
+run, then:
+
+```bash
+tar xzf forgelink-macos-arm64.tar.gz
+xattr -dr com.apple.quarantine ForgeLink.app
+open ForgeLink.app
+```
+
+The `xattr` step is not optional. The app is ad-hoc signed rather than signed
+with an Apple Developer ID, so Gatekeeper quarantines anything downloaded
+through a browser and reports it as damaged. Removing the quarantine flag is
+what tells macOS you fetched it deliberately.
+
+To watch the logs, run the binary inside the bundle directly:
+
+```bash
+RUST_LOG=info ForgeLink.app/Contents/MacOS/ForgeLink
+```
+
 ## Build on a Mac
 
 ```bash
