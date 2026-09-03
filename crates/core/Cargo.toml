@@ -1,0 +1,32 @@
+[package]
+name = "forgelink-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared protocol, crypto, and networking for ForgeLink"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+toml.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+rand.workspace = true
+chacha20poly1305.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+data-encoding.workspace = true
+socket2.workspace = true
+local-ip-address.workspace = true
+directories.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }

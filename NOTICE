@@ -1,0 +1,16 @@
+ForgeLink
+Copyright (c) 2026 ForgeLink Contributors
+
+This product may dynamically invoke a local FFmpeg binary for hardware
+capture and encode. FFmpeg is a separate program, typically licensed
+under LGPL/GPL depending on the build. The gyan.dev essentials build
+commonly used on Windows is GPL. Redistribute FFmpeg only under its
+own license terms.
+
+This product may use Cisco OpenH264 as a software encode/decode
+fallback. OpenH264 is subject to the Cisco OpenH264 license:
+https://www.openh264.org/BINARY_LICENSE.txt
+
+ViGEmBus (optional, for virtual Xbox 360 gamepads on the Windows host)
+is a separate driver by Nefarius, MIT licensed.
+https://github.com/nefarius/ViGEmBus

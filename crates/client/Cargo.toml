@@ -1,0 +1,26 @@
+[package]
+name = "forgelink-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ForgeLink client — play your Windows PC from a Mac (or another Windows box)"
+
+[[bin]]
+name = "forgelink-client"
+path = "src/main.rs"
+
+[dependencies]
+forgelink-core.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+eframe.workspace = true
+egui.workspace = true
+clap.workspace = true
+openh264.workspace = true
+cpal.workspace = true
+gilrs.workspace = true
