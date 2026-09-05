@@ -193,8 +193,10 @@ impl eframe::App for ClientApp {
                 ("Tailscale off", Tone::Danger)
             } else if !self.moonlight_ok {
                 ("Moonlight missing", Tone::Accent)
+            } else if prog.step == Step::Streaming {
+                ("Streaming", Tone::Success)
             } else if prog.active() {
-                ("Connected", Tone::Success)
+                ("Connecting", Tone::Accent)
             } else {
                 ("Ready", Tone::Success)
             };

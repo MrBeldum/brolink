@@ -102,6 +102,15 @@ try {{
 Step "Opening TCP {port} to the tailnet for BroLink Host"
 netsh advfirewall firewall delete rule name="BroLink Host" | Out-Null
 netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program="{exe}" | Out-Null
+if ($dir) {{
+    # Sunshine's installer adds its own rules; these make sure the tailnet
+    # can reach it even if that step was skipped or the rules were removed.
+    Step "Opening Sunshine's ports to the tailnet"
+    netsh advfirewall firewall delete rule name="BroLink Sunshine TCP" | Out-Null
+    netsh advfirewall firewall delete rule name="BroLink Sunshine UDP" | Out-Null
+    netsh advfirewall firewall add rule name="BroLink Sunshine TCP" dir=in action=allow protocol=TCP localport=47984-48010 remoteip=100.64.0.0/10 | Out-Null
+    netsh advfirewall firewall add rule name="BroLink Sunshine UDP" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 | Out-Null
+}}
 {wake}Step "BroLink setup finished"
 "#,
         install = install,
@@ -237,6 +246,7 @@ mod tests {
         assert!(!s.contains("Downloading Sunshine"));
         assert!(s.contains("Set-NetAdapterPowerManagement -Name 'Ethernet'"));
         assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
+        assert!(s.contains("localport=47984-48010 remoteip=100.64.0.0/10"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
         assert!(s.contains(
             "localport=47850 remoteip=100.64.0.0/10 program=\"C:\\x\\brolink-host.exe\""

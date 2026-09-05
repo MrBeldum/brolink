@@ -70,6 +70,7 @@ pub fn install(note: &dyn Fn(&str)) -> Result<()> {
         "-quiet",
         mnt.to_str().unwrap_or_default(),
     ]);
+    std::fs::create_dir_all(&mnt)?;
     sh(&[
         "hdiutil",
         "attach",
