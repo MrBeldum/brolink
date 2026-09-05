@@ -35,6 +35,16 @@ jobs (backup, offloaded compile, and so on are out of scope).
 - [x] Fast reconnect: a returning client replaces its own stale session
 - [x] Host quality settings cap the client's request instead of being ignored
 
+## v1.2 — What the Mac said
+
+- [x] Correct colour: the stream is limited-range BT.601 end to end, matching the decoder
+- [x] No letterboxing: a non-16:9 desktop streams at its own aspect ratio, and absolute mouse mapping is right with it
+- [x] Mouse released whenever the window loses focus; fn+F8 on macOS
+- [x] Mac audio opens in the device's native format, with a fallback to its default configuration
+- [x] Both GUIs rebuilt on one shared theme (crates/ui)
+- [x] Every screen renders to PNG for review without a PC
+- [x] Docs: the Gatekeeper prompt, signing, and a relay when the router cannot open a port
+
 ## Later
 
 - [ ] HEVC / AV1 encode when the client can decode it

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["BroLink Contributors"]
@@ -19,8 +19,8 @@ homepage = "https://github.com/MrBeldum/brolink"
 readme = "README.md"
 
 [workspace.dependencies]
-brolink-core = { path = "crates/core", version = "1.1.0" }
-brolink-ui = { path = "crates/ui", version = "1.1.0" }
+brolink-core = { path = "crates/core", version = "1.2.0" }
+brolink-ui = { path = "crates/ui", version = "1.2.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

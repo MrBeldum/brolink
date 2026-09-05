@@ -10,11 +10,13 @@ if [[ ! -f "$BIN" ]]; then
   exit 1
 fi
 APP="$ROOT/dist/BroLink.app"
+# The workspace version, so the bundle cannot drift from the binary inside it.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/BroLink"
 chmod +x "$APP/Contents/MacOS/BroLink"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -22,8 +24,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>BroLink</string>
   <key>CFBundleDisplayName</key><string>BroLink</string>
   <key>CFBundleIdentifier</key><string>dev.brolink.client</string>
-  <key>CFBundleVersion</key><string>1.1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.1.0</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleExecutable</key><string>BroLink</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

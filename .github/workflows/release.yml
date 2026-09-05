@@ -26,15 +26,9 @@ jobs:
         run: cargo test -p brolink-core -p brolink-client
       - name: build client
         run: cargo build --release -p brolink-client --target aarch64-apple-darwin
+      # bundle-macos.sh ad-hoc signs and verifies the bundle itself.
       - name: bundle
         run: bash scripts/bundle-macos.sh
-      # Apple Silicon refuses to run an unsigned binary outright. The linker
-      # ad-hoc signs the executable, but copying it into a bundle leaves the
-      # bundle itself unsigned, so sign the whole thing here.
-      - name: ad-hoc sign
-        run: |
-          codesign --force --deep --sign - dist/BroLink.app
-          codesign --verify --deep --strict --verbose=2 dist/BroLink.app
       - name: package
         run: |
           cp docs/MACOS.md dist/README-MACOS.md
@@ -113,26 +107,45 @@ jobs:
           connect, run `fix-firewall.ps1` from an elevated PowerShell --
           Windows block rules override allow rules and are the usual cause.
 
-          ## New in 1.1
+          ## New in 1.2
 
-          - Wake the PC from the Mac (also over the internet while it sleeps),
-            and sleep / restart / shut it down from the stream HUD
-          - Rendezvous on the relay: tickets keep working after the home IP
-            changes, and the host punches through port-restricted NATs
-          - IPv6 candidates are now actually served; permanent router mappings;
-            fast reconnect; host quality settings act as a cap
+          Fixes for everything reported from the Mac:
+
+          - Colour: the stream is pinned to limited-range BT.601, which is what
+            the client decodes. Desktop Duplication hands FFmpeg a full-range
+            frame and the old filter chain passed that through, so the picture
+            decoded over-bright and warm.
+          - No letterboxing: a non-16:9 desktop is encoded at its own aspect
+            ratio instead of being padded into a 16:9 box. This also fixes
+            absolute mouse positioning, which mapped the bars as desktop.
+          - The mouse is released whenever the window loses focus, so Cmd-Tab
+            always frees it. The hint says fn+F8 on macOS, where F8 is a media
+            key.
+          - Audio on the Mac: the client prefers the device's own sample format
+            and falls back to its default configuration if 48 kHz will not open.
+          - Both windows redesigned on one shared theme (crates/ui, Inter).
+          - Docs: why Gatekeeper calls the app damaged and how to sign it, and
+            running a relay when the router cannot open a port.
 
           ## What is verified
 
-          - 240+ unit tests, clippy clean, on Windows and macOS in CI
-          - End-to-end loopback on one Windows machine: capture, encode,
-            encrypt, fragment, send, reassemble, decrypt, decode, plus audio
-            checked for real signal rather than digital silence
+          - 242 unit tests, clippy clean, on Windows and macOS in CI
+          - End-to-end loopback on one Windows machine (h264_amf) with the new
+            filter chain: capture, encode, encrypt, fragment, send, reassemble,
+            decrypt, decode, plus audio checked for real signal rather than
+            digital silence
+          - The colour fix against a real Desktop Duplication frame: the old
+            chain produced full-range NV12 (white at Y=255), the new one
+            limited range (Y=235) whatever the capture frame is tagged
+          - The Mac client opens CoreAudio at 48 kHz F32 and plays every frame
+            (ignored test, run on the maintainer's Mac)
+          - Every screen of both UIs rendered to PNG and reviewed
 
           ## What is not
 
-          - The Mac client compiles and unit-tests on Apple Silicon in CI; a
-            Mac-to-Windows session has not been exercised by the maintainer
+          - A Mac-to-Windows streaming session with these fixes has not been
+            watched end to end; colour, aspect ratio and focus-release are
+            verified by construction and on Windows, not yet by eye on the Mac
           - Waking over the internet depends on the NIC keeping ARP offload on
             during sleep and on the router honouring a permanent mapping; both
             are common, neither is universal

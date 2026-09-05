@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-client"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-host"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-relay"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "brolink-core",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-ui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "brolink-core",
  "egui",
