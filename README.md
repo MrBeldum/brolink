@@ -66,13 +66,8 @@ Wired Ethernet is strongly preferred: most Wi-Fi adapters cannot wake a PC.
 ### Mac (client, Apple Silicon)
 
 Install [Tailscale](https://tailscale.com/download/mac) and sign in. Then
-either
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
-```
-
-or download `brolink-macos-arm64.tar.gz` from the release and
+download `brolink-macos-arm64.tar.gz` from the
+[latest release](https://github.com/MrBeldum/brolink/releases/latest) and
 
 ```bash
 tar xzf brolink-macos-arm64.tar.gz
@@ -82,8 +77,11 @@ open BroLink.app
 
 The `xattr` step is required for a browser download: the app is ad-hoc
 signed rather than Developer-ID signed, so Gatekeeper calls it damaged
-otherwise (the script avoids this because `curl` sets no quarantine flag).
-See [docs/MACOS.md](docs/MACOS.md) for signing it properly.
+otherwise. With the [GitHub CLI](https://cli.github.com) signed in,
+`scripts/install-macos-release.sh` does the download, the flag and the
+copy to `/Applications` in one go (the repository is private, so a plain
+`curl` cannot fetch releases). See [docs/MACOS.md](docs/MACOS.md) for
+signing it properly.
 
 BroLink offers to install Moonlight if it is not in `/Applications`.
 

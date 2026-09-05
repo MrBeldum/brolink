@@ -14,15 +14,8 @@ does the streaming, with VideoToolbox hardware decode of HEVC and AV1.
 
 ## Install a prebuilt app
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
-```
-
-That downloads the latest release, copies `BroLink.app` to `/Applications`,
-and opens it. Files fetched by `curl` carry no quarantine flag, so there is
-no Gatekeeper dialog.
-
-Or by hand: download `brolink-macos-arm64.tar.gz` from the release, then
+Download `brolink-macos-arm64.tar.gz` from the
+[latest release](https://github.com/MrBeldum/brolink/releases/latest), then
 
 ```bash
 tar xzf brolink-macos-arm64.tar.gz
@@ -35,6 +28,17 @@ signed rather than signed with an Apple Developer ID, and macOS 15 no longer
 offers "Open anyway" from the context menu for such apps; it reports them as
 damaged. Removing the quarantine flag is how you tell macOS you fetched it
 deliberately.
+
+With the [GitHub CLI](https://cli.github.com) installed and signed in
+(`brew install gh && gh auth login`), one command does all of that:
+
+```bash
+bash scripts/install-macos-release.sh
+```
+
+It fetches the release through `gh` (the repository is private, so a plain
+`curl` cannot), strips the flag, copies the app to `/Applications` and
+opens it.
 
 ## Build on a Mac
 
