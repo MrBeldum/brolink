@@ -46,7 +46,7 @@ Useful flags:
 | `--name NAME` | Override the advertised PC name |
 | `--port N` | UDP port (default 47850) |
 | `--no-pin` | Trust any client that can reach this PC (LAN testing only; not saved) |
-| `--relay HOST:PORT` | Advertise a `brolink-relay` for hard-NAT clients |
+| `--relay HOST:PORT` | Advertise a `brolink-relay` (relay + rendezvous) for hard-NAT clients and changing IPs |
 | `--no-firewall` | Do not try to add a Windows Firewall rule on startup |
 | `--no-audio` | Do not capture or stream system audio for this run |
 
@@ -63,6 +63,32 @@ The host tries, in order, to make the ticket work from another network:
 If the Internet card in the UI says the PC is not reachable from outside,
 either enable UPnP on the router, install Tailscale on both machines, or run
 `brolink-relay` on a small VPS and paste `host:47851` into **Relay**.
+
+## Waking it from the Mac, and turning it off
+
+The host window has a **Wake and power from the Mac** card. It shows the LAN
+adapter, its MAC, and whether Windows will wake the PC on a magic packet. If
+not, **Enable Wake-on-LAN** fixes it through a UAC prompt (it turns on
+magic-packet wake and ARP offload on the adapter and lets the device wake the
+PC). Once a Mac has connected, it remembers the MAC, and **Connect** on that
+PC wakes it automatically.
+
+What works, honestly:
+
+| PC state | Wake from the same LAN | Wake from the internet |
+|----------|-----------------------|------------------------|
+| Sleep (S3 / modern standby, plugged in) | yes | yes, via the router mapping the host created |
+| Hibernate / shut down with Fast Startup | usually | rarely: the router forgets the PC's address within minutes |
+| Shut down, Fast Startup off | if the NIC/BIOS allow wake from S5 | rarely, same reason |
+
+So: leave the PC **asleep**, not shut down, when you are away. The client's
+**PC ▾** menu (press **F8** first to free the mouse) offers Sleep, Restart,
+and Shut down; untick **Let a paired Mac sleep, restart, or shut down this
+PC** if you would rather it could not. Tick **Start with Windows** so the host
+is back after a restart. Remote power actions force-close programs, because
+nobody is there to answer a save prompt.
+
+Wi-Fi adapters often cannot wake the PC at all; use Ethernet for the host.
 
 ## Firewall
 

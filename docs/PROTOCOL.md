@@ -21,7 +21,8 @@ Payload follows. After handshake the payload is ChaCha20-Poly1305 ciphertext
 (16-byte tag appended). Nonce = `typ || 0x00×3 || seq_le || 0x00×4`. AAD =
 `role_byte || typ`.
 
-Hello, HelloAck, and Discovery are plaintext. Everything else is sealed.
+Hello, HelloAck, Discovery, and the rendezvous types are plaintext.
+Everything else is sealed.
 
 Sequence numbers never wrap. Because the nonce is derived from
 `(type, sequence)`, a wrap would reuse a nonce under the same key — the one
@@ -39,15 +40,25 @@ anything already seen or too old.
 | 2 | HelloAck | host identity + X25519 eph + `needs_pin` + Ed25519 signature |
 | 3 | PairPin | 6-digit PIN |
 | 4 | PairResult | ok / error |
-| 5 | SessionReady | width, height, fps, codec, encoder |
+| 5 | SessionReady | width, height, fps, codec, encoder, host name, wake MAC, power-control flag |
 | 6 | Video | fragmented Annex-B H.264 |
 | 7 | Audio | 48 kHz s16 stereo PCM, 5 ms per packet |
 | 8 | Input | mouse / key / XInput gamepad |
-| 9 | Control | IDR request, capture mode, release-all-input |
+| 9 | Control | IDR request, capture mode, release-all-input, clipboard, power |
 | 10 | Ping | RTT |
 | 11 | Pong | echo |
 | 12 | Goodbye | |
 | 13 | Discovery | LAN beacon (JSON) |
+| 14 | Register | host → rendezvous: signed key, name, candidates, cookie |
+| 15 | RegisterAck | rendezvous → host: observed address, TTL |
+| 16 | Lookup | client → rendezvous: signed host key, nonce, cookie; padded to 512 B |
+| 17 | LookupAck | rendezvous → client: host record or "unknown" |
+| 18 | Punch | rendezvous → host: client address + nonce |
+| 19 | PunchProbe | host → client: host key + nonce, opens the host's NAT |
+| 20 | Retry | rendezvous → either: "resend with this cookie" |
+
+Types 14–20 are never sealed: they belong to no session and are signed
+(Register, Lookup) or bind to a signed request's nonce instead.
 
 ## Video payload
 
@@ -124,7 +135,50 @@ timer (about 15 minutes) and do not use the media socket for SSDP.
 The host is reactive by default — it replies to the address a packet arrived
 from. Two exceptions make worldwide access work without a signalling server:
 UPnP/NAT-PMP (the router forwards the port) and `Hello.client_wan` (the host
-also sends `HelloAck` to the client's STUN address).
+also sends `HelloAck` to the client's STUN address). The UPnP lease is
+requested as permanent (NAT-PMP: seven days) so a PC that is asleep for a
+long weekend can still be woken from outside.
+
+## Rendezvous
+
+When the ticket names a relay, the same address also answers rendezvous
+requests on the media socket, unframed (the relay tells them from relay
+frames by the `BLK1` magic; relay tokens never start with it).
+
+1. The host sends `Register` every 20 s while idle: its key, name, and ticket
+   candidates, signed with its Ed25519 identity and timestamped (±120 s).
+   The first attempt has no cookie; the coordinator answers `Retry` with an
+   HMAC cookie bound to the source address and a 60 s slot, and the host
+   resends with it. Registrations expire after 90 s.
+2. Connecting, the client sends `Lookup` alongside its first `Hello`s (same
+   cookie dance). `LookupAck` returns the host's registered candidates and
+   the address the coordinator observed the registration from: the host's
+   live WAN mapping. The client adds those and sends `Hello` there at once.
+3. At the same moment the coordinator sends `Punch` to the host, which fires
+   two `PunchProbe`s at the client's address. That opens the host's NAT for
+   the client, and a client that sees the probe (matched by nonce) knows which
+   path is live and knocks there immediately.
+4. Direct paths that fail leave the relay, whose token is already in the
+   ticket.
+
+A hostile coordinator can delay or misdirect an introduction; it cannot
+impersonate the host (the client still checks the handshake signature against
+the pinned key), forge a registration, or make the host probe a spoofed
+address (the cookie proves the source).
+
+## Wake and power
+
+`SessionReady.wake_mac` carries the MAC of the host's LAN adapter; the client
+stores it with the saved PC. A magic packet (`FF×6` then the MAC ×16) is sent
+to the LAN broadcast, the LAN address on ports 9 and 47850, the /24 directed
+broadcast, and every WAN candidate on its ticket port. The NIC matches the
+pattern regardless of port, so the existing router mapping carries it.
+
+`ControlMsg::Power { action }` asks for `Sleep`, `Hibernate`, `Restart`, or
+`Shutdown`. The host answers with `Goodbye`, tears the session down (ffmpeg
+stopped, held keys released), waits a second, and acts. It only does so when
+`SessionReady.power_control` was true, which mirrors the host's
+**allow_power_control** setting.
 
 ## NAT
 

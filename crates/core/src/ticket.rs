@@ -23,10 +23,11 @@
 //! an optional WAN address.
 
 use crate::identity::Identity;
+use crate::wire::{read_addr, write_addr, write_v4, Cursor};
 use anyhow::{anyhow, bail, Result};
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 pub const TICKET_PREFIX: &str = "blk1_";
 /// A name longer than this is truncated when the ticket is built.
@@ -274,7 +275,7 @@ fn decode_v1(raw: &[u8]) -> Result<Ticket> {
 fn decode_v2(raw: &[u8]) -> Result<Ticket> {
     let mut cur = Cursor::new(raw);
     cur.skip(1)?;
-    let host_id: [u8; 32] = cur.take(32)?.try_into().expect("32 bytes");
+    let host_id: [u8; 32] = cur.take_array()?;
     let nlen = cur.u8()? as usize;
     let name = String::from_utf8_lossy(cur.take(nlen)?).into_owned();
     let count = cur.u8()? as usize;
@@ -299,7 +300,7 @@ fn decode_v2(raw: &[u8]) -> Result<Ticket> {
         let ip = cur.take(4)?;
         let ip = Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
         let port = cur.u16()?;
-        let token: [u8; 16] = cur.take(16)?.try_into().expect("16 bytes");
+        let token: [u8; 16] = cur.take_array()?;
         Some(RelayHint {
             addr: SocketAddr::V4(SocketAddrV4::new(ip, port)),
             token,
@@ -318,7 +319,7 @@ fn decode_v2(raw: &[u8]) -> Result<Ticket> {
 fn decode_v3(raw: &[u8]) -> Result<Ticket> {
     let mut cur = Cursor::new(raw);
     cur.skip(1)?;
-    let host_id: [u8; 32] = cur.take(32)?.try_into().expect("32 bytes");
+    let host_id: [u8; 32] = cur.take_array()?;
     let nlen = cur.u8()? as usize;
     let name = String::from_utf8_lossy(cur.take(nlen)?).into_owned();
     let count = cur.u8()? as usize;
@@ -333,7 +334,7 @@ fn decode_v3(raw: &[u8]) -> Result<Ticket> {
     }
     let relay = if cur.u8()? == 1 {
         let addr = read_addr(&mut cur)?;
-        let token: [u8; 16] = cur.take(16)?.try_into().expect("16 bytes");
+        let token: [u8; 16] = cur.take_array()?;
         Some(RelayHint { addr, token })
     } else {
         None
@@ -346,80 +347,9 @@ fn decode_v3(raw: &[u8]) -> Result<Ticket> {
     })
 }
 
-fn write_v4(buf: &mut Vec<u8>, addr: SocketAddr) {
-    let SocketAddr::V4(v4) = addr else {
-        return;
-    };
-    buf.extend_from_slice(&v4.ip().octets());
-    buf.extend_from_slice(&v4.port().to_le_bytes());
-}
-
-fn write_addr(buf: &mut Vec<u8>, addr: SocketAddr) {
-    match addr {
-        SocketAddr::V4(v4) => {
-            buf.push(4);
-            buf.extend_from_slice(&v4.ip().octets());
-            buf.extend_from_slice(&v4.port().to_le_bytes());
-        }
-        SocketAddr::V6(v6) => {
-            buf.push(6);
-            buf.extend_from_slice(&v6.ip().octets());
-            buf.extend_from_slice(&v6.port().to_le_bytes());
-        }
-    }
-}
-
-fn read_addr(cur: &mut Cursor<'_>) -> Result<SocketAddr> {
-    match cur.u8()? {
-        4 => {
-            let ip = cur.take(4)?;
-            let ip = Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
-            let port = cur.u16()?;
-            Ok(SocketAddr::from((ip, port)))
-        }
-        6 => {
-            let b = cur.take(16)?;
-            let mut oct = [0u8; 16];
-            oct.copy_from_slice(b);
-            let port = cur.u16()?;
-            Ok(SocketAddr::from((Ipv6Addr::from(oct), port)))
-        }
-        f => bail!("unknown address family {f}"),
-    }
-}
-
-/// Bounds-checked reader so a malformed ticket returns an error instead of panicking.
-struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .filter(|e| *e <= self.buf.len())
-            .ok_or_else(|| anyhow!("ticket truncated"))?;
-        let out = &self.buf[self.pos..end];
-        self.pos = end;
-        Ok(out)
-    }
-    fn skip(&mut self, n: usize) -> Result<()> {
-        self.take(n).map(|_| ())
-    }
-    fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> Result<u16> {
-        let b = self.take(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
-    }
-}
-
+/// Turn what the user typed into one address: a ticket's best candidate, an
+/// IP, `ip:port`, or a DNS name (with or without a port). Name resolution is
+/// a blocking system call, so this belongs on a connect path, not a UI frame.
 pub fn parse_endpoint(s: &str, default_port: u16) -> Result<SocketAddr> {
     let s = s.trim();
     if let Ok(t) = Ticket::decode(s) {
@@ -434,12 +364,34 @@ pub fn parse_endpoint(s: &str, default_port: u16) -> Result<SocketAddr> {
     if let Ok(ip) = s.parse::<std::net::IpAddr>() {
         return Ok(SocketAddr::new(ip, default_port));
     }
-    if let Some((host, port)) = s.rsplit_once(':') {
-        if let (Ok(ip), Ok(p)) = (host.parse::<std::net::IpAddr>(), port.parse::<u16>()) {
-            return Ok(SocketAddr::new(ip, p));
-        }
+    // `name:port`, but not an IPv6 literal (those have several colons and
+    // were handled above when bracketed).
+    let (host, port) = match s.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') => (h, p.parse::<u16>().ok()),
+        _ => (s, Some(default_port)),
+    };
+    let Some(port) = port else {
+        bail!("'{s}' has an invalid port");
+    };
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        bail!("cannot parse endpoint '{s}' (expected IP, IP:port, a host name, or a blk1_ ticket)");
     }
-    bail!("cannot parse endpoint '{s}' (expected IP, IP:port, or blk1_ ticket)")
+    use std::net::ToSocketAddrs;
+    let mut resolved = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| anyhow!("could not resolve '{host}': {e}"))?;
+    // Prefer IPv4: the media socket is always v4, and v6 only when a second
+    // socket could be bound.
+    let all: Vec<SocketAddr> = resolved.by_ref().collect();
+    all.iter()
+        .copied()
+        .find(SocketAddr::is_ipv4)
+        .or_else(|| all.first().copied())
+        .ok_or_else(|| anyhow!("'{host}' did not resolve to any address"))
 }
 
 #[cfg(test)]
@@ -595,6 +547,24 @@ mod tests {
             v4(10, 1, 2, 3, 47850)
         );
         assert!(parse_endpoint("nonsense", 47850).is_err());
+        assert!(parse_endpoint("", 47850).is_err());
+        assert!(parse_endpoint("host:notaport", 47850).is_err());
+        assert!(parse_endpoint("no spaces allowed", 47850).is_err());
+    }
+
+    #[test]
+    fn parse_endpoint_resolves_host_names() {
+        // localhost is the one name every machine can resolve.
+        let a = parse_endpoint("localhost", 47850).unwrap();
+        assert!(a.ip().is_loopback());
+        assert_eq!(a.port(), 47850);
+        let a = parse_endpoint("localhost:9000", 47850).unwrap();
+        assert_eq!(a.port(), 9000);
+        // Bracketed v6 literals still go through the address path.
+        assert_eq!(
+            parse_endpoint("[::1]:9000", 47850).unwrap(),
+            "[::1]:9000".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]

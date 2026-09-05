@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["BroLink Contributors"]
@@ -18,7 +18,7 @@ homepage = "https://github.com/MrBeldum/brolink"
 readme = "README.md"
 
 [workspace.dependencies]
-brolink-core = { path = "crates/core", version = "1.0.0" }
+brolink-core = { path = "crates/core", version = "1.1.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +33,7 @@ chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 data-encoding = "2"

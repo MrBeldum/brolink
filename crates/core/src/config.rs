@@ -140,6 +140,8 @@ pub struct HostConfig {
     pub enable_clipboard: bool,
     /// Restart the encoder at a new bitrate when the client reports loss.
     pub adaptive_bitrate: bool,
+    /// Let a paired client put this PC to sleep, restart it, or shut it down.
+    pub allow_power_control: bool,
 }
 
 impl Default for HostConfig {
@@ -161,6 +163,7 @@ impl Default for HostConfig {
             start_with_windows: false,
             enable_clipboard: true,
             adaptive_bitrate: true,
+            allow_power_control: true,
         }
     }
 }
@@ -171,6 +174,10 @@ pub struct SavedHost {
     pub ticket: String,
     #[serde(default)]
     pub last_connected_unix: u64,
+    /// MAC of the PC's LAN adapter, learned from the host once a session was
+    /// established. With it the client can wake the PC before connecting.
+    #[serde(default)]
+    pub wake_mac: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,18 +214,28 @@ impl Default for ClientConfig {
 
 impl ClientConfig {
     /// Remember a successful connection, moving it to the front of the list.
-    pub fn remember_host(&mut self, name: &str, ticket: &str) {
+    ///
+    /// A `None` MAC keeps whatever was known before: a host that stopped
+    /// reporting one (an older build, say) must not make the PC unwakeable.
+    pub fn remember_host(&mut self, name: &str, ticket: &str, wake_mac: Option<&str>) {
         let ticket = ticket.trim();
         if ticket.is_empty() {
             return;
         }
+        let previous_mac = self
+            .saved_hosts
+            .iter()
+            .find(|h| h.ticket == ticket)
+            .and_then(|h| h.wake_mac.clone());
         self.saved_hosts.retain(|h| h.ticket != ticket);
+        let name = name.trim();
         self.saved_hosts.insert(
             0,
             SavedHost {
-                name: name.trim().to_string(),
+                name: if name.is_empty() { "PC" } else { name }.to_string(),
                 ticket: ticket.to_string(),
                 last_connected_unix: crate::proto::now_us() / 1_000_000,
+                wake_mac: wake_mac.map(str::to_string).or(previous_mac),
             },
         );
         const MAX_SAVED: usize = 16;
@@ -230,6 +247,15 @@ impl ClientConfig {
 
     pub fn forget_host(&mut self, ticket: &str) {
         self.saved_hosts.retain(|h| h.ticket != ticket);
+    }
+
+    /// The MAC remembered for a ticket, if the PC ever reported one.
+    pub fn wake_mac_for(&self, ticket: &str) -> Option<String> {
+        let ticket = ticket.trim();
+        self.saved_hosts
+            .iter()
+            .find(|h| h.ticket == ticket)
+            .and_then(|h| h.wake_mac.clone())
     }
 }
 
@@ -565,15 +591,41 @@ mod tests {
     #[test]
     fn remembering_a_host_dedupes_and_caps() {
         let mut c = ClientConfig::default();
-        c.remember_host("Office", "blk1_aaa");
-        c.remember_host("Office", "blk1_aaa");
-        c.remember_host("Home", "blk1_bbb");
+        c.remember_host("Office", "blk1_aaa", None);
+        c.remember_host("Office", "blk1_aaa", None);
+        c.remember_host("Home", "blk1_bbb", None);
         assert_eq!(c.saved_hosts.len(), 2);
         assert_eq!(c.saved_hosts[0].name, "Home", "most recent first");
         assert_eq!(c.last_ticket, "blk1_bbb");
         c.forget_host("blk1_bbb");
         assert_eq!(c.saved_hosts.len(), 1);
         assert_eq!(c.saved_hosts[0].ticket, "blk1_aaa");
+    }
+
+    #[test]
+    fn a_remembered_mac_survives_a_host_that_stops_reporting_one() {
+        let mut c = ClientConfig::default();
+        c.remember_host("Office", "blk1_aaa", Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(
+            c.wake_mac_for("blk1_aaa").as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+        // Reconnecting through a host that did not send a MAC keeps the old one.
+        c.remember_host("Office", "blk1_aaa", None);
+        assert_eq!(
+            c.wake_mac_for("blk1_aaa").as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+        // A new MAC replaces it.
+        c.remember_host("Office", "blk1_aaa", Some("11:22:33:44:55:66"));
+        assert_eq!(
+            c.wake_mac_for("blk1_aaa").as_deref(),
+            Some("11:22:33:44:55:66")
+        );
+        assert!(c.wake_mac_for("blk1_unknown").is_none());
+        // An empty name never produces an unlabelled entry.
+        c.remember_host("   ", "blk1_ccc", None);
+        assert_eq!(c.saved_hosts[0].name, "PC");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use brolink_core::config::{ClientConfig, QualityPreset, StreamQuality};
 use brolink_core::discovery::{decode_beacon, join_multicast, prune, upsert, DiscoveredHost};
 use brolink_core::identity::Identity;
 use brolink_core::net::bind_udp_blocking_reuse;
-use brolink_core::proto::{ControlMsg, DEFAULT_PORT};
+use brolink_core::proto::{ControlMsg, PowerAction, DEFAULT_PORT};
 use eframe::egui;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -56,6 +56,10 @@ pub struct ClientApp {
     reconnect_at: Option<Instant>,
     reconnect_attempt: u32,
     show_hud: bool,
+    /// Whether the connected host honours power commands.
+    power_control: bool,
+    /// A restart or shut down waiting for the user to confirm it.
+    pending_power: Option<PowerAction>,
 }
 
 impl ClientApp {
@@ -100,6 +104,8 @@ impl ClientApp {
             reconnect_at: None,
             reconnect_attempt: 0,
             show_hud,
+            power_control: false,
+            pending_power: None,
         }
     }
 
@@ -109,10 +115,16 @@ impl ClientApp {
         }
     }
 
+    /// A connection the user asked for: wakes the PC if it does not answer.
     fn connect(&mut self) {
+        self.connect_with(true);
+    }
+
+    fn connect_with(&mut self, wake: bool) {
         self.error = None;
         self.user_hangup = false;
         self.reconnect_at = None;
+        self.pending_power = None;
         self.cfg.last_ticket = self.target.clone();
         if let Err(e) = self.cfg.save() {
             tracing::warn!("could not save client config: {e:#}");
@@ -124,7 +136,22 @@ impl ClientApp {
             target: self.target.clone(),
             cfg: self.cfg.clone(),
             identity: self.identity.clone(),
+            wake_mac: self.cfg.wake_mac_for(&self.target),
+            wake,
         })));
+    }
+
+    /// Ask the PC to sleep, restart, or shut down. The host ends the session
+    /// itself; no reconnect follows, or the Mac would wake it straight back up.
+    fn send_power(&mut self, action: PowerAction) {
+        self.pending_power = None;
+        self.user_hangup = true;
+        self.ever_ready = false;
+        self.log
+            .push(format!("Asked the PC to {}.", action.as_str()));
+        let _ = self
+            .cmd
+            .send(ClientCmd::Control(ControlMsg::Power { action }));
     }
 
     /// Leave the stream and return to the lobby, releasing the pointer.
@@ -167,15 +194,20 @@ impl ClientApp {
                     self.mode = Mode::Pin;
                     self.log.push("Host asked for a pairing PIN.".into());
                 }
-                ClientEvent::Ready(r) => {
+                ClientEvent::Ready {
+                    ready: r,
+                    host_name,
+                } => {
                     self.encoder = r.encoder.clone();
-                    self.host_name = r.monitor_name.clone();
+                    self.host_name = host_name;
+                    self.power_control = r.power_control;
                     self.video_size = [r.width as usize, r.height as usize];
                     self.mode = Mode::Stream;
                     self.pin.clear();
                     self.ever_ready = true;
                     self.reconnect_attempt = 0;
-                    self.cfg.remember_host(&self.host_name, &self.target);
+                    self.cfg
+                        .remember_host(&self.host_name, &self.target, r.wake_mac.as_deref());
                     let _ = self.cfg.save();
                     self.log.push(format!(
                         "Streaming {}x{} @ {} fps via {}",
@@ -272,7 +304,9 @@ impl eframe::App for ClientApp {
         self.drain_events();
         if let Some(at) = self.reconnect_at {
             if Instant::now() >= at && self.mode == Mode::Lobby {
-                self.connect();
+                // Never wake on an automatic retry: the drop may be the PC
+                // going to sleep on purpose.
+                self.connect_with(false);
             }
         }
 
@@ -356,7 +390,12 @@ impl ClientApp {
                 }
                 if self.mode == Mode::Connecting {
                     ui.spinner();
-                    ui.label("Connecting…");
+                    ui.label(
+                        self.log
+                            .last()
+                            .map(|l| short(l))
+                            .unwrap_or_else(|| "Connecting…".into()),
+                    );
                     if ui.button("Cancel").clicked() {
                         self.hangup();
                         self.mode = Mode::Lobby;
@@ -405,6 +444,7 @@ impl ClientApp {
         }
         let mut connect_to: Option<String> = None;
         let mut forget: Option<String> = None;
+        let mut wake: Option<(String, String)> = None;
         card(ui, "Your PCs", |ui| {
             if let Some(at) = self.reconnect_at {
                 let left = at.saturating_duration_since(Instant::now()).as_secs();
@@ -422,16 +462,33 @@ impl ClientApp {
                     ui.weak(short(&h.ticket));
                     if ui
                         .add_enabled(self.mode != Mode::Connecting, egui::Button::new("Connect"))
+                        .on_hover_text("Wakes the PC first if it is asleep")
                         .clicked()
                     {
                         connect_to = Some(h.ticket.clone());
+                    }
+                    if let Some(mac) = &h.wake_mac {
+                        if ui
+                            .small_button("Wake")
+                            .on_hover_text(format!("Send a wake-up to {mac} without connecting"))
+                            .clicked()
+                        {
+                            wake = Some((h.ticket.clone(), mac.clone()));
+                        }
                     }
                     if ui.small_button("Remove").clicked() {
                         forget = Some(h.ticket.clone());
                     }
                 });
             }
+            ui.weak(
+                "Connect wakes a sleeping PC on its own. Leave the PC asleep rather than \
+                 shut down: it comes back in seconds and the session is still there.",
+            );
         });
+        if let Some((ticket, mac)) = wake {
+            let _ = self.cmd.send(ClientCmd::Wake { ticket, mac });
+        }
         if let Some(t) = forget {
             self.cfg.forget_host(&t);
             let _ = self.cfg.save();
@@ -578,26 +635,85 @@ impl ClientApp {
         }
 
         if self.show_hud {
+            let mut power: Option<PowerAction> = None;
+            let mut confirm = false;
+            let mut cancel = false;
             egui::Area::new(egui::Id::new("hud"))
                 .fixed_pos(egui::pos2(16.0, 12.0))
                 .show(ctx, |ui| {
-                    let hud = if self.captured {
-                        format!(
-                            "F8 release  ·  F11 fullscreen  ·  F7 HUD  ·  Ctrl+Shift+Q quit  ·  {}",
-                            self.stats
-                        )
-                    } else {
-                        format!(
-                            "Click to capture mouse  ·  F8 toggle  ·  F7 HUD  ·  {}",
-                            self.stats
-                        )
-                    };
-                    ui.label(
-                        egui::RichText::new(hud)
-                            .size(13.0)
-                            .color(egui::Color32::from_white_alpha(220)),
-                    );
+                    ui.horizontal(|ui| {
+                        let hud = if self.captured {
+                            format!(
+                                "F8 release  ·  F11 fullscreen  ·  F7 HUD  ·  Ctrl+Shift+Q quit  ·  {}",
+                                self.stats
+                            )
+                        } else {
+                            format!(
+                                "Click to capture mouse  ·  F8 toggle  ·  F7 HUD  ·  {}",
+                                self.stats
+                            )
+                        };
+                        ui.label(
+                            egui::RichText::new(hud)
+                                .size(13.0)
+                                .color(egui::Color32::from_white_alpha(220)),
+                        );
+                        if self.power_control && !self.captured {
+                            ui.menu_button("PC ▾", |ui| {
+                                if ui.button("Sleep").clicked() {
+                                    power = Some(PowerAction::Sleep);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Restart…").clicked() {
+                                    power = Some(PowerAction::Restart);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Shut down…").clicked() {
+                                    power = Some(PowerAction::Shutdown);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Disconnect").clicked() {
+                                    power = None;
+                                    cancel = true;
+                                    ui.close_menu();
+                                }
+                            });
+                        }
+                    });
+                    if let Some(p) = self.pending_power {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                RED,
+                                format!(
+                                    "{} the PC? Unsaved work on it will be lost.",
+                                    capitalize(p.as_str())
+                                ),
+                            );
+                            if ui.button(capitalize(p.as_str())).clicked() {
+                                confirm = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.pending_power = None;
+                            }
+                        });
+                    }
                 });
+            match power {
+                // Sleep is safe to do at once: everything is still there on wake.
+                Some(PowerAction::Sleep) => self.send_power(PowerAction::Sleep),
+                Some(p) => self.pending_power = Some(p),
+                None => {}
+            }
+            if confirm {
+                if let Some(p) = self.pending_power {
+                    self.send_power(p);
+                }
+            }
+            if cancel {
+                self.hangup();
+                self.leave_stream(ctx);
+                return;
+            }
         }
 
         if self.cfg.enable_clipboard && self.last_clip.elapsed() >= Duration::from_millis(400) {
@@ -614,6 +730,14 @@ impl ClientApp {
         if !events.is_empty() {
             let _ = self.cmd.send(ClientCmd::Input(events));
         }
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }
 

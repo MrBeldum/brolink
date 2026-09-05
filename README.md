@@ -24,14 +24,29 @@ A relay, if you use one, only ever sees ciphertext.
          └──── LAN / IPv6 / UPnP / Tailscale / relay ────┘
 ```
 
+## The everyday flow
+
+1. Open BroLink on the Mac and click your PC under **Your PCs**.
+2. If the PC is asleep, the Mac wakes it (Wake-on-LAN, also from another
+   network through the router mapping the host set up) and connects once it
+   answers, usually within 15 s.
+3. Play, work, whatever. Click the picture to capture the mouse; **F8** frees it.
+4. Done? Press **F8**, open **PC ▾** in the HUD, and pick **Sleep** (or restart
+   / shut down). The session ends cleanly and the PC goes down.
+
+Sleep is the state to leave the PC in: it comes back in seconds with every
+window still open, and the network card keeps listening for the wake packet.
+
 ## What you get
 
+- Wake the PC from the Mac, and put it to sleep, restart it, or shut it down when you are done
 - Hardware-accelerated capture and encode on the PC (AMD AMF, NVIDIA NVENC, Intel QSV, Media Foundation, libx264 fallback)
 - 720p–1440p, 30–120 fps, 5–60 Mbps, with adaptive bitrate when the path gets lossy
 - Keyboard, relative mouse (games), absolute mouse (desktop), Xbox-style gamepad via ViGEmBus
 - System audio and a shared clipboard
 - PIN pairing with persistent identities; the ticket pins the host key so a machine that stole the IP cannot impersonate it
-- LAN discovery, automatic UPnP/NAT-PMP port mapping, IPv6, Tailscale `100.x`, and an optional self-hosted UDP relay
+- LAN discovery, automatic UPnP/NAT-PMP port mapping, IPv6, Tailscale `100.x`, and an optional self-hosted relay
+- With a relay, a rendezvous service: the ticket keeps working after your home IP changes, and the host punches through port-restricted NATs
 - Native GUIs on both sides
 
 This is **not** a wrapper around Sunshine/Moonlight. Those projects are
@@ -110,11 +125,15 @@ address it can be reached on inside a pasteable `blk1_…` ticket:
 
 The client sends `Hello` to every candidate. The first `HelloAck` wins. It
 also includes *its* STUN address so the host can send a packet back and
-finish a hole punch.
+finish a hole punch. When the ticket names a relay, the client also asks the
+relay's rendezvous service where the host is *now* and the relay tells the
+host to punch towards the client, so a months-old ticket still connects.
 
 **UPnP is the default internet path.** Enable it in the host (on by default)
 and, if your router allows local applications to map a port, the WAN
-candidate in the ticket is a real forward, not a hope.
+candidate in the ticket is a real forward, not a hope. The mapping is
+requested as permanent, so it survives the PC sleeping for days and a wake
+packet from outside still reaches it.
 
 If UPnP is blocked (CGNAT, locked-down ISP router, campus NAT), pick one of
 these — they all work, none require changing the protocol:
@@ -136,7 +155,8 @@ cargo run --release -p brolink-relay -- --bind 0.0.0.0:47851
 then in the host UI set **Relay** to `your.vps.example:47851` (or start with
 `--relay your.vps.example:47851`). The address and a random per-host token
 ride inside the ticket, so the Mac picks the fallback up automatically. The
-relay only ever sees already-encrypted bytes.
+relay only ever sees already-encrypted bytes. See [docs/RELAY.md](docs/RELAY.md)
+for a systemd unit and a Dockerfile.
 
 The raw STUN candidate without UPnP is a bonus, not the internet path. The
 host is reactive — it replies to the address a packet arrived from. On a
@@ -176,10 +196,11 @@ which are unit-tested. Treat a green loopback as "the pipeline works", not
 ## Repository layout
 
 ```
-crates/core     protocol, crypto, tickets, STUN, UPnP, discovery
-crates/host     Windows host (capture / encode / input / GUI)
+crates/core     protocol, crypto, tickets, STUN, UPnP, discovery, wake, rendezvous
+crates/host     Windows host (capture / encode / input / power / GUI)
 crates/client   Mac + Windows client (decode / display / input / GUI)
-crates/relay    optional UDP relay
+crates/relay    optional UDP relay + rendezvous
+deploy/         systemd unit and Dockerfile for the relay
 docs/           protocol and platform notes
 scripts/        macOS .app bundle, Windows installer, loopback test
 ```

@@ -104,6 +104,8 @@ impl eframe::App for HostApp {
                 ui.add_space(12.0);
                 self.session_card(ui, &status);
                 ui.add_space(12.0);
+                self.wake_card(ui, &status);
+                ui.add_space(12.0);
                 self.paired_card(ui, &status);
                 ui.add_space(12.0);
                 self.quality_card(ui, &status);
@@ -209,6 +211,64 @@ impl HostApp {
         });
     }
 
+    fn wake_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
+        card(ui, "Wake and power from the Mac", |ui| {
+            match &status.wake {
+                None => {
+                    ui.label("Checking whether this PC can be woken remotely…");
+                }
+                Some(w) => {
+                    kv(ui, "Adapter", w.adapter.clone());
+                    kv(
+                        ui,
+                        "MAC",
+                        w.mac.clone().unwrap_or_else(|| "not found".into()),
+                    );
+                    match w.magic_packet {
+                        Some(true) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(63, 185, 80),
+                                "Wake-on-LAN is on: the Mac can wake this PC from sleep.",
+                            );
+                        }
+                        Some(false) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(248, 81, 73),
+                                "Wake-on-LAN is off, so a sleeping PC cannot be woken from the Mac.",
+                            );
+                            if ui.button("Enable Wake-on-LAN (asks for admin)").clicked() {
+                                self.engine.enable_wake();
+                            }
+                        }
+                        None => {
+                            ui.weak("Could not read the adapter's wake settings.");
+                        }
+                    }
+                    if w.fast_startup == Some(true) {
+                        ui.weak(
+                            "Fast Startup is on, so waking after a full shut down is unreliable. \
+                             Use Sleep from the Mac; it wakes in seconds with everything still open.",
+                        );
+                    }
+                }
+            }
+            ui.add_space(6.0);
+            if ui
+                .checkbox(
+                    &mut self.cfg.allow_power_control,
+                    "Let a paired Mac sleep, restart, or shut down this PC",
+                )
+                .changed()
+            {
+                self.dirty = true;
+            }
+            ui.weak(
+                "Tick Start with Windows below so the host is waiting after a restart. \
+                 A sleeping PC keeps the host running and resumes on its own.",
+            );
+        });
+    }
+
     fn paired_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
         if status.paired.is_empty() {
             return;
@@ -265,7 +325,8 @@ impl HostApp {
     }
 
     fn quality_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        card(ui, "Quality", |ui| {
+        card(ui, "Maximum quality", |ui| {
+            ui.weak("The Mac picks a preset; these are the most this PC will encode.");
             ui.horizontal(|ui| {
                 for p in QualityPreset::all() {
                     if p == QualityPreset::Custom {

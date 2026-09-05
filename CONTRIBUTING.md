@@ -2,7 +2,8 @@
 
 Remote Play is the product. Keep changes to the wire protocol
 backward-compatible or bump `PROTO_VERSION`. Ticket version 2 (IPv4) must
-keep decoding; version 3 is for IPv6.
+keep decoding; version 3 is for IPv6. New JSON fields get `#[serde(default)]`
+so a v1.0 host and a v1.1 client still talk.
 
 Before opening a PR:
 

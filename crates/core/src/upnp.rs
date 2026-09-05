@@ -18,6 +18,11 @@ use tokio::net::{TcpStream, UdpSocket};
 
 const SSDP_GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900);
 const NAT_PMP_PORT: u16 = 5351;
+/// Stand-in for "permanent" on NAT-PMP, which has no such thing.
+const NAT_PMP_LONG_LIFETIME: u32 = 7 * 24 * 3600;
+/// External ports tried when the requested one is already forwarded to
+/// another machine.
+const ALT_PORT_ATTEMPTS: u16 = 6;
 const SEARCH: &[u8] = b"M-SEARCH * HTTP/1.1\r\n\
 HOST: 239.255.255.250:1900\r\n\
 MAN: \"ssdp:discover\"\r\n\
@@ -49,8 +54,10 @@ pub struct PortMapping {
 
 /// Map `internal_port` on this machine through the home gateway.
 ///
-/// `lifetime_secs` is a hint; some IGDs ignore it and keep the mapping until
-/// reboot. Returns the public address the rest of the internet should send to.
+/// `lifetime_secs` is a hint; `0` asks for a permanent mapping, which is what
+/// lets a Wake-on-LAN packet still reach a PC that has been asleep for days.
+/// Some IGDs ignore it and keep the mapping until reboot. Returns the public
+/// address the rest of the internet should send to.
 pub async fn map_udp_port(internal_port: u16, lifetime_secs: u32) -> Option<PortMapping> {
     let lan = primary_lan_v4()?;
     if let Some(m) = nat_pmp_map(lan, internal_port, lifetime_secs).await {
@@ -88,7 +95,15 @@ async fn nat_pmp_map(lan: Ipv4Addr, port: u16, lifetime: u32) -> Option<PortMapp
         .await
         .ok()?;
     let _ = sock.set_broadcast(true);
-    let req = encode_nat_pmp_map(port, lifetime.max(3600));
+    // NAT-PMP has no "permanent": a zero lifetime deletes the mapping. A week
+    // is long enough to wake a PC that fell asleep and is renewed on a timer
+    // while the host is awake anyway.
+    let lifetime = if lifetime == 0 {
+        NAT_PMP_LONG_LIFETIME
+    } else {
+        lifetime.max(3600)
+    };
+    let req = encode_nat_pmp_map(port, lifetime);
     for gw in candidate_gateways(lan) {
         let dest = SocketAddr::V4(SocketAddrV4::new(gw, NAT_PMP_PORT));
         let _ = sock.send_to(&req, dest).await;
@@ -233,17 +248,52 @@ async fn map_via_device(
     let ip = soap_get_external_ip(&ctl, service)
         .await
         .unwrap_or(Ipv4Addr::UNSPECIFIED);
-    soap_add_port_mapping(&ctl, service, lan, port, lifetime).await?;
-    let external_port = soap_get_mapped_port(&ctl, service, port)
-        .await
-        .unwrap_or(port);
     if ip.is_unspecified() {
-        bail!("IGD mapped the port but did not report an external IP");
+        bail!("IGD did not report an external IP");
     }
-    Ok(PortMapping {
-        external: SocketAddrV4::new(ip, external_port),
-        via: MappingVia::Upnp,
-    })
+    let mut last_err = anyhow!("no external port available");
+    for external_port in port..port.saturating_add(ALT_PORT_ATTEMPTS) {
+        match add_or_confirm(&ctl, service, lan, external_port, port, lifetime).await {
+            Ok(()) => {
+                return Ok(PortMapping {
+                    external: SocketAddrV4::new(ip, external_port),
+                    via: MappingVia::Upnp,
+                })
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// Add `external -> lan:internal`. A "conflict" answer means some mapping for
+/// that external port exists; it only counts as success when it is ours,
+/// because a port forwarded to another machine on the LAN is worse than none.
+async fn add_or_confirm(
+    ctl: &str,
+    service: &str,
+    lan: Ipv4Addr,
+    external: u16,
+    internal: u16,
+    lifetime: u32,
+) -> Result<()> {
+    let added = match soap_add_port_mapping(ctl, service, lan, external, internal, lifetime).await {
+        Ok(added) => added,
+        // A few IGDs refuse any lease that is not permanent, and a few refuse
+        // permanent ones; try the other kind once before giving up.
+        Err(_) if lifetime == 0 => {
+            soap_add_port_mapping(ctl, service, lan, external, internal, 86_400).await?
+        }
+        Err(e) => return Err(e),
+    };
+    if added {
+        return Ok(());
+    }
+    match soap_get_specific_mapping(ctl, service, external).await {
+        Some((client, iport)) if client == lan && iport == internal => Ok(()),
+        Some((client, _)) => bail!("external port {external} is forwarded to {client}"),
+        None => bail!("external port {external} is taken and could not be inspected"),
+    }
 }
 
 /// Locate a WANIPConnection / WANPPPConnection control URL in a device XML.
@@ -303,22 +353,25 @@ fn absolutize(device_url: &str, control: &str) -> String {
     format!("{base}/{}", control.trim_start_matches('/'))
 }
 
+/// Returns `Ok(true)` when the mapping was created, `Ok(false)` on a
+/// ConflictInMappingEntry (718) answer, which the caller must inspect.
 async fn soap_add_port_mapping(
     control: &str,
     service: &str,
     lan: Ipv4Addr,
-    port: u16,
+    external: u16,
+    internal: u16,
     lifetime: u32,
-) -> Result<()> {
+) -> Result<bool> {
     let body = format!(
         r#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body>
 <u:AddPortMapping xmlns:u="{service}">
 <NewRemoteHost></NewRemoteHost>
-<NewExternalPort>{port}</NewExternalPort>
+<NewExternalPort>{external}</NewExternalPort>
 <NewProtocol>UDP</NewProtocol>
-<NewInternalPort>{port}</NewInternalPort>
+<NewInternalPort>{internal}</NewInternalPort>
 <NewInternalClient>{lan}</NewInternalClient>
 <NewEnabled>1</NewEnabled>
 <NewPortMappingDescription>BroLink</NewPortMappingDescription>
@@ -329,11 +382,13 @@ async fn soap_add_port_mapping(
     );
     let action = format!("\"{service}#AddPortMapping\"");
     let resp = http_post(control, &[("SOAPAction", action.as_str())], body.as_bytes()).await?;
-    if resp.contains("UPnPError") && !resp.contains("<errorCode>718</errorCode>") {
-        // 718 = ConflictInMappingEntry: the mapping we want already exists.
+    if resp.contains("<errorCode>718</errorCode>") {
+        return Ok(false);
+    }
+    if resp.contains("UPnPError") {
         bail!("AddPortMapping rejected: {}", snippet(&resp, 180));
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn soap_get_external_ip(control: &str, service: &str) -> Result<Ipv4Addr> {
@@ -351,29 +406,50 @@ async fn soap_get_external_ip(control: &str, service: &str) -> Result<Ipv4Addr> 
     parse_external_ip(&resp).ok_or_else(|| anyhow!("no NewExternalIPAddress in SOAP reply"))
 }
 
-async fn soap_get_mapped_port(control: &str, service: &str, port: u16) -> Result<u16> {
+/// Who an existing external-port mapping points at: `(internal ip, port)`.
+async fn soap_get_specific_mapping(
+    control: &str,
+    service: &str,
+    external: u16,
+) -> Option<(Ipv4Addr, u16)> {
     let body = format!(
         r#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body>
 <u:GetSpecificPortMappingEntry xmlns:u="{service}">
 <NewRemoteHost></NewRemoteHost>
-<NewExternalPort>{port}</NewExternalPort>
+<NewExternalPort>{external}</NewExternalPort>
 <NewProtocol>UDP</NewProtocol>
 </u:GetSpecificPortMappingEntry>
 </s:Body>
 </s:Envelope>"#
     );
     let action = format!("\"{service}#GetSpecificPortMappingEntry\"");
-    let _ = http_post(control, &[("SOAPAction", action.as_str())], body.as_bytes()).await;
-    Ok(port)
+    let resp = http_post(control, &[("SOAPAction", action.as_str())], body.as_bytes())
+        .await
+        .ok()?;
+    parse_specific_mapping(&resp)
+}
+
+/// Extract `(NewInternalClient, NewInternalPort)` from a
+/// GetSpecificPortMappingEntry reply.
+pub fn parse_specific_mapping(xml: &str) -> Option<(Ipv4Addr, u16)> {
+    let client = tag_text(xml, "NewInternalClient")?.parse().ok()?;
+    let port = tag_text(xml, "NewInternalPort")?.parse().ok()?;
+    Some((client, port))
+}
+
+fn tag_text<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)?;
+    Some(xml[start..start + end].trim())
 }
 
 /// Extract the IGD's WAN IPv4 from a GetExternalIPAddress SOAP body.
 pub fn parse_external_ip(xml: &str) -> Option<Ipv4Addr> {
-    let start = xml.find("<NewExternalIPAddress>")? + "<NewExternalIPAddress>".len();
-    let end = xml[start..].find("</NewExternalIPAddress>")?;
-    xml[start..start + end].trim().parse().ok()
+    tag_text(xml, "NewExternalIPAddress")?.parse().ok()
 }
 
 fn snippet(s: &str, n: usize) -> String {
@@ -535,6 +611,18 @@ mod tests {
             Ipv4Addr::new(203, 0, 113, 44)
         );
         assert!(parse_external_ip("<oops/>").is_none());
+    }
+
+    #[test]
+    fn specific_mapping_reply_names_the_internal_client() {
+        let xml = r#"<s:Body><u:GetSpecificPortMappingEntryResponse><NewInternalPort>47850</NewInternalPort><NewInternalClient>192.168.1.20</NewInternalClient><NewEnabled>1</NewEnabled></u:GetSpecificPortMappingEntryResponse></s:Body>"#;
+        assert_eq!(
+            parse_specific_mapping(xml),
+            Some((Ipv4Addr::new(192, 168, 1, 20), 47850))
+        );
+        assert!(
+            parse_specific_mapping("<UPnPError><errorCode>714</errorCode></UPnPError>").is_none()
+        );
     }
 
     #[test]

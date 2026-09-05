@@ -51,6 +51,16 @@ pub enum PacketType {
     Pong = 11,
     Goodbye = 12,
     Discovery = 13,
+    // Rendezvous. These travel on the media socket so the mapping the
+    // coordinator observes is the one media will actually arrive on, and they
+    // are never sealed: there is no session with the coordinator.
+    Register = 14,
+    RegisterAck = 15,
+    Lookup = 16,
+    LookupAck = 17,
+    Punch = 18,
+    PunchProbe = 19,
+    Retry = 20,
 }
 
 impl PacketType {
@@ -69,12 +79,40 @@ impl PacketType {
             11 => Self::Pong,
             12 => Self::Goodbye,
             13 => Self::Discovery,
+            14 => Self::Register,
+            15 => Self::RegisterAck,
+            16 => Self::Lookup,
+            17 => Self::LookupAck,
+            18 => Self::Punch,
+            19 => Self::PunchProbe,
+            20 => Self::Retry,
             _ => return None,
         })
     }
 
     pub fn is_handshake(self) -> bool {
         matches!(self, Self::Hello | Self::HelloAck | Self::Discovery)
+    }
+
+    /// Coordination traffic, which is signed rather than sealed and belongs to
+    /// no session.
+    pub fn is_rendezvous(self) -> bool {
+        matches!(
+            self,
+            Self::Register
+                | Self::RegisterAck
+                | Self::Lookup
+                | Self::LookupAck
+                | Self::Punch
+                | Self::PunchProbe
+                | Self::Retry
+        )
+    }
+
+    /// Carries an unsealed payload, and so is also exempt from the session
+    /// replay window: these packets have no session sequence to replay.
+    pub fn is_plaintext(self) -> bool {
+        self.is_handshake() || self.is_rendezvous()
     }
 }
 
@@ -204,7 +242,7 @@ pub fn open<'a>(
     scratch: &'a mut Vec<u8>,
 ) -> Result<(WireHeader, &'a [u8]), ProtocolError> {
     let header = parse_header(buf)?;
-    if header.typ.is_handshake() {
+    if header.typ.is_plaintext() {
         return Ok((header, &buf[HEADER_LEN..]));
     }
     keys.open_into(header.seq, header.typ as u8, &buf[HEADER_LEN..], scratch)
@@ -274,6 +312,42 @@ pub struct SessionReady {
     pub encoder: String,
     pub audio: AudioFormat,
     pub monitor_name: String,
+    /// The PC's advertised name, so the client can label the saved entry.
+    #[serde(default)]
+    pub host_name: String,
+    /// MAC of the host's LAN adapter, `aa:bb:cc:dd:ee:ff`, when the host could
+    /// learn it. The client keeps it so it can wake the PC later.
+    #[serde(default)]
+    pub wake_mac: Option<String>,
+    /// Whether the host will honour `ControlMsg::Power`.
+    #[serde(default)]
+    pub power_control: bool,
+}
+
+/// Remote power actions a paired client may ask the host to perform.
+///
+/// There is deliberately no "lock": the host runs in the user's session and
+/// cannot capture or drive the secure desktop, so a locked PC could never be
+/// unlocked again from the client.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PowerAction {
+    /// Suspend to RAM. The recommended "off" state: Wake-on-LAN brings the PC
+    /// back in seconds with the session intact.
+    Sleep,
+    Hibernate,
+    Restart,
+    Shutdown,
+}
+
+impl PowerAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sleep => "sleep",
+            Self::Hibernate => "hibernate",
+            Self::Restart => "restart",
+            Self::Shutdown => "shut down",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +385,12 @@ pub enum ControlMsg {
     /// oversized pastes are dropped rather than split across datagrams.
     Clipboard {
         text: String,
+    },
+    /// Put the PC to sleep, hibernate, restart, or shut it down. The host ends
+    /// the session first, then acts. Only honoured when the host owner has
+    /// left remote power control enabled.
+    Power {
+        action: PowerAction,
     },
 }
 
@@ -667,6 +747,34 @@ mod tests {
                 );
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn session_ready_still_decodes_without_the_new_optional_fields() {
+        // A v1.0 host does not send host_name, wake_mac, or power_control.
+        let json = br#"{"width":1920,"height":1080,"fps":60,"bitrate_kbps":15000,"codec":"h264","encoder":"h264_nvenc","audio":"PcmS16Le48kStereo","monitor_name":"Display 0"}"#;
+        let r: SessionReady = serde_json::from_slice(json).unwrap();
+        assert!(r.host_name.is_empty());
+        assert!(r.wake_mac.is_none());
+        assert!(!r.power_control);
+    }
+
+    #[test]
+    fn power_control_roundtrips_and_fits_a_datagram() {
+        for action in [
+            PowerAction::Sleep,
+            PowerAction::Hibernate,
+            PowerAction::Restart,
+            PowerAction::Shutdown,
+        ] {
+            let msg = ControlMsg::Power { action };
+            let bytes = json_payload(&msg).unwrap();
+            assert!(bytes.len() <= MAX_PAYLOAD);
+            match json_from_slice::<ControlMsg>(&bytes).unwrap() {
+                ControlMsg::Power { action: back } => assert_eq!(back, action),
+                other => panic!("wrong variant {other:?}"),
+            }
         }
     }
 

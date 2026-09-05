@@ -1,0 +1,17 @@
+[Unit]
+Description=BroLink relay and rendezvous
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/brolink-relay --bind 0.0.0.0:47851
+Restart=always
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

@@ -7,10 +7,12 @@ use brolink_core::codec::FrameAssembler;
 use brolink_core::config::ClientConfig;
 use brolink_core::crypto::{random_bytes, verify_handshake, EphKey, ReplayWindow, SessionKeys};
 use brolink_core::identity::Identity;
-use brolink_core::net::{bind_udp_ephemeral, RelayLink, Transport, RECV_BUF};
+use brolink_core::net::{RelayLink, Transport, RECV_BUF};
 use brolink_core::proto::*;
+use brolink_core::rendezvous::{Lookup, LookupAck, PunchProbe, Retry, COOKIE_LEN, NONCE_LEN};
 use brolink_core::stun::discover_wan;
 use brolink_core::ticket::{parse_endpoint, Ticket};
+use brolink_core::wake::{send_wake, wake_targets, MacAddr};
 use bytes::BytesMut;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +21,12 @@ use tokio::sync::mpsc;
 
 /// How long to wait for a host to answer `Hello` on any candidate address.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(8);
+/// With a MAC on file, send a wake-up once the PC has been silent this long.
+const WAKE_AFTER: Duration = Duration::from_millis(2500);
+/// Then keep knocking: a PC resuming from sleep answers in 10-20 s, one
+/// booting from cold can take most of a minute.
+const WAKE_TIMEOUT: Duration = Duration::from_secs(90);
+const WAKE_REPEAT: Duration = Duration::from_secs(8);
 /// Retransmit `Hello` this often while waiting — the first datagram is also the
 /// one punching the NAT hole, and it is the most likely to be dropped.
 const HELLO_RETRY: Duration = Duration::from_millis(400);
@@ -36,6 +44,11 @@ pub enum ClientCmd {
     Pin(String),
     Input(Vec<InputEvent>),
     Control(ControlMsg),
+    /// Send a wake-up to a saved PC without connecting.
+    Wake {
+        ticket: String,
+        mac: String,
+    },
     Disconnect,
 }
 
@@ -43,6 +56,12 @@ pub struct ConnectRequest {
     pub target: String,
     pub cfg: ClientConfig,
     pub identity: Identity,
+    /// The PC's MAC, if a previous session reported one.
+    pub wake_mac: Option<String>,
+    /// Send a wake-up if the PC does not answer. Only for a connection the
+    /// user asked for: an automatic reconnect must not wake a PC the user
+    /// just put to sleep.
+    pub wake: bool,
 }
 
 #[derive(Clone)]
@@ -51,7 +70,10 @@ pub enum ClientEvent {
     NeedPin {
         host: String,
     },
-    Ready(SessionReady),
+    Ready {
+        ready: SessionReady,
+        host_name: String,
+    },
     Stats {
         rtt_ms: f32,
         fps: f32,
@@ -109,7 +131,7 @@ async fn run(
                         match connect(&req, &ev_tx, video.clone(), audio_stats.clone()).await {
                             Ok(l) => {
                                 if !l.awaiting_pin {
-                                    let _ = ev_tx.send(ClientEvent::Ready(l.ready.clone()));
+                                    let _ = ev_tx.send(l.ready_event());
                                 }
                                 live = Some(l);
                             }
@@ -139,6 +161,12 @@ async fn run(
                                 tracing::debug!("control send failed: {e:#}");
                             }
                         }
+                    }
+                    ClientCmd::Wake { ticket, mac } => {
+                        let _ = ev_tx.send(ClientEvent::Log(match wake_only(&ticket, &mac).await {
+                            Ok(n) => format!("Wake-up sent to {mac} ({n} packets)"),
+                            Err(e) => format!("Could not send a wake-up: {e:#}"),
+                        }));
                     }
                     ClientCmd::Disconnect => {
                         if let Some(mut l) = live.take() {
@@ -173,6 +201,7 @@ struct Live {
     keys: SessionKeys,
     seq: SeqCounter,
     session_id: [u8; 16],
+    host_name: String,
     ready: SessionReady,
     assembler: FrameAssembler,
     decoder: H264Decoder,
@@ -202,6 +231,8 @@ struct Destination {
     relay: Option<RelayLink>,
     expected_host: Option<[u8; 32]>,
     host_label: String,
+    /// The decoded ticket, when there was one: wake targets come from it.
+    ticket: Option<Ticket>,
 }
 
 fn resolve_target(target: &str) -> Result<Destination> {
@@ -222,7 +253,8 @@ fn resolve_target(target: &str) -> Result<Destination> {
             candidates,
             relay,
             expected_host: Some(t.host_id),
-            host_label: t.name,
+            host_label: t.name.clone(),
+            ticket: Some(t),
         });
     }
     let addr = parse_endpoint(target, DEFAULT_PORT)?;
@@ -233,7 +265,46 @@ fn resolve_target(target: &str) -> Result<Destination> {
         // against; the PIN is what protects this path.
         expected_host: None,
         host_label: addr.to_string(),
+        ticket: None,
     })
+}
+
+/// Wake a saved PC without connecting. Returns how many packets went out.
+async fn wake_only(ticket: &str, mac: &str) -> Result<usize> {
+    let mac = MacAddr::parse(mac).ok_or_else(|| anyhow::anyhow!("'{mac}' is not a MAC address"))?;
+    let t = Ticket::decode(ticket).context("the saved entry is not a ticket")?;
+    let transport = Transport::bind("0.0.0.0:0".parse().expect("literal addr"), None)?;
+    Ok(send_wake(&transport, mac, &wake_targets(&t)).await)
+}
+
+async fn send_lookup(
+    t: &Transport,
+    to: SocketAddr,
+    identity: &Identity,
+    host: &[u8; 32],
+    cookie: Option<[u8; COOKIE_LEN]>,
+    nonce: &[u8; NONCE_LEN],
+) {
+    let body = Lookup::signed(&identity.signing, host, cookie, nonce, now_us());
+    let pkt = encode_plain(PacketType::Lookup, 0, &body);
+    if let Err(e) = t.send_raw(&pkt, to).await {
+        tracing::debug!("lookup to {to}: {e}");
+    }
+}
+
+/// Add an address the coordinator or a punch just told us about, and knock on
+/// it straight away rather than waiting for the retry timer.
+async fn adopt_candidate(
+    t: &Transport,
+    candidates: &mut Vec<SocketAddr>,
+    addr: SocketAddr,
+    hello: &[u8],
+) {
+    if addr.ip().is_unspecified() || addr.port() == 0 || candidates.contains(&addr) {
+        return;
+    }
+    candidates.push(addr);
+    let _ = t.send_to(hello, addr).await;
 }
 
 async fn connect(
@@ -246,6 +317,8 @@ async fn connect(
         target,
         cfg,
         identity,
+        wake_mac,
+        wake,
     } = req;
     let dest = resolve_target(target)?;
     let _ = ev.send(ClientEvent::Log(format!(
@@ -258,7 +331,7 @@ async fn connect(
         ));
     }
 
-    let transport = Transport::new(bind_udp_ephemeral()?, dest.relay);
+    let transport = Transport::bind("0.0.0.0:0".parse().expect("literal addr"), dest.relay)?;
     let client_wan = discover_wan(transport.socket())
         .await
         .map(|a| a.to_string());
@@ -282,25 +355,73 @@ async fn connect(
     };
     let pkt = encode_plain(PacketType::Hello, 1, &json_payload(&hello)?);
 
+    let mut candidates = dest.candidates.clone();
+    // With a ticket and a relay, the coordinator at the relay's address knows
+    // where the PC is *now*, which matters once the ticket's addresses are
+    // stale, and it tells the PC to punch a hole towards us.
+    let coordinator = dest
+        .relay
+        .map(|r| r.addr)
+        .filter(|_| dest.expected_host.is_some());
+    let lookup_nonce = random_bytes::<NONCE_LEN>();
+    let mut cookie: Option<[u8; COOKIE_LEN]> = None;
+    let mut looked_up = false;
+    // Only a connection the user clicked may wake the PC, and only when a
+    // previous session told us its MAC.
+    let wake = wake
+        .then(|| wake_mac.as_deref().and_then(MacAddr::parse))
+        .flatten()
+        .zip(dest.ticket.as_ref().map(wake_targets));
+    let mut woke = false;
+    let mut last_wake: Option<Instant> = None;
+
     let mut buf = vec![0u8; RECV_BUF];
-    let deadline = Instant::now() + HELLO_TIMEOUT;
+    let start = Instant::now();
+    let mut deadline = start + HELLO_TIMEOUT;
     let mut last_send: Option<Instant> = None;
     let (from, ack) = loop {
         let now = Instant::now();
         if now >= deadline {
+            if woke {
+                anyhow::bail!(
+                    "The PC did not wake up within {}s. From a full shut down it can only be \
+                     woken from its own network; put it to sleep instead of shutting it down, \
+                     and check Wake-on-LAN is enabled in BroLink Host.",
+                    WAKE_TIMEOUT.as_secs()
+                );
+            }
             anyhow::bail!(
                 "No reply from the PC ({}) — is BroLink Host running, is UDP 47850 allowed \
                  through Windows Firewall, and if you are not on the same network, is UPnP, \
                  Tailscale, or a relay enabled on the host?",
-                describe(&dest.candidates)
+                describe(&candidates)
             );
         }
         if last_send.is_none_or(|t| t.elapsed() >= HELLO_RETRY) {
             last_send = Some(now);
-            for c in &dest.candidates {
-                if transport.send_to(&pkt, *c).await.is_ok() && last_send == Some(now) {
+            for c in &candidates {
+                if transport.send_to(&pkt, *c).await.is_ok() {
                     tracing::debug!("Hello -> {c}");
                 }
+            }
+            if let (Some(coord), Some(host), false) = (coordinator, dest.expected_host, looked_up) {
+                send_lookup(&transport, coord, identity, &host, cookie, &lookup_nonce).await;
+            }
+        }
+        if let Some((mac, targets)) = &wake {
+            if start.elapsed() >= WAKE_AFTER && last_wake.is_none_or(|t| t.elapsed() >= WAKE_REPEAT)
+            {
+                last_wake = Some(now);
+                if !woke {
+                    woke = true;
+                    deadline = start + WAKE_TIMEOUT;
+                    let _ = ev.send(ClientEvent::Log(format!(
+                        "No answer — waking {} ({mac}). A sleeping PC takes about 15 s.",
+                        dest.host_label
+                    )));
+                }
+                let n = send_wake(&transport, *mac, targets).await;
+                tracing::debug!("sent {n} wake packets");
             }
         }
         let wait = HELLO_RETRY.min(deadline.saturating_duration_since(now));
@@ -311,15 +432,51 @@ async fn connect(
         let Ok(h) = parse_header(&buf[..n]) else {
             continue;
         };
-        if h.typ != PacketType::HelloAck {
-            continue;
-        }
-        match json_from_slice::<HelloAck>(&buf[HEADER_LEN..n]) {
-            Ok(ack) => break (from, ack),
-            Err(e) => {
-                tracing::debug!("malformed HelloAck from {from}: {e}");
-                continue;
+        let payload = &buf[HEADER_LEN..n];
+        match h.typ {
+            PacketType::HelloAck => match json_from_slice::<HelloAck>(payload) {
+                Ok(ack) => break (from, ack),
+                Err(e) => tracing::debug!("malformed HelloAck from {from}: {e}"),
+            },
+            PacketType::Retry if Some(from) == coordinator => {
+                if let (Ok(r), Some(host)) = (Retry::decode(payload), dest.expected_host) {
+                    cookie = Some(r.cookie);
+                    send_lookup(&transport, from, identity, &host, cookie, &lookup_nonce).await;
+                }
             }
+            PacketType::LookupAck if Some(from) == coordinator && !looked_up => {
+                looked_up = true;
+                match LookupAck::decode(payload).map(|a| a.host) {
+                    Ok(Some(rec)) if Some(rec.host_id) == dest.expected_host => {
+                        let _ = ev.send(ClientEvent::Log(format!(
+                            "The relay last heard from {} at {}",
+                            dest.host_label, rec.observed
+                        )));
+                        adopt_candidate(&transport, &mut candidates, rec.observed, &pkt).await;
+                        for c in rec.candidates {
+                            adopt_candidate(&transport, &mut candidates, c.addr, &pkt).await;
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = ev.send(ClientEvent::Log(
+                            "The relay has not heard from the PC lately (off, asleep, or offline)."
+                                .into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            PacketType::PunchProbe => {
+                if let Ok(probe) = PunchProbe::decode(payload) {
+                    if probe.nonce == lookup_nonce
+                        && dest.expected_host.is_none_or(|h| h == probe.host_id)
+                    {
+                        tracing::info!("punch probe from {from}: direct path is open");
+                        adopt_candidate(&transport, &mut candidates, from, &pkt).await;
+                    }
+                }
+            }
+            _ => {}
         }
     };
 
@@ -368,6 +525,7 @@ async fn connect(
         keys,
         seq: SeqCounter::new(),
         session_id: ack.session_id,
+        host_name: ack.host_name.clone(),
         ready: SessionReady {
             width: quality.width,
             height: quality.height,
@@ -377,6 +535,9 @@ async fn connect(
             encoder: String::new(),
             audio: AudioFormat::PcmS16Le48kStereo,
             monitor_name: String::new(),
+            host_name: ack.host_name.clone(),
+            wake_mac: None,
+            power_control: false,
         },
         assembler: FrameAssembler::default(),
         decoder: H264Decoder::new()?,
@@ -441,6 +602,17 @@ fn data_encoding_hex(bytes: &[u8]) -> String {
 }
 
 impl Live {
+    fn ready_event(&self) -> ClientEvent {
+        ClientEvent::Ready {
+            ready: self.ready.clone(),
+            host_name: if self.ready.host_name.is_empty() {
+                self.host_name.clone()
+            } else {
+                self.ready.host_name.clone()
+            },
+        }
+    }
+
     async fn send(&mut self, typ: PacketType, payload: &[u8]) -> Result<()> {
         let mut out = BytesMut::with_capacity(MAX_DATAGRAM);
         seal(&self.keys, typ, self.seq.next_seq()?, 0, payload, &mut out)?;
@@ -616,7 +788,7 @@ impl Live {
         self.awaiting_pin = false;
         let _ = ev.send(ClientEvent::Log("Paired. Starting the stream…".into()));
         self.wait_ready().await?;
-        let _ = ev.send(ClientEvent::Ready(self.ready.clone()));
+        let _ = ev.send(self.ready_event());
         Ok(true)
     }
 
@@ -639,7 +811,7 @@ impl Live {
         ev: &mpsc::UnboundedSender<ClientEvent>,
     ) -> Result<bool> {
         let (h, payload) = open(&self.keys, pkt, scratch)?;
-        if !h.typ.is_handshake() && !self.replay.check_and_update(h.seq) {
+        if !h.typ.is_plaintext() && !self.replay.check_and_update(h.seq) {
             return Ok(true);
         }
         self.last_host_packet = Instant::now();
@@ -695,8 +867,8 @@ impl Live {
             }
             PacketType::SessionReady => {
                 if let Ok(ready) = json_from_slice::<SessionReady>(payload) {
-                    self.ready = ready.clone();
-                    let _ = ev.send(ClientEvent::Ready(ready));
+                    self.ready = ready;
+                    let _ = ev.send(self.ready_event());
                 }
             }
             PacketType::Control => {

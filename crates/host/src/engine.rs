@@ -5,6 +5,9 @@ use crate::clipboard::ClipboardBridge;
 use crate::encode::{find_ffmpeg, select_encoder, EncoderInfo, VideoPipeline};
 use crate::ffmpeg_setup;
 use crate::input::InputInjector;
+use crate::power;
+use crate::rendezvous::Rendezvous;
+use crate::wake::{self, WakeInfo};
 use anyhow::{anyhow, Result};
 use brolink_core::abr::{AbrController, COOLDOWN_SECS};
 use brolink_core::codec::{fragment_frame, keyframe_flag};
@@ -14,7 +17,7 @@ use brolink_core::crypto::{
 };
 use brolink_core::discovery::{announce, Beacon};
 use brolink_core::identity::{AllowList, Identity};
-use brolink_core::net::{bind_udp, RelayLink, Transport, RECV_BUF};
+use brolink_core::net::{RelayLink, Transport, RECV_BUF};
 use brolink_core::proto::*;
 use brolink_core::stun::discover_wan;
 use brolink_core::ticket::{Candidate, CandidateKind, RelayHint, Ticket};
@@ -67,6 +70,8 @@ pub struct HostStatus {
     pub ffmpeg_ok: bool,
     pub paired: Vec<(String, String)>,
     pub path: String,
+    /// Wake-on-LAN readiness, once probed.
+    pub wake: Option<WakeInfo>,
 }
 
 impl Default for HostStatus {
@@ -94,6 +99,7 @@ impl Default for HostStatus {
             ffmpeg_ok: false,
             paired: Vec::new(),
             path: String::new(),
+            wake: None,
         }
     }
 }
@@ -173,14 +179,52 @@ impl Engine {
         self.revoke.lock().push(hex);
     }
 
+    /// Re-read the LAN adapter's wake settings on a background thread.
+    pub fn refresh_wake(&self) {
+        let Some(lan) = primary_lan_v4() else {
+            return;
+        };
+        let status = self.status.clone();
+        std::thread::spawn(move || {
+            let info = wake::probe(lan);
+            let mut st = status.lock();
+            if let Some(mac) = &info.mac {
+                match info.magic_packet {
+                    Some(true) => st.push_log(format!("Wake-on-LAN ready on {} ({mac})", info.adapter)),
+                    Some(false) => st.push_log(format!(
+                        "Wake-on-LAN is off for {}; enable it in the host window to wake this PC from the Mac",
+                        info.adapter
+                    )),
+                    None => {}
+                }
+            }
+            st.wake = Some(info);
+        });
+    }
+
+    /// Turn on magic-packet wake for the LAN adapter (UAC prompt), then re-probe.
+    pub fn enable_wake(self: &Arc<Self>) {
+        let Some(adapter) = self.status.lock().wake.as_ref().map(|w| w.adapter.clone()) else {
+            return;
+        };
+        let me = self.clone();
+        std::thread::spawn(move || {
+            match wake::enable_magic_packet(&adapter) {
+                Ok(()) => me.status.lock().push_log("Wake-on-LAN enabled"),
+                Err(e) => me
+                    .status
+                    .lock()
+                    .push_log(format!("Could not enable Wake-on-LAN: {e:#}")),
+            }
+            me.refresh_wake();
+        });
+    }
+
     pub async fn run(&self) -> Result<()> {
         let cfg = self.cfg.lock().clone();
         let bind: SocketAddr = format!("{}:{}", cfg.bind, cfg.port)
             .parse()
             .map_err(|e| anyhow!("invalid bind address '{}:{}': {e}", cfg.bind, cfg.port))?;
-        let sock = bind_udp(bind)?;
-        let local = sock.local_addr()?;
-
         let relay = resolve_relay(&cfg.relay);
         if !cfg.relay.is_empty() && relay.is_none() {
             self.status.lock().push_log(format!(
@@ -188,23 +232,31 @@ impl Engine {
                 cfg.relay
             ));
         }
-        let transport = Transport::new(sock, relay);
+        let transport = Transport::bind(bind, relay)?;
+        let local = transport.local_addr()?;
+        let has_v6 = transport.has_v6();
         {
             let mut st = self.status.lock();
             st.running = true;
             st.relay = relay.map(|r| r.addr);
-            st.push_log(format!("Listening on {local}"));
+            st.push_log(format!(
+                "Listening on {local}{}",
+                if has_v6 { " and IPv6" } else { "" }
+            ));
             if let Some(r) = relay {
-                st.push_log(format!("Relay: {}", r.addr));
+                st.push_log(format!("Relay + rendezvous: {}", r.addr));
             }
         }
 
         // Learn our public address before advertising a ticket.
         let mut wan = discover_wan(transport.socket()).await;
-        self.publish_ticket(local.port(), wan, relay);
+        self.publish_ticket(local.port(), wan, relay, has_v6);
+        self.refresh_wake();
 
         if cfg.enable_upnp {
-            if let Some(mapped) = map_udp_port(local.port(), 3600).await {
+            // A permanent lease: the mapping must outlive a PC that is asleep
+            // for days, or a wake packet from outside has nowhere to go.
+            if let Some(mapped) = map_udp_port(local.port(), 0).await {
                 wan = Some(merge_upnp_wan(wan, &mapped));
                 {
                     let mut st = self.status.lock();
@@ -215,7 +267,7 @@ impl Engine {
                         mapped.via.as_str()
                     ));
                 }
-                self.publish_ticket(local.port(), wan, relay);
+                self.publish_ticket(local.port(), wan, relay, has_v6);
             } else {
                 self.status.lock().push_log(
                     "Router did not map the port (UPnP/NAT-PMP). Worldwide access needs Tailscale, a relay, or a manual forward.",
@@ -304,6 +356,7 @@ impl Engine {
         let mut last_relay_ka = Instant::now() - RELAY_KEEPALIVE;
         let mut last_hello_from: Option<(SocketAddr, Instant)> = None;
         let mut seq_out = SeqCounter::new();
+        let mut rzv = relay.map(Rendezvous::new);
 
         while !self.stop.load(Ordering::Relaxed) {
             {
@@ -350,6 +403,12 @@ impl Engine {
                 last_relay_ka = Instant::now();
                 let _ = transport.relay_keepalive().await;
             }
+            // And stay findable by key while idle: a client with a stale
+            // ticket asks the coordinator where we are now.
+            if let (Some(r), None) = (rzv.as_mut(), session.as_ref()) {
+                let (name, cands) = self.registration();
+                r.tick(&transport, &self.identity, &name, &cands).await;
+            }
 
             // Refresh the public address only while idle. Running STUN on the
             // shared socket mid-session would swallow the client's input and
@@ -359,7 +418,7 @@ impl Engine {
                 let fresh = discover_wan(transport.socket()).await;
                 if fresh != self.status.lock().wan && self.status.lock().upnp.is_none() {
                     wan = fresh;
-                    self.publish_ticket(local.port(), wan, relay);
+                    self.publish_ticket(local.port(), wan, relay, has_v6);
                     self.refresh_internet_label(wan, relay);
                 }
             }
@@ -368,11 +427,11 @@ impl Engine {
                 && last_upnp.elapsed() >= UPNP_REFRESH
             {
                 last_upnp = Instant::now();
-                if let Some(mapped) = map_udp_port(local.port(), 3600).await {
+                if let Some(mapped) = map_udp_port(local.port(), 0).await {
                     wan = Some(merge_upnp_wan(wan, &mapped));
                     self.status.lock().upnp =
                         Some(format!("{} via {}", mapped.external, mapped.via.as_str()));
-                    self.publish_ticket(local.port(), wan, relay);
+                    self.publish_ticket(local.port(), wan, relay, has_v6);
                     self.refresh_internet_label(wan, relay);
                 }
             }
@@ -402,9 +461,46 @@ impl Engine {
             };
             match header.typ {
                 PacketType::Discovery => {}
-                PacketType::Hello => {
-                    if session.is_some() {
+                PacketType::Retry | PacketType::RegisterAck | PacketType::Punch => {
+                    let Some(r) = rzv.as_mut().filter(|r| r.is_coordinator(from)) else {
                         continue;
+                    };
+                    let (name, cands) = self.registration();
+                    let observed = r
+                        .on_packet(
+                            &transport,
+                            &self.identity,
+                            &name,
+                            &cands,
+                            &header,
+                            &buf[HEADER_LEN..n],
+                        )
+                        .await;
+                    // Without a router mapping, the address the coordinator
+                    // sees is the best WAN candidate we have.
+                    if let Some(obs) = observed {
+                        if self.status.lock().upnp.is_none() && wan != Some(obs) {
+                            wan = Some(obs);
+                            self.publish_ticket(local.port(), wan, relay, has_v6);
+                            self.refresh_internet_label(wan, relay);
+                        }
+                    }
+                }
+                PacketType::Hello => {
+                    if let Some(sess) = session.as_ref() {
+                        // The same client, with a fresh handshake: it crashed
+                        // or changed networks and is back. A retransmit of the
+                        // Hello that started this session carries its nonce
+                        // and is just ignored.
+                        let fresh =
+                            json_from_slice::<HelloMsg>(&buf[HEADER_LEN..n]).is_ok_and(|h| {
+                                h.client_id == sess.client_id && h.nonce != sess.hello_nonce
+                            });
+                        if !fresh {
+                            continue;
+                        }
+                        self.status.lock().end_session("Client reconnected");
+                        session = None;
                     }
                     if last_hello_from.is_some_and(|(a, t)| a == from && t.elapsed() < HELLO_RATE) {
                         continue;
@@ -445,16 +541,39 @@ impl Engine {
                         if !transport.accepts_from(sess.peer, from) {
                             continue;
                         }
-                        match sess.on_packet(&transport, &buf[..n], &mut seq_out).await {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                self.status.lock().end_session("Client disconnected");
-                                session = None;
-                            }
+                        let ended = match sess.on_packet(&transport, &buf[..n], &mut seq_out).await
+                        {
+                            Ok(true) => None,
+                            Ok(false) => Some(sess.power),
                             // A packet that fails to decrypt is a stray or
                             // corrupt datagram, not a reason to drop a working
                             // session — over the internet those are routine.
-                            Err(e) => tracing::debug!("ignored packet from {from}: {e:#}"),
+                            Err(e) => {
+                                tracing::debug!("ignored packet from {from}: {e:#}");
+                                None
+                            }
+                        };
+                        if let Some(power) = ended {
+                            let why = match power {
+                                Some(a) => format!("Session ended: PC will {}", a.as_str()),
+                                None => "Client disconnected".into(),
+                            };
+                            self.status.lock().end_session(&why);
+                            // Dropping the session stops ffmpeg and releases
+                            // held input before the machine goes down.
+                            session = None;
+                            if let Some(action) = power {
+                                let status = self.status.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(Duration::from_secs(1));
+                                    if let Err(e) = power::perform(action) {
+                                        status.lock().push_log(format!(
+                                            "Could not {}: {e:#}",
+                                            action.as_str()
+                                        ));
+                                    }
+                                });
+                            }
                         }
                     }
                 }
@@ -463,8 +582,26 @@ impl Engine {
         Ok(())
     }
 
+    /// Name and candidates for the coordinator: everything in the ticket.
+    fn registration(&self) -> (String, Vec<Candidate>) {
+        let (name, ticket) = {
+            let st = self.status.lock();
+            (self.cfg.lock().name.clone(), st.ticket.clone())
+        };
+        let cands = Ticket::decode(&ticket)
+            .map(|t| t.candidates)
+            .unwrap_or_default();
+        (name, cands)
+    }
+
     /// Rebuild and publish the ticket from whatever addresses we currently know.
-    fn publish_ticket(&self, port: u16, wan: Option<SocketAddr>, relay: Option<RelayLink>) {
+    fn publish_ticket(
+        &self,
+        port: u16,
+        wan: Option<SocketAddr>,
+        relay: Option<RelayLink>,
+        has_v6: bool,
+    ) {
         let name = self.cfg.lock().name.clone();
         let mut candidates = Vec::new();
         if let Some(ip) = primary_lan_v4() {
@@ -486,11 +623,14 @@ impl Engine {
                 addr,
             });
         }
-        for ip in global_v6() {
-            candidates.push(Candidate {
-                kind: CandidateKind::Wan,
-                addr: SocketAddr::from((ip, port)),
-            });
+        // Only advertise IPv6 when there is a socket to answer on it.
+        if has_v6 {
+            for ip in global_v6() {
+                candidates.push(Candidate {
+                    kind: CandidateKind::Wan,
+                    addr: SocketAddr::from((ip, port)),
+                });
+            }
         }
         let relay_hint = relay.map(|r| RelayHint {
             addr: r.addr,
@@ -552,14 +692,19 @@ impl Engine {
             monitor,
             prefer: prefer.to_string(),
         };
+        let mut prefer = prefer.trim().to_string();
         if let Some((cached_key, info)) = self.encoder_cache.lock().as_ref() {
             if *cached_key == key {
                 return Ok(info.clone());
             }
+            // Different quality, same GPU: probe the encoder that worked last
+            // time first instead of walking the whole list again.
+            if prefer.is_empty() || prefer == "auto" {
+                prefer = info.name.clone();
+            }
         }
         self.status.lock().push_log("Probing encoders…");
         let q = quality.clone();
-        let prefer = prefer.to_string();
         // Probing spawns ffmpeg and waits: keep it off the async runtime.
         let info =
             tokio::task::spawn_blocking(move || select_encoder(&ffmpeg, &q, monitor, &prefer))
@@ -658,18 +803,18 @@ impl Engine {
         )
         .await?;
 
-        // The client may ask for a different resolution/rate than our default;
-        // honour it within limits it can actually decode.
+        // The client picks the quality it wants; the host's own setting is the
+        // ceiling, so a weak GPU or a metered uplink is never asked for more.
         let mut quality = cfg.quality.clone();
         if let (Some(w), Some(h)) = (hello.width, hello.height) {
-            quality.width = w;
-            quality.height = h;
+            quality.width = w.min(cfg.quality.width);
+            quality.height = h.min(cfg.quality.height);
         }
         if let Some(f) = hello.fps {
-            quality.fps = f;
+            quality.fps = f.min(cfg.quality.fps);
         }
         if let Some(b) = hello.bitrate_kbps {
-            quality.bitrate_kbps = b;
+            quality.bitrate_kbps = b.min(cfg.quality.bitrate_kbps);
         }
         let quality = quality.sanitized();
 
@@ -699,6 +844,9 @@ impl Engine {
             encoder: enc.name.clone(),
             audio: AudioFormat::PcmS16Le48kStereo,
             monitor_name: format!("Display {}", cfg.monitor_index),
+            host_name: cfg.name.clone(),
+            wake_mac: self.status.lock().wake.as_ref().and_then(|w| w.mac.clone()),
+            power_control: cfg.allow_power_control,
         };
         send_sealed(
             transport,
@@ -711,7 +859,7 @@ impl Engine {
         )
         .await?;
 
-        LiveSession::start(
+        let mut live = LiveSession::start(
             from,
             hello.name,
             keys,
@@ -722,7 +870,11 @@ impl Engine {
             cfg.enable_clipboard,
             cfg.adaptive_bitrate,
             self.status.clone(),
-        )
+        )?;
+        live.client_id = hello.client_id;
+        live.hello_nonce = hello.nonce;
+        live.allow_power = cfg.allow_power_control;
+        Ok(live)
     }
 
     /// Block until the client sends the right PIN, or we give up on it.
@@ -838,10 +990,15 @@ fn resolve_relay(spec: &str) -> Option<RelayLink> {
                 .ok()
                 .map(|ip| SocketAddr::new(ip.into(), 47851))
         })?;
-    Some(RelayLink {
-        addr,
-        token: random_bytes::<16>(),
-    })
+    // The relay tells rendezvous packets from relay frames by the magic in
+    // the first four bytes, so a token must never start with it.
+    let token = loop {
+        let t = random_bytes::<16>();
+        if !t.starts_with(&MAGIC) {
+            break t;
+        }
+    };
+    Some(RelayLink { addr, token })
 }
 
 async fn send_sealed(
@@ -862,6 +1019,8 @@ async fn send_sealed(
 struct LiveSession {
     peer: SocketAddr,
     client_name: String,
+    client_id: [u8; 32],
+    hello_nonce: [u8; 16],
     keys: SessionKeys,
     video_rx: crossbeam_channel::Receiver<brolink_core::codec::EncodedFrame>,
     audio_rx: Option<crossbeam_channel::Receiver<AudioPacket>>,
@@ -882,6 +1041,9 @@ struct LiveSession {
     last_clip: Instant,
     abr: Option<AbrController>,
     last_abr: Instant,
+    allow_power: bool,
+    /// A power action the client asked for; the session ends and it runs.
+    power: Option<PowerAction>,
 }
 
 impl LiveSession {
@@ -921,6 +1083,8 @@ impl LiveSession {
         Ok(Self {
             peer,
             client_name,
+            client_id: [0; 32],
+            hello_nonce: [0; 16],
             keys,
             video_rx: vrx,
             audio_rx,
@@ -941,6 +1105,8 @@ impl LiveSession {
             last_clip: Instant::now(),
             abr: adaptive.then(|| AbrController::new(bitrate_kbps, bitrate_kbps)),
             last_abr: Instant::now() - Duration::from_secs(COOLDOWN_SECS),
+            allow_power: false,
+            power: None,
         })
     }
 
@@ -1027,7 +1193,7 @@ impl LiveSession {
         seq: &mut SeqCounter,
     ) -> Result<bool> {
         let (header, payload) = open(&self.keys, pkt, &mut self.scratch)?;
-        if !header.typ.is_handshake() && !self.replay.check_and_update(header.seq) {
+        if !header.typ.is_plaintext() && !self.replay.check_and_update(header.seq) {
             return Ok(true);
         }
         self.last_client = Instant::now();
@@ -1039,6 +1205,19 @@ impl LiveSession {
             PacketType::Control => {
                 let msg: ControlMsg = json_from_slice(payload)?;
                 self.on_control(transport, seq, msg).await?;
+                if self.power.is_some() {
+                    let _ = send_sealed(
+                        transport,
+                        &self.keys,
+                        seq,
+                        PacketType::Goodbye,
+                        0,
+                        b"{}",
+                        self.peer,
+                    )
+                    .await;
+                    return Ok(false);
+                }
             }
             PacketType::Ping => {
                 send_sealed(
@@ -1099,6 +1278,16 @@ impl LiveSession {
             ControlMsg::Clipboard { text } => {
                 if let Some(clip) = self.clipboard.as_mut() {
                     clip.apply_remote(&text);
+                }
+            }
+            ControlMsg::Power { action } => {
+                if self.allow_power {
+                    self.power = Some(action);
+                } else {
+                    self.status.lock().push_log(format!(
+                        "Client asked to {} this PC; refused (remote power control is off)",
+                        action.as_str()
+                    ));
                 }
             }
         }

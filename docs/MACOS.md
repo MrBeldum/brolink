@@ -54,6 +54,22 @@ cargo run --release -p brolink-client
 The client remembers the PC. Next time, click it in **Your PCs**. If the
 session drops, it reconnects on its own unless you disconnected.
 
+## Waking the PC and turning it off
+
+Once you have connected to a PC, the Mac remembers how to wake it. From then
+on:
+
+- **Connect** in **Your PCs** wakes the PC if it does not answer within a few
+  seconds, then connects. A sleeping PC is usually back in 10–20 s.
+- **Wake** sends the wake-up without connecting.
+- While streaming, press **F8** to free the mouse, then open **PC ▾** in the
+  HUD: **Sleep** happens at once; **Restart…** and **Shut down…** ask you to
+  confirm, since anything unsaved on the PC is lost.
+
+Waking works from anywhere while the PC is *asleep*. After a full shut down
+it only works from the PC's own network (see [WINDOWS.md](WINDOWS.md)), so
+leave the PC asleep when you go.
+
 ## Permissions
 
 - **Microphone / camera**: not required (the Mac is the client).

@@ -23,6 +23,18 @@ jobs (backup, offloaded compile, and so on are out of scope).
 - [x] Saved PCs + auto-reconnect on the client
 - [x] Native GUIs aimed at non-developers
 
+## v1.1 — Turn it on, turn it off
+
+- [x] Wake-on-LAN from the Mac: on the LAN by broadcast, from anywhere via the router mapping
+- [x] Connect wakes a sleeping PC automatically; a Wake button for the rest
+- [x] Sleep / restart / shut down from the client, with the host owner able to refuse
+- [x] Host reports the adapter's wake settings and enables them (UAC) in one click
+- [x] Permanent UPnP / week-long NAT-PMP leases so a sleeping PC stays reachable
+- [x] Rendezvous on the relay: lookup by host key, coordinated hole punch, tickets survive IP changes
+- [x] IPv6 actually works: the host listens on v6 as well as v4
+- [x] Fast reconnect: a returning client replaces its own stale session
+- [x] Host quality settings cap the client's request instead of being ignored
+
 ## Later
 
 - [ ] HEVC / AV1 encode when the client can decode it
@@ -32,3 +44,5 @@ jobs (backup, offloaded compile, and so on are out of scope).
 - [ ] Signed Windows/macOS binaries (Developer ID + Authenticode)
 - [ ] Bigger clipboard + image paste
 - [ ] A hosted anycast relay for people who do not want to run a VPS
+- [ ] Wake from a full shutdown over the internet (needs a helper on the LAN or router support)
+- [ ] Run as a service so the login screen can be driven remotely

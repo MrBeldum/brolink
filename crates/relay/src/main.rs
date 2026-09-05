@@ -16,9 +16,16 @@
 //!
 //! then start the host with `--relay your.vps:47851`. The relay address and
 //! token travel inside the ticket, so clients pick it up automatically.
+//!
+//! The same socket also serves the **rendezvous**: hosts register their key and
+//! current address, clients look a host up and get introduced (see
+//! `brolink_core::rendezvous`). Those packets arrive unframed and start with
+//! the `BLK1` magic, which no relay token ever does, so one port does both.
+
+mod coordinator;
 
 use anyhow::{Context, Result};
-use brolink_core::proto::MAX_DATAGRAM;
+use brolink_core::proto::{now_us, parse_header, MAGIC, MAX_DATAGRAM};
 use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -51,6 +58,9 @@ struct Args {
     /// relay without this cap can be exhausted by anyone sending random bytes.
     #[arg(long, default_value_t = 512)]
     max_sessions: usize,
+    /// Maximum hosts registered with the rendezvous at once.
+    #[arg(long, default_value_t = 10_000)]
+    max_hosts: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,16 +227,25 @@ async fn main() -> Result<()> {
         .map(|a| a.to_string())
         .unwrap_or_else(|_| args.bind.clone());
     tracing::info!(
-        "BroLink relay listening on {listening} (max {} sessions)",
-        args.max_sessions
+        "BroLink relay + rendezvous listening on {listening} (max {} sessions, {} hosts)",
+        args.max_sessions,
+        args.max_hosts
     );
 
     let mut router = Router::new(args.max_sessions);
+    let mut coord = coordinator::Coordinator::new(
+        coordinator::Config {
+            max_hosts: args.max_hosts,
+            ..Default::default()
+        },
+        Instant::now(),
+    );
     let mut buf = vec![0u8; TOKEN_LEN + MAX_DATAGRAM + 64];
     let mut gc = tokio::time::interval(GC_INTERVAL);
     gc.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut forwarded = 0u64;
     let mut bytes = 0u64;
+    let (mut introduced, mut refused) = (0u64, 0u64);
 
     loop {
         tokio::select! {
@@ -241,6 +260,27 @@ async fn main() -> Result<()> {
                     }
                 };
                 if n < TOKEN_LEN {
+                    continue;
+                }
+                if is_rendezvous(&buf[..n]) {
+                    match coord.handle(from, &buf[..n], Instant::now(), now_us()) {
+                        Ok(replies) => {
+                            if replies.len() == 2 {
+                                introduced += 1;
+                            }
+                            for r in &replies {
+                                if let Err(e) = sock.send_to(&r.bytes, r.to).await {
+                                    tracing::debug!("rendezvous send to {}: {e}", r.to);
+                                }
+                            }
+                        }
+                        // Signature and rate failures are the interesting ones:
+                        // they are the shape an attack takes.
+                        Err(why) => {
+                            refused += 1;
+                            tracing::debug!("rendezvous drop from {from}: {why:?}");
+                        }
+                    }
                     continue;
                 }
                 let mut token = [0u8; TOKEN_LEN];
@@ -269,14 +309,23 @@ async fn main() -> Result<()> {
                 let before = router.pairs.len();
                 router.gc(Instant::now());
                 tracing::debug!(
-                    "{} sessions ({} expired), {forwarded} packets / {:.1} MiB forwarded",
+                    "{} sessions ({} expired), {forwarded} packets / {:.1} MiB forwarded; \
+                     {} hosts registered, {introduced} introductions, {refused} refused",
                     router.pairs.len(),
                     before - router.pairs.len(),
                     bytes as f64 / (1024.0 * 1024.0),
+                    coord.registered_hosts(),
                 );
             }
         }
     }
+}
+
+/// Rendezvous requests arrive unframed and start with the protocol magic. A
+/// relay frame starts with a 16-byte random token, which the host never lets
+/// begin with the magic, so the first four bytes are enough to tell them apart.
+fn is_rendezvous(pkt: &[u8]) -> bool {
+    pkt.starts_with(&MAGIC) && parse_header(pkt).is_ok_and(|h| h.typ.is_rendezvous())
 }
 
 #[cfg(test)]
@@ -437,5 +486,20 @@ mod tests {
     #[test]
     fn tokens_are_logged_as_short_hex() {
         assert_eq!(hex4(&[0x0a, 0xbc, 0xde, 0xf0, 0xff]), "0abcdef0");
+    }
+
+    #[test]
+    fn rendezvous_and_relay_frames_are_told_apart_by_the_magic() {
+        use brolink_core::proto::{encode_plain, PacketType};
+        let lookup = encode_plain(PacketType::Lookup, 0, &[0u8; 40]);
+        assert!(is_rendezvous(&lookup));
+        // A media packet with the magic is not a rendezvous request either.
+        let hello = encode_plain(PacketType::Hello, 0, b"{}");
+        assert!(!is_rendezvous(&hello));
+        // A relay frame: random token then a BroLink packet.
+        let mut framed = vec![0x5Au8; TOKEN_LEN];
+        framed.extend_from_slice(&lookup);
+        assert!(!is_rendezvous(&framed));
+        assert!(!is_rendezvous(&[]));
     }
 }

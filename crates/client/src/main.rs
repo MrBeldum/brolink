@@ -96,7 +96,12 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_title("BroLink"),
+            .with_title("BroLink")
+            .with_icon(eframe::egui::IconData {
+                rgba: brolink_core::icon::render(64),
+                width: 64,
+                height: 64,
+            }),
         vsync: false,
         ..Default::default()
     };
@@ -146,6 +151,8 @@ fn run_headless(
         target,
         cfg,
         identity,
+        wake_mac: None,
+        wake: false,
     })))?;
 
     let deadline = Instant::now() + HEADLESS_TIMEOUT;
@@ -192,8 +199,11 @@ fn run_headless(
                     "'{host}' wants a pairing PIN; run the host with --no-pin for automated tests"
                 )
             }
-            Ok(ClientEvent::Ready(r)) => tracing::info!(
-                "session ready {}x{} @ {} fps via {}",
+            Ok(ClientEvent::Ready {
+                ready: r,
+                host_name,
+            }) => tracing::info!(
+                "session ready {}x{} @ {} fps via {} on '{host_name}'",
                 r.width,
                 r.height,
                 r.fps,

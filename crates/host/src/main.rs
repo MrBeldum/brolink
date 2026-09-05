@@ -5,6 +5,9 @@ mod encode;
 mod engine;
 mod ffmpeg_setup;
 mod input;
+mod power;
+mod rendezvous;
+mod wake;
 mod windows_setup;
 
 use anyhow::Result;
@@ -115,9 +118,14 @@ fn main() -> Result<()> {
 
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 900.0])
+            .with_inner_size([720.0, 960.0])
             .with_min_inner_size([520.0, 640.0])
-            .with_title("BroLink Host"),
+            .with_title("BroLink Host")
+            .with_icon(eframe::egui::IconData {
+                rgba: brolink_core::icon::render(64),
+                width: 64,
+                height: 64,
+            }),
         vsync: true,
         ..Default::default()
     };
