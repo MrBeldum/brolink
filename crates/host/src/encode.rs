@@ -241,11 +241,22 @@ fn gdigrab_prefix(q: &StreamQuality) -> Vec<String> {
     ]
 }
 
-/// Fit the desktop into the requested resolution without distorting it, and
-/// keep dimensions even for 4:2:0.
+/// Fit the desktop into the requested resolution without distorting it.
+///
+/// No padding: the stream comes out at the monitor's own aspect ratio (rounded
+/// to even dimensions for 4:2:0), so a non-16:9 desktop is never letterboxed
+/// with black bars baked into the picture — the client centres and scales
+/// whatever size it receives inside its own window. Padding here also broke the
+/// absolute mouse mapping, since the client mapped the bars as if they were
+/// desktop.
+///
+/// `in_range=full:out_range=tv` pins the RGB→YUV conversion to limited (studio)
+/// range, which is exactly what the client's BT.601 decoder assumes. Leaving it
+/// to swscale's guess is what tinted the picture: a full-range stream decoded as
+/// limited reads as an over-bright, warm (orange) cast.
 fn scale_filter(q: &StreamQuality) -> String {
     format!(
-        "scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bilinear,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=nv12",
+        "scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=bilinear:in_range=full:out_range=tv,format=nv12",
         w = q.width,
         h = q.height
     )

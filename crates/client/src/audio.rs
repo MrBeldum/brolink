@@ -195,6 +195,30 @@ impl AudioPlayer {
             .default_output_device()
             .ok_or_else(|| anyhow!("no audio output device"))?;
         let cfg = pick_output_config(&device)?;
+        // The picked config asks for 48 kHz, which some devices advertise but
+        // refuse to actually open (common on macOS, where the endpoint is
+        // 44.1 kHz). Rather than leave the Mac silent, fall back to the device's
+        // own default config and resample into it.
+        match Self::open(&device, &cfg, volume, stats.clone()) {
+            Ok(player) => Ok(player),
+            Err(e) => {
+                tracing::warn!(
+                    "audio: {} Hz {:?} stream failed ({e:#}); using the device default",
+                    cfg.sample_rate().0,
+                    cfg.sample_format()
+                );
+                let default = device.default_output_config()?;
+                Self::open(&device, &default, volume, stats)
+            }
+        }
+    }
+
+    fn open(
+        device: &cpal::Device,
+        cfg: &cpal::SupportedStreamConfig,
+        volume: f32,
+        stats: Arc<AudioStats>,
+    ) -> Result<Self> {
         let rate = cfg.sample_rate().0;
         tracing::info!(
             "audio out: {} Hz, {} ch, {:?}{}",
@@ -282,8 +306,13 @@ fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConf
             ) && r.min_sample_rate().0 <= SOURCE_RATE
                 && r.max_sample_rate().0 >= SOURCE_RATE
         })
-        // Two channels is what we actually have; more just wastes work.
-        .min_by_key(|r| (r.channels() as i32 - 2).abs());
+        // Prefer the device's own sample format (F32 on macOS/CoreAudio, which
+        // rejects the I16/U16 stream we would otherwise try to open), then the
+        // stereo layout we actually have.
+        .min_by_key(|r| {
+            let fmt_rank = u8::from(r.sample_format() != default.sample_format());
+            (fmt_rank, (r.channels() as i32 - 2).abs())
+        });
     match native {
         Some(r) => Ok(r.with_sample_rate(cpal::SampleRate(SOURCE_RATE))),
         None => Ok(default),

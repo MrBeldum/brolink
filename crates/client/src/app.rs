@@ -341,7 +341,12 @@ impl ClientApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
+                // Lead with the ways to actually start a session: a PC you have
+                // connected to before, one announcing itself on this network, or
+                // a pasted ticket. Everything else is tucked below.
                 self.saved_card(ui);
+                ui.add_space(12.0);
+                self.discovery_card(ui);
                 ui.add_space(12.0);
                 self.connect_card(ui);
                 if self.mode == Mode::Pin {
@@ -349,21 +354,25 @@ impl ClientApp {
                     self.pin_card(ui);
                 }
                 ui.add_space(12.0);
-                self.discovery_card(ui);
-                ui.add_space(12.0);
-                self.quality_card(ui);
-                ui.add_space(12.0);
-                card(ui, "Log", |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(160.0)
-                        .stick_to_bottom(true)
-                        .id_salt("log")
-                        .show(ui, |ui| {
-                            for line in &self.log {
-                                ui.monospace(line);
-                            }
-                        });
-                });
+                egui::CollapsingHeader::new(egui::RichText::new("Settings").strong().color(GOLD))
+                    .id_salt("settings")
+                    .default_open(false)
+                    .show(ui, |ui| self.settings_ui(ui));
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new(egui::RichText::new("Log").strong().color(GOLD))
+                    .id_salt("log_header")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .stick_to_bottom(true)
+                            .id_salt("log")
+                            .show(ui, |ui| {
+                                for line in &self.log {
+                                    ui.monospace(line);
+                                }
+                            });
+                    });
                 ui.add_space(16.0);
             });
         });
@@ -527,54 +536,53 @@ impl ClientApp {
         }
     }
 
-    fn quality_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, "Quality request", |ui| {
-            ui.horizontal(|ui| {
-                for p in QualityPreset::all() {
-                    if p == QualityPreset::Custom {
-                        continue;
-                    }
-                    let sel = self.cfg.quality.preset == p;
-                    if ui.selectable_label(sel, p.as_str()).clicked() {
-                        self.cfg.quality = StreamQuality::from_preset(p);
-                        let _ = self.cfg.save();
-                    }
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Quality").strong());
+        ui.horizontal(|ui| {
+            for p in QualityPreset::all() {
+                if p == QualityPreset::Custom {
+                    continue;
                 }
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Volume");
-                if ui
-                    .add(egui::Slider::new(&mut self.cfg.volume, 0.0..=2.0))
-                    .drag_stopped()
-                {
+                let sel = self.cfg.quality.preset == p;
+                if ui.selectable_label(sel, p.as_str()).clicked() {
+                    self.cfg.quality = StreamQuality::from_preset(p);
                     let _ = self.cfg.save();
                 }
-            });
-            if ui
-                .checkbox(
-                    &mut self.cfg.auto_reconnect,
-                    "Reconnect if the session drops",
-                )
-                .changed()
-            {
-                let _ = self.cfg.save();
             }
-            if ui
-                .checkbox(&mut self.cfg.enable_clipboard, "Share the clipboard")
-                .changed()
-            {
-                let _ = self.cfg.save();
-            }
-            if ui
-                .checkbox(&mut self.cfg.show_hud, "Show stream HUD")
-                .changed()
-            {
-                self.show_hud = self.cfg.show_hud;
-                let _ = self.cfg.save();
-            }
-            ui.weak("Quality applies on the next connection. Competitive is best for games.");
         });
+        ui.weak("Applies on the next connection. Competitive is best for games.");
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Volume");
+            if ui
+                .add(egui::Slider::new(&mut self.cfg.volume, 0.0..=2.0))
+                .drag_stopped()
+            {
+                let _ = self.cfg.save();
+            }
+        });
+        if ui
+            .checkbox(
+                &mut self.cfg.auto_reconnect,
+                "Reconnect if the session drops",
+            )
+            .changed()
+        {
+            let _ = self.cfg.save();
+        }
+        if ui
+            .checkbox(&mut self.cfg.enable_clipboard, "Share the clipboard")
+            .changed()
+        {
+            let _ = self.cfg.save();
+        }
+        if ui
+            .checkbox(&mut self.cfg.show_hud, "Show the overlay while streaming")
+            .changed()
+        {
+            self.show_hud = self.cfg.show_hud;
+            let _ = self.cfg.save();
+        }
     }
 
     fn stream_ui(&mut self, ctx: &egui::Context) {
@@ -601,6 +609,14 @@ impl ClientApp {
         if toggle_fs {
             self.fullscreen = !self.fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        }
+
+        // Free the pointer whenever the window loses focus. On macOS F8 is a
+        // media key the app never receives, so without this a captured cursor is
+        // almost impossible to release; switching away (Cmd-Tab, Mission
+        // Control) is the one gesture that always works, and it drops focus.
+        if self.captured && !ctx.input(|i| i.focused) {
+            self.set_capture(ctx, false);
         }
 
         let mut video_rect = egui::Rect::NOTHING;
@@ -644,12 +660,12 @@ impl ClientApp {
                     ui.horizontal(|ui| {
                         let hud = if self.captured {
                             format!(
-                                "F8 release  ·  F11 fullscreen  ·  F7 HUD  ·  Ctrl+Shift+Q quit  ·  {}",
+                                "Mouse captured — press F8 or switch to another window to free it  ·  Ctrl+Shift+Q quit  ·  {}",
                                 self.stats
                             )
                         } else {
                             format!(
-                                "Click to capture mouse  ·  F8 toggle  ·  F7 HUD  ·  {}",
+                                "Click the picture to control the PC  ·  {}",
                                 self.stats
                             )
                         };
