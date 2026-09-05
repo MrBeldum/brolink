@@ -35,8 +35,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: test client + core + relay
-        run: cargo test -p brolink-core -p brolink-client -p brolink-relay
+      - name: test core + client
+        run: cargo test -p brolink-core -p brolink-client
       - name: release client
         run: cargo build --release -p brolink-client --target aarch64-apple-darwin
       - name: bundle

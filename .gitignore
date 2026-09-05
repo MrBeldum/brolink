@@ -9,9 +9,4 @@
 .env
 .DS_Store
 Thumbs.db
-/crates/host/ffmpeg.exe
-/crates/client/ffmpeg.exe
-*.h264
-*.ivf
 /tmp
-/test-output

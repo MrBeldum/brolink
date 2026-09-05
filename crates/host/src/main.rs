@@ -1,125 +1,54 @@
+//! BroLink Host. One executable, two jobs:
+//!
+//! * `brolink-host --background`: the control service a Mac talks to. Runs
+//!   at logon with no window (see [`setup::set_start_with_windows`]).
+//! * `brolink-host`: the control panel. Starts the service if it is not
+//!   running, shows what it knows, and runs the one administrator setup.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
-mod audio;
-mod clipboard;
-mod encode;
-mod engine;
-mod ffmpeg_setup;
-mod input;
+mod config;
 mod power;
-mod rendezvous;
+mod service;
+mod setup;
+mod streamer;
 mod wake;
-mod windows_setup;
 
 use anyhow::Result;
-use brolink_core::config::HostConfig;
-use brolink_core::identity::Identity;
+use brolink_core::config::data_dir;
+use brolink_core::http;
+use brolink_core::CONTROL_PORT;
 use clap::Parser;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing_subscriber::EnvFilter;
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "brolink-host",
     version,
-    about = "BroLink Windows host — game-quality remote play"
+    about = "BroLink Host: your PC, from your Mac"
 )]
 struct Args {
-    /// Run without the control panel (prints the ticket and logs to stdout).
+    /// Run the control service with no window.
     #[arg(long)]
-    headless: bool,
-    /// Override the advertised PC name.
-    #[arg(long)]
-    name: Option<String>,
-    /// UDP port (default 47850).
-    #[arg(long)]
-    port: Option<u16>,
-    /// Skip the PIN prompt and auto-trust new clients (LAN testing only).
-    #[arg(long)]
-    no_pin: bool,
-    /// Advertise a `brolink-relay` at this `host:port` for hard-NAT clients.
-    #[arg(long)]
-    relay: Option<String>,
-    /// Do not try to add a Windows Firewall rule on startup.
-    #[arg(long)]
-    no_firewall: bool,
-    /// Do not capture or stream system audio for this run.
-    #[arg(long)]
-    no_audio: bool,
+    background: bool,
 }
 
 fn main() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
-
     let args = Args::parse();
-    let mut cfg = HostConfig::load().unwrap_or_default();
-    if let Some(n) = args.name {
-        cfg.name = n;
-    }
-    if let Some(p) = args.port {
-        cfg.port = p;
-    }
-    if let Some(r) = args.relay {
-        cfg.relay = r;
-    }
-    cfg.quality = cfg.quality.sanitized();
-    if let Err(e) = cfg.save() {
-        tracing::warn!("could not save host config: {e:#}");
-    }
-
-    // Applied *after* the save, so they last one run. Persisting --no-pin
-    // meant a single test left the host auto-trusting every future client,
-    // with nothing in the UI to say pairing had been turned off.
-    if args.no_pin {
-        cfg.auto_trust = true;
-        tracing::warn!("--no-pin: any client that can reach this PC will be trusted");
-    }
-    if args.no_audio {
-        cfg.enable_audio = false;
-        tracing::info!("--no-audio: system audio will not be captured");
-    }
-
-    let identity = Identity::load_or_create(&brolink_core::config::host_identity_path()?)?;
-    tracing::info!("host id {}", identity.short_id());
-
-    raise_priority();
-    if !args.no_firewall {
-        ensure_firewall_rule(cfg.port);
-    }
-    // Read-only, so it runs even under --no-firewall: "do not touch my
-    // firewall" is not the same as "do not tell me I am unreachable".
-    warn_if_unreachable();
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("brolink-host")
-        .build()?;
-    let engine = Arc::new(engine::Engine::new(cfg.clone(), identity));
-    let engine_run = engine.clone();
-    rt.spawn(async move {
-        if let Err(e) = engine_run.run().await {
-            tracing::error!("engine: {e:#}");
-            let mut st = engine_run.status.lock();
-            st.last_error = Some(format!("{e:#}"));
-            st.running = false;
-        }
+    init_logging(if args.background {
+        "service.log"
+    } else {
+        "panel.log"
     });
-
-    if args.headless {
-        return run_headless(&engine);
+    if args.background {
+        return service::Service::new().run_arc();
     }
-
+    ensure_service_running();
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 960.0])
-            .with_min_inner_size([520.0, 640.0])
+            .with_inner_size([720.0, 860.0])
+            .with_min_inner_size([560.0, 600.0])
             .with_title("BroLink Host")
             .with_icon(eframe::egui::IconData {
                 rgba: brolink_core::icon::render(64),
@@ -129,178 +58,70 @@ fn main() -> Result<()> {
         vsync: true,
         ..Default::default()
     };
-    let engine_ui = engine.clone();
-    let result = eframe::run_native(
+    eframe::run_native(
         "BroLink Host",
         native,
-        Box::new(move |cc| Ok(Box::new(app::HostApp::new(cc, engine_ui, cfg)))),
-    );
-    // Stop the engine and let it tear down ffmpeg and the virtual pad before
-    // the runtime goes away underneath them.
-    engine.stop();
-    rt.shutdown_timeout(std::time::Duration::from_secs(3));
-    result.map_err(|e| anyhow::anyhow!("{e}"))
+        Box::new(|cc| Ok(Box::new(app::HostApp::new(cc)))),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Print the ticket, then idle until interrupted.
-fn run_headless(engine: &Arc<engine::Engine>) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        {
-            let st = engine.status.lock();
-            if let Some(err) = &st.last_error {
-                anyhow::bail!("{err}");
-            }
-            if !st.ticket_display.is_empty() {
-                println!("BroLink ticket:\n{}\n", st.ticket_display);
-                break;
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!("host did not come up within 30s");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+impl service::Service {
+    fn run_arc(self) -> Result<()> {
+        Arc::new(self).run()
     }
-    install_interrupt_handler();
-    while !INTERRUPTED.load(Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if let Some(err) = engine.status.lock().last_error.clone() {
-            anyhow::bail!("{err}");
-        }
-    }
-    // Returning here drops the engine, which kills ffmpeg and unplugs the
-    // virtual gamepad instead of leaving them behind.
-    engine.stop();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    println!("BroLink host stopped.");
-    Ok(())
 }
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// Logs go to a file in the data directory: neither mode has a console.
+fn init_logging(file: &str) {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let sink: Box<dyn std::io::Write + Send> =
+        match data_dir().and_then(|d| Ok(std::fs::File::create(d.join(file))?)) {
+            Ok(f) => Box::new(f),
+            Err(_) => Box::new(std::io::stderr()),
+        };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(sink))
+        .init();
+}
 
-/// Note Ctrl+C so headless mode can shut ffmpeg down cleanly instead of being
-/// killed with the encoder still running.
-fn install_interrupt_handler() {
+/// True when a service answers on loopback.
+pub fn service_alive() -> bool {
+    http::request(
+        ("127.0.0.1", CONTROL_PORT),
+        "GET",
+        "/v1/status",
+        None,
+        Duration::from_millis(600),
+    )
+    .map(|r| r.status == 200)
+    .unwrap_or(false)
+}
+
+/// Start `--background` if nothing answers on loopback.
+pub fn ensure_service_running() {
+    if service_alive() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut c = std::process::Command::new(exe);
+    c.arg("--background")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
-        use windows::Win32::Foundation::BOOL;
-        use windows::Win32::System::Console::{
-            SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
-        };
-        unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
-            if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT {
-                INTERRUPTED.store(true, Ordering::Relaxed);
-                return true.into();
-            }
-            false.into()
-        }
-        if let Err(e) = unsafe { SetConsoleCtrlHandler(Some(handler), true) } {
-            tracing::debug!("could not install a console control handler: {e}");
-        }
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
     }
-}
-
-fn raise_priority() {
-    #[cfg(windows)]
-    unsafe {
-        use windows::Win32::System::Threading::*;
-        // Capture and encode must not be starved by whatever game is running.
-        if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err() {
-            tracing::debug!("could not raise process priority");
-        }
+    match c.spawn() {
+        Ok(_) => tracing::info!("started the background service"),
+        Err(e) => tracing::error!("could not start the background service: {e}"),
     }
-}
-
-/// Add an inbound UDP allow rule, but only if one is not already there.
-/// Say so when this PC cannot actually be reached.
-///
-/// Windows evaluates block rules before allow rules, so a leftover "Query
-/// User" block -- what Windows writes when its prompt is dismissed -- quietly
-/// defeats the allow rule added above. Without this the host prints a ticket,
-/// logs a healthy startup, and is simply unreachable, which reads as a bug in
-/// the client. Checked on a background thread so it never delays the ticket.
-fn warn_if_unreachable() {
-    #[cfg(windows)]
-    std::thread::spawn(|| {
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        let exe = exe.to_string_lossy().replace("'", "''");
-        let script = format!(
-            "$b=@(Get-NetFirewallApplicationFilter -Program '{exe}' -ErrorAction SilentlyContinue| Get-NetFirewallRule -ErrorAction SilentlyContinue|Where-Object{{$_.Action -eq 'Block' -and $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound'}}).Count; $p=@(Get-NetConnectionProfile -ErrorAction SilentlyContinue| Where-Object{{$_.NetworkCategory -eq 'Public'}}).Count;Write-Output \"$b $p\""
-        );
-        let Ok(out) = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .creation_flags(0x0800_0000)
-            .output()
-        else {
-            return;
-        };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut fields = text.split_whitespace();
-        let blocked: u32 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let public: u32 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        if blocked > 0 {
-            tracing::warn!(
-                "{blocked} firewall rule(s) BLOCK inbound traffic to {exe}. Windows applies block rules before allow rules, so no client can reach this PC until they are gone. In an elevated PowerShell: Get-NetFirewallApplicationFilter -Program '{exe}' | Get-NetFirewallRule | Where-Object Action -eq Block | Remove-NetFirewallRule"
-            );
-        }
-        if public > 0 {
-            tracing::warn!(
-                "this PC is on a network Windows classes as Public, where inbound connections and LAN discovery are blocked by default. For a home network: Set-NetConnectionProfile -InterfaceAlias '<adapter>' -NetworkCategory Private"
-            );
-        }
-    });
-}
-
-fn ensure_firewall_rule(port: u16) {
-    #[cfg(windows)]
-    {
-        const RULE: &str = "BroLink Host";
-        // Arguments are passed as separate values: splitting a single string on
-        // spaces would cut the quoted rule name in half.
-        let exists = std::process::Command::new("netsh")
-            .args([
-                "advfirewall",
-                "firewall",
-                "show",
-                "rule",
-                &format!("name={RULE}"),
-            ])
-            .creation_flags(0x0800_0000)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if exists {
-            tracing::debug!("firewall rule '{RULE}' already present");
-            return;
-        }
-        let status = std::process::Command::new("netsh")
-            .args([
-                "advfirewall",
-                "firewall",
-                "add",
-                "rule",
-                &format!("name={RULE}"),
-                "dir=in",
-                "action=allow",
-                "protocol=UDP",
-                &format!("localport={port}"),
-            ])
-            .creation_flags(0x0800_0000)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => tracing::info!("added firewall rule for UDP {port}"),
-            _ => tracing::warn!(
-                "could not add a firewall rule (needs administrator). If clients cannot reach \
-                 this PC, run: netsh advfirewall firewall add rule name=\"{RULE}\" dir=in \
-                 action=allow protocol=UDP localport={port}"
-            ),
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = port;
 }

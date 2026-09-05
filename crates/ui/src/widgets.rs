@@ -7,8 +7,8 @@
 use crate::theme::{self, stroke, PALETTE as P, RADIUS, RADIUS_LG};
 use egui::{
     collapsing_header::CollapsingState, Align, Color32, ColorImage, CornerRadius, Frame, Id,
-    InnerResponse, Layout, Margin, Response, RichText, Sense, Stroke, StrokeKind, TextStyle,
-    TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo, WidgetType,
+    InnerResponse, Label, Layout, Margin, Rect, Response, RichText, Sense, Stroke, StrokeKind,
+    TextStyle, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 
 /// Semantic colour for pills, notices and status text.
@@ -562,6 +562,53 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 // Settings rows
 // ---------------------------------------------------------------------------
 
+/// A row with text on the left and controls on the right. The controls are
+/// laid out first, so the text gets exactly the width they leave and wraps
+/// there instead of running underneath them.
+fn split_row<R>(
+    ui: &mut Ui,
+    min_height: f32,
+    right: impl FnOnce(&mut Ui) -> R,
+    left: impl FnOnce(&mut Ui),
+) -> R {
+    let avail = ui.available_rect_before_wrap();
+    let row = Rect::from_min_size(avail.min, Vec2::new(avail.width(), min_height));
+    let mut right_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(row)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    right_ui.spacing_mut().item_spacing.x = 6.0;
+    let r = right(&mut right_ui);
+    let used = right_ui.min_rect();
+    let taken = if used.is_positive() {
+        row.max.x - used.min.x + 14.0
+    } else {
+        0.0
+    };
+    let text_rect = Rect::from_min_size(
+        row.min,
+        Vec2::new((row.width() - taken).max(80.0), min_height),
+    );
+    let mut left_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    left_ui.spacing_mut().item_spacing.y = 1.0;
+    left(&mut left_ui);
+    let height = left_ui
+        .min_rect()
+        .height()
+        .max(used.height())
+        .max(min_height);
+    ui.allocate_rect(
+        Rect::from_min_size(row.min, Vec2::new(row.width(), height)),
+        Sense::hover(),
+    );
+    r
+}
+
 /// Label (and optional hint) on the left, a control on the right.
 pub fn setting_row<R>(
     ui: &mut Ui,
@@ -569,19 +616,12 @@ pub fn setting_row<R>(
     hint: Option<&str>,
     control: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    ui.horizontal(|ui| {
-        ui.set_min_height(30.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.label(RichText::new(label).color(P.text));
-            if let Some(h) = hint {
-                caption(ui, h);
-            }
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), control)
-            .inner
+    split_row(ui, 30.0, control, |ui| {
+        ui.label(RichText::new(label).color(P.text));
+        if let Some(h) = hint {
+            caption(ui, h);
+        }
     })
-    .inner
 }
 
 /// A [`setting_row`] whose control is a [`toggle`]. Returns true on change.
@@ -594,19 +634,19 @@ pub fn toggle_row(ui: &mut Ui, on: &mut bool, label: &str, hint: Option<&str>) -
 // ---------------------------------------------------------------------------
 
 /// A row in a list of PCs: name and detail on the left, actions on the
-/// right. Add the primary action first; it lands rightmost.
+/// right. Add the primary action first; it lands rightmost. The detail
+/// stays on one line and is cut with an ellipsis rather than wrapping.
 pub fn list_row(ui: &mut Ui, title: &str, detail: &str, actions: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(40.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            strong(ui, title);
-            caption(ui, detail);
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            actions(ui);
-        });
+    split_row(ui, 40.0, actions, |ui| {
+        strong(ui, title);
+        ui.add(
+            Label::new(
+                RichText::new(detail)
+                    .text_style(theme::caption())
+                    .color(P.muted),
+            )
+            .truncate(),
+        );
     });
 }
 

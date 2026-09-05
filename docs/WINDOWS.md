@@ -1,140 +1,107 @@
 # Windows host
 
-BroLink Host is a native app. You leave it running on the PC you want to
-play from a Mac. It captures the desktop, encodes it, and waits for a
-trusted client.
+BroLink Host is one small program with two jobs: a background service a Mac
+talks to over Tailscale, and a window that shows what it knows and runs the
+setup. Sunshine does the streaming.
 
 ## Requirements
 
-- Windows 10 1903+ or Windows 11
-- A GPU (AMD, NVIDIA, or Intel). BroLink will use:
-  1. AMD AMF (`h264_amf`, ultra-low-latency)
-  2. NVIDIA NVENC (`h264_nvenc`, `tune=ull`)
-  3. Intel Quick Sync (`h264_qsv`)
-  4. Media Foundation (`h264_mf`)
-  5. libx264 `ultrafast` / `zerolatency`
-- FFmpeg is **downloaded automatically** the first time the host cannot find
-  it. You can also drop `ffmpeg.exe` next to `brolink-host.exe`, put it on
-  `PATH`, or install a Gyan essentials build at `C:\ffmpeg\bin\ffmpeg.exe`.
-- Optional: [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) for a virtual Xbox 360 controller
-- Optional: [Tailscale](https://tailscale.com) if UPnP is blocked (CGNAT, campus, locked router)
+- Windows 10 1809+ or Windows 11, 64-bit
+- A GPU Sunshine can encode on (AMD, NVIDIA, Intel; AV1 needs RX 7000 /
+  RTX 40 / Arc)
+- [Tailscale](https://tailscale.com/download/windows), signed in with the
+  same account as the Mac
+- Wired Ethernet if you want to wake the PC from the Mac
 
-## Install from this repo
+## Install
 
-```powershell
-rustup default stable
-cargo build --release -p brolink-host
-.\scripts\install-host.ps1
-```
+1. Unzip the release and run `brolink-host.exe`, or run `install-host.ps1`
+   to copy it to `%LOCALAPPDATA%\BroLink`, add shortcuts, and register the
+   background service to start at logon.
+2. Click **Set up this PC**. One UAC prompt runs a script that:
+   - downloads the latest Sunshine MSI from GitHub and installs it silently
+     (skipped if Sunshine or Apollo is already installed);
+   - sets a Sunshine web login for BroLink (`sunshine --creds`) and
+     restarts the Sunshine service;
+   - adds a firewall rule for TCP 47850, inbound from `100.64.0.0/10` only;
+   - enables Wake-on-Magic-Packet and ARP offload on the adapter that has
+     the default route, and lets the device wake the PC (`powercfg`).
 
-That copies the binary to `%LOCALAPPDATA%\BroLink`, fetches FFmpeg if
-needed, writes a desktop shortcut, and tries to add a firewall allow rule.
-Tick **Start with Windows** in the app if you want the host waiting after a
-reboot.
+   The script's transcript is in `%LOCALAPPDATA%\BroLink\setup.log` and is
+   shown in the window if something fails. Run setup again after fixing
+   whatever it complained about; every step is idempotent.
+3. The status pill turns green. Leave the window closed; the service keeps
+   running.
 
-Headless (prints the ticket, no GUI):
+The window shows the Sunshine login it generated. Use it at
+`https://localhost:47990` for Sunshine's own settings (encoder, which
+display to stream, HDR, audio device, apps).
 
-```powershell
-.\target\release\brolink-host.exe --headless --name OFFICE-PC
-```
+## What the service does
 
-Useful flags:
+`brolink-host.exe --background` listens on TCP 47850 and answers three
+requests, all JSON:
 
-| Flag | Effect |
-|------|--------|
-| `--headless` | No control panel; prints the ticket and logs to stdout |
-| `--name NAME` | Override the advertised PC name |
-| `--port N` | UDP port (default 47850) |
-| `--no-pin` | Trust any client that can reach this PC (LAN testing only; not saved) |
-| `--relay HOST:PORT` | Advertise a `brolink-relay` (relay + rendezvous) for hard-NAT clients and changing IPs |
-| `--no-firewall` | Do not try to add a Windows Firewall rule on startup |
-| `--no-audio` | Do not capture or stream system audio for this run |
+| Request | Effect |
+|---------|--------|
+| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Sunshine state |
+| `POST /v1/pin {"pin","name"}` | Passes the PIN to Sunshine's `/api/pin`, so pairing never needs the PC's screen |
+| `POST /v1/power {"action"}` | `sleep`, `restart`, or `shutdown` (closes the running Sunshine app first) |
 
-## Internet access
+A request is answered only if it comes from loopback or from a Tailscale
+address that `tailscale whois` attributes to the account this PC is signed
+in as. Anything else is refused with a 403 before any action.
 
-The host tries, in order, to make the ticket work from another network:
-
-1. **UPnP / NAT-PMP** (on by default) — asks the router to forward UDP 47850
-2. **Public IPv6** — advertised when the PC has a global address
-3. **STUN** — learns the reflexive address; only works on full-cone NAT by itself
-4. **Tailscale** — if a `100.x` interface exists
-5. **Relay** — if you set one in the UI
-
-If the Internet card in the UI says the PC is not reachable from outside,
-either enable UPnP on the router, install Tailscale on both machines, or run
-`brolink-relay` on a small VPS and paste `host:47851` into **Relay**.
+Logs: `%LOCALAPPDATA%\BroLink\service.log` and `panel.log`.
 
 ## Waking it from the Mac, and turning it off
 
-The host window has a **Wake and power from the Mac** card. It shows the LAN
-adapter, its MAC, and whether Windows will wake the PC on a magic packet. If
-not, **Enable Wake-on-LAN** fixes it through a UAC prompt (it turns on
-magic-packet wake and ARP offload on the adapter and lets the device wake the
-PC). Once a Mac has connected, it remembers the MAC, and **Connect** on that
-PC wakes it automatically.
+The **This PC** card shows the adapter, its MAC, and whether Windows will
+wake on a magic packet. Setup arms it. The Mac learns the MAC and LAN
+address the first time it sees this PC awake, and from then on **Connect**
+on the Mac wakes it.
 
-What works, honestly:
+| PC state | Wake from the same network | Wake from elsewhere |
+|----------|----------------------------|---------------------|
+| Sleep (S3 or modern standby, plugged in) | yes | yes, if a Tailscale subnet router or similar is on the PC's network |
+| Hibernate / shut down with Fast Startup | usually | rarely |
+| Shut down, Fast Startup off | if the NIC and BIOS allow wake from S5 | rarely |
 
-| PC state | Wake from the same LAN | Wake from the internet |
-|----------|-----------------------|------------------------|
-| Sleep (S3 / modern standby, plugged in) | yes | yes, via the router mapping the host created |
-| Hibernate / shut down with Fast Startup | usually | rarely: the router forgets the PC's address within minutes |
-| Shut down, Fast Startup off | if the NIC/BIOS allow wake from S5 | rarely, same reason |
+Leave the PC **asleep**, not shut down. Untick **Let a paired Mac sleep,
+restart, or shut down this PC** in Settings if you would rather it could
+not. Remote power actions force-close programs, because nobody is there to
+answer a save prompt.
 
-So: leave the PC **asleep**, not shut down, when you are away. The client's
-**PC ▾** menu (press **F8** first to free the mouse) offers Sleep, Restart,
-and Shut down; untick **Let a paired Mac sleep, restart, or shut down this
-PC** if you would rather it could not. Tick **Start with Windows** so the host
-is back after a restart. Remote power actions force-close programs, because
-nobody is there to answer a save prompt.
+After a **restart**, Sunshine is back before anyone logs in (it is a
+service), so the Mac can stream the login screen and sign in. BroLink's
+service starts at logon, so sleep and shutdown from the Mac return once
+someone is signed in.
 
-Wi-Fi adapters often cannot wake the PC at all; use Ethernet for the host.
+## Apollo instead of Sunshine
 
-## Firewall
+[Apollo](https://github.com/ClassicOldSong/Apollo) is a Sunshine fork with
+a built-in virtual display that matches the Mac's resolution exactly, which
+is the only way to get a pixel-for-pixel 16:10 desktop on a MacBook screen.
+If it is installed in `C:\Program Files\Apollo`, BroLink uses it instead of
+installing Sunshine; the API and config layout are the same. Install it
+yourself from its releases page before running setup.
 
-BroLink tries to add an inbound UDP rule for port **47850**. If you are not
-elevated, add it yourself, or run `.\scripts\install-host.ps1` from an
-elevated PowerShell.
+## Gamepads
 
-### If clients still cannot connect
+Sunshine no longer installs the virtual controller driver (ViGEmBus) by
+itself. The **This PC** card shows whether it is present and offers
+**Install controller driver**; a reboot afterwards is recommended.
 
-Two things silently defeat the allow rule. The host warns about both at
-startup. To fix them, from an **elevated** PowerShell:
+## Troubleshooting
 
-```powershell
-.\scripts\fix-firewall.ps1 -DryRun   # show what would change
-.\scripts\fix-firewall.ps1           # remove blocks, add a LocalSubnet allow
-.\scripts\fix-firewall.ps1 -Wan      # ...or open the port to any address
-```
-
-The allow rule is scoped to the local subnet unless you pass `-Wan`, so
-playing on your own network does not expose the port to the internet. UPnP
-mapping is a separate, explicit hole for worldwide access. The script never
-changes your network category.
-
-**Block rules win.** Windows evaluates block rules before allow rules, so a
-leftover "Query User" block — which Windows writes whenever its network
-prompt is dismissed or cancelled — makes the host unreachable no matter what
-allow rules exist.
-
-**Public networks.** Windows blocks inbound connections and LAN discovery on
-networks classed as Public. On a home network you control:
-
-```powershell
-Set-NetConnectionProfile -InterfaceAlias "Ethernet" -NetworkCategory Private
-```
-
-On a cafe or hotel network leave it Public and reach the host over Tailscale
-or a relay.
-
-## Games
-
-Use **borderless windowed** (or windowed) mode. Exclusive fullscreen can
-bypass Desktop Duplication on some titles.
-
-Competitive preset: 1080p60 at 15 Mbps. Increase bitrate on a LAN; drop it
-on a long-haul link. Adaptive bitrate will also step down if the client
-reports loss.
-
-Keep the Windows session unlocked. v1.0 runs in the user session (it does
-not capture the login screen).
+- **Orange "Needs setup" that will not clear**: read `setup.log`. The
+  usual causes are no internet on the PC during the Sunshine download, or
+  the UAC prompt being dismissed.
+- **The Mac lists the PC as "Sunshine only"**: the control service is not
+  running or the firewall rule is missing. Open BroLink Host (it restarts
+  the service) and run setup again.
+- **The Mac says the PC is asleep but it is on**: Tailscale's online flag
+  lags by up to half a minute; Connect probes the PC directly and will work.
+- **Windows classes the network as Public**: Tailscale traffic is
+  unaffected, but the LAN wake broadcast from a Mac on the same network
+  may be dropped. Set the network to Private for a home LAN.

@@ -1,42 +1,38 @@
 # Contributing
 
-Remote Play is the product. Keep changes to the wire protocol
-backward-compatible or bump `PROTO_VERSION`. Ticket version 2 (IPv4) must
-keep decoding; version 3 is for IPv6. New JSON fields get `#[serde(default)]`
-so a v1.0 host and a v1.1 client still talk.
+BroLink is the small part: waking, pairing, power, setup. If a change
+would make BroLink capture, encode, decode, relay, or authenticate anything
+itself, it belongs in Sunshine, Moonlight or Tailscale instead.
 
 Before opening a PR:
 
 ```powershell
 cargo fmt --all
-cargo clippy --workspace --all-targets    # must be warning-free
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-.\scripts\test-loopback.ps1               # the end-to-end check (video + audio)
 ```
 
-The loopback script is the one that catches real breakage: it runs a host and
-a client against the real GPU encoder and requires 30 decoded frames over both
-a bare address and a ticket. Unit tests alone have never caught a capture or
-encoder-flag regression.
+The control API (`crates/core/src/api.rs`) is read by an older client or
+host at times, so new JSON fields get `#[serde(default)]` and existing
+ones keep their meaning.
 
-Changes to encoder flags deserve particular care. Every encoder is configured
-for a single slice per picture, because the frame splitter treats a complete
-slice NAL as a complete frame; a multi-slice stream would tear. `libx264`
-needs `-x264-params sliced-threads=0:slices=1` for this, and `gdigrab` capture
-needs an explicit `-pix_fmt nv12` or it produces 4:4:4 output the client
-cannot decode.
-
-Both windows are built from `crates/ui` (`brolink-ui`): one palette, one
-typeface, one set of cards, rows, pills and buttons. Put new visual elements
-there rather than styling them inline in an app, so the host and client keep
-looking like one product. To see what a change looks like without a Windows
-PC or a display, render the screens to PNGs:
+Both windows are built from `crates/ui`: one palette, one typeface, one set
+of cards, rows, pills and buttons. Put new visual elements there rather than
+styling them inline. To see what a change looks like without a Mac or a PC:
 
 ```bash
 cargo test -p brolink-client -p brolink-host snapshots -- --ignored
 ```
 
-They land in `target/ui-snapshots/`.
+The PNGs land in `target/ui-snapshots/`.
 
-Please do not wrap Sunshine or Moonlight as a hidden subprocess — BroLink
-owns its protocol.
+To exercise the host service on a Windows box with Tailscale:
+
+```powershell
+cargo run -p brolink-host -- --background
+curl http://127.0.0.1:47850/v1/status
+```
+
+Anything that needs administrator rights lives in the generated setup
+script (`crates/host/src/setup.rs`), so it runs behind one UAC prompt and
+stays readable as PowerShell.

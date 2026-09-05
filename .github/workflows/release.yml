@@ -1,8 +1,7 @@
 name: release
 
 # Two ways in:
-#   * workflow_dispatch -- build binaries to download from the run page. This
-#     is how you get a Mac client for a smoke test without cutting a release.
+#   * workflow_dispatch -- build binaries to download from the run page.
 #   * a v* tag -- same binaries, published as a GitHub release.
 on:
   workflow_dispatch:
@@ -48,14 +47,12 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: build
-        run: cargo build --release --workspace
+        run: cargo build --release -p brolink-host
       - name: package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\release\brolink-host.exe dist\
-          Copy-Item target\release\brolink-client.exe dist\
-          Copy-Item target\release\brolink-relay.exe dist\
           Copy-Item docs\WINDOWS.md dist\README-WINDOWS.md
           Copy-Item scripts\install-host.ps1 dist\
           Compress-Archive -Path dist\* -DestinationPath brolink-windows-x64.zip
@@ -80,76 +77,68 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A semver prerelease (v0.1.0-alpha.1) is marked as one, so GitHub
-          # does not present it as the latest stable build.
           case "${GITHUB_REF_NAME}" in
             *-*) PRE=--prerelease ;;
             *)   PRE= ;;
           esac
           cat > notes.md <<'EOF'
+          ## BroLink 2.0
+
+          BroLink is now a thin layer over three tools that already do the
+          hard part well: **Sunshine** streams the PC, **Moonlight** shows it
+          on the Mac with hardware HEVC/AV1 decode, and **Tailscale** connects
+          the two from anywhere. BroLink adds what they leave out: waking the
+          PC from the Mac, putting it back to sleep, pairing without touching
+          the PC, and one click to get from "asleep in another room" to a full
+          screen desktop.
+
+          The custom protocol, encoder, decoder, relay, UPnP, STUN, tickets,
+          and PIN dialogs from 1.x are gone.
+
           ## Install
 
-          **macOS (Apple Silicon)**
+          **Windows PC**: unzip, run `brolink-host.exe`, click **Set up this
+          PC** once (one administrator prompt: installs Sunshine, opens the
+          control port to your tailnet, arms Wake-on-LAN). Sign the PC in to
+          Tailscale with your account. Or run `install-host.ps1` to get
+          shortcuts and start-at-logon.
+
+          **Mac (Apple Silicon)**: either
+
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
+          ```
+
+          or download the tarball and
 
           ```bash
           tar xzf brolink-macos-arm64.tar.gz
           xattr -dr com.apple.quarantine BroLink.app
-          RUST_LOG=info BroLink.app/Contents/MacOS/BroLink
+          open BroLink.app
           ```
 
-          The `xattr` step is required. The bundle is ad-hoc signed rather than
-          Developer ID signed, so Gatekeeper reports it as damaged without it.
-
-          **Windows (host)**
-
-          Unzip, then run `brolink-host.exe` (or `install-host.ps1`). FFmpeg
-          is downloaded on first run if it is not found. If clients cannot
-          connect, run `fix-firewall.ps1` from an elevated PowerShell --
-          Windows block rules override allow rules and are the usual cause.
-
-          ## New in 1.2
-
-          Fixes for everything reported from the Mac:
-
-          - Colour: the stream is pinned to limited-range BT.601, which is what
-            the client decodes. Desktop Duplication hands FFmpeg a full-range
-            frame and the old filter chain passed that through, so the picture
-            decoded over-bright and warm.
-          - No letterboxing: a non-16:9 desktop is encoded at its own aspect
-            ratio instead of being padded into a 16:9 box. This also fixes
-            absolute mouse positioning, which mapped the bars as desktop.
-          - The mouse is released whenever the window loses focus, so Cmd-Tab
-            always frees it. The hint says fn+F8 on macOS, where F8 is a media
-            key.
-          - Audio on the Mac: the client prefers the device's own sample format
-            and falls back to its default configuration if 48 kHz will not open.
-          - Both windows redesigned on one shared theme (crates/ui, Inter).
-          - Docs: why Gatekeeper calls the app damaged and how to sign it, and
-            running a relay when the router cannot open a port.
+          The `xattr` step is needed for a browser download because the app
+          is ad-hoc signed, not Developer-ID signed. The app installs
+          Moonlight for you and lists the PCs on your Tailscale account.
 
           ## What is verified
 
-          - 242 unit tests, clippy clean, on Windows and macOS in CI
-          - End-to-end loopback on one Windows machine (h264_amf) with the new
-            filter chain: capture, encode, encrypt, fragment, send, reassemble,
-            decrypt, decode, plus audio checked for real signal rather than
-            digital silence
-          - The colour fix against a real Desktop Duplication frame: the old
-            chain produced full-range NV12 (white at Y=255), the new one
-            limited range (Y=235) whatever the capture frame is tagged
-          - The Mac client opens CoreAudio at 48 kHz F32 and plays every frame
-            (ignored test, run on the maintainer's Mac)
-          - Every screen of both UIs rendered to PNG and reviewed
+          - Unit tests, clippy and fmt on Windows and macOS in CI
+          - The host service on a real Windows 11 PC with Tailscale: status on
+            loopback and on the tailnet address, 403 for a LAN address,
+            request validation, `tailscale whois` identity check
+          - The elevated setup script's text (a test pins its quoting); the
+            Wake-on-LAN probe against a real adapter
+          - Every screen of both apps rendered to PNG and reviewed
 
           ## What is not
 
-          - A Mac-to-Windows streaming session with these fixes has not been
-            watched end to end; colour, aspect ratio and focus-release are
-            verified by construction and on Windows, not yet by eye on the Mac
-          - Waking over the internet depends on the NIC keeping ARP offload on
-            during sleep and on the router honouring a permanent mapping; both
-            are common, neither is universal
-          - The rendezvous and relay are unit-tested, not soak-tested
+          - A full Mac-to-PC session through this build (wake, auto-pair,
+            Moonlight launch) has not been watched end to end on a Mac
+          - The silent Sunshine install and `--creds` step ran only as far as
+            the UAC prompt on the maintainer's machine (the build machine is
+            not elevated); the script is straightforward but treat the first
+            run as a test and read the setup log if the card stays orange
           EOF
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \

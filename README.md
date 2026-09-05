@@ -1,226 +1,166 @@
 # BroLink
 
-**Your Windows PC, from your Mac — at game-streaming quality.**
+**Your Windows PC, on your Mac. One click, from anywhere.**
 
-BroLink is a personal remote-play app: sit at an Apple Silicon Mac, play
-and use the Windows desktop in the other room or on another continent. The
-picture is a low-latency H.264 stream (hardware encode on the PC, decode on
-the Mac) with keyboard, mouse, gamepad, system audio, and clipboard. Setup
-is two native apps and a pasteable ticket — no browser, no account, no
-Electron.
+BroLink sits at a Mac and treats a Windows PC in another room or another
+country as if it were on the desk: full screen, hardware-decoded HEVC or
+AV1, keyboard, mouse, gamepad and audio at game-streaming latency.
 
-This is bring-your-own-device, not a cloud. The pixels never leave *your*
-machines, and after pairing they are encrypted end-to-end (ChaCha20-Poly1305).
-A relay, if you use one, only ever sees ciphertext.
+It does this by leaning on three tools that already do the hard part well,
+and doing only what they leave out:
+
+| Tool | Does | BroLink adds |
+|------|------|--------------|
+| [Sunshine](https://github.com/LizardByte/Sunshine) on the PC | GPU capture and encode (AMD, NVIDIA, Intel), input, audio, pairing | Installs and configures it, accepts the pairing PIN so you never touch the PC |
+| [Moonlight](https://moonlight-stream.org) on the Mac | VideoToolbox decode, 120 fps, HDR, gamepads, clipboard | Installs it, starts it with the right flags, one click |
+| [Tailscale](https://tailscale.com) on both | An encrypted private network between your own devices, through any NAT | Finds your PCs on it and uses it as the identity check |
+| BroLink itself | | **Wake the PC** (Tailscale cannot reach a sleeping machine), **sleep / restart / shut it down** from the Mac, and the setup |
 
 ```
-  MacBook (M-series)                         Windows PC
-  ┌──────────────────┐                       ┌──────────────────┐
-  │  BroLink         │   encrypted UDP       │  BroLink Host    │
-  │  Client          │◄──── H.264 + PCM ────►│  DXGI / FFmpeg   │
-  │  OpenH264 decode │      input + pad      │  AMF / NVENC     │
-  └──────────────────┘                       └──────────────────┘
-         ▲                                          ▲
-         └──── LAN / IPv6 / UPnP / Tailscale / relay ────┘
+  MacBook (M3+)                                          Windows PC
+  ┌─────────────────┐                                   ┌────────────────────┐
+  │ BroLink         │── wake packet ──► (LAN / subnet router) ──►│ network card       │
+  │   lists PCs,    │── /v1/pin, /v1/power ── Tailscale ────────►│ BroLink Host       │
+  │   launches      │                                   │   control service  │
+  │ Moonlight       │◄════ HEVC/AV1 + audio + input ═══ Tailscale ═══►│ Sunshine (GPU) │
+  └─────────────────┘                                   └────────────────────┘
 ```
+
+Nothing passes through a server of ours. There is no account, no relay, no
+custom protocol: the stream is Sunshine's, the transport is WireGuard, and
+the identity check is your Tailscale login.
 
 ## The everyday flow
 
-1. Open BroLink on the Mac and click your PC under **Your PCs**.
-2. If the PC is asleep, the Mac wakes it (Wake-on-LAN, also from another
-   network through the router mapping the host set up) and connects once it
-   answers, usually within 15 s.
-3. Play, work, whatever. Click the picture to capture the mouse; **F8**
-   (**fn+F8** on a Mac keyboard) frees it, and so does switching to another
-   app.
-4. Done? Free the mouse, open **PC ▾** in the overlay, and pick **Sleep** (or
-   restart / shut down). The session ends cleanly and the PC goes down.
+1. Open BroLink on the Mac. Your Windows PCs are listed, with whether each
+   is ready, asleep, or missing something.
+2. Click **Connect**. If the PC is asleep, BroLink wakes it and waits.
+   The first time, it pairs Moonlight with the PC by itself.
+3. Moonlight opens full screen. Use the PC. Ctrl+Alt+Shift+Q ends the
+   session, or switch back to BroLink and click **Disconnect**.
+4. BroLink asks whether to put the PC to sleep. Asleep is the state to
+   leave it in: it wakes in seconds and uses almost nothing.
 
-Sleep is the state to leave the PC in: it comes back in seconds with every
-window still open, and the network card keeps listening for the wake packet.
-
-## What you get
-
-- Wake the PC from the Mac, and put it to sleep, restart it, or shut it down when you are done
-- Hardware-accelerated capture and encode on the PC (AMD AMF, NVIDIA NVENC, Intel QSV, Media Foundation, libx264 fallback)
-- 720p–1440p, 30–120 fps, 5–60 Mbps, with adaptive bitrate when the path gets lossy
-- Keyboard, relative mouse (games), absolute mouse (desktop), Xbox-style gamepad via ViGEmBus
-- System audio and a shared clipboard
-- PIN pairing with persistent identities; the ticket pins the host key so a machine that stole the IP cannot impersonate it
-- LAN discovery, automatic UPnP/NAT-PMP port mapping, IPv6, Tailscale `100.x`, and an optional self-hosted relay
-- With a relay, a rendezvous service: the ticket keeps working after your home IP changes, and the host punches through port-restricted NATs
-- Native GUIs on both sides
-
-This is **not** a wrapper around Sunshine/Moonlight. Those projects are
-excellent and inspired the encoder flags. BroLink is its own protocol,
-apps, and pairing model.
-
-## Install (the real-user path)
+## Install
 
 ### Windows PC (host)
 
-1. Install [Rust](https://rustup.rs) only if you are building from source. A
-   release build of `brolink-host.exe` is enough to run.
-2. From this repo:
+1. Install [Tailscale](https://tailscale.com/download/windows) and sign
+   in with the same account you use on the Mac.
+2. Download `brolink-windows-x64.zip` from the
+   [latest release](https://github.com/MrBeldum/brolink/releases/latest),
+   unzip, and run **brolink-host.exe**. (Or `install-host.ps1` for
+   shortcuts and start-at-logon.)
+3. Click **Set up this PC**. One administrator prompt does everything:
+   installs Sunshine silently if it is missing, gives BroLink a login to
+   it, opens the control port to your tailnet only, and arms the network
+   card for Wake-on-LAN. Sunshine runs as a Windows service, so it is up
+   again after a restart without anyone logging in.
 
-   ```powershell
-   cargo build --release -p brolink-host
-   .\scripts\install-host.ps1
-   ```
+That is all. Sunshine's own settings (encoder, display, HDR, audio device)
+stay available at `https://localhost:47990`; the login is shown in the
+BroLink window.
 
-   The installer copies the host into `%LOCALAPPDATA%\BroLink`, downloads
-   FFmpeg if it is missing, adds a desktop shortcut, and tries to open the
-   firewall. Double-click **BroLink Host**.
+Wired Ethernet is strongly preferred: most Wi-Fi adapters cannot wake a PC.
 
-3. Optional but recommended for games: [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)
-   (virtual Xbox 360 controller). The host works without it; gamepads just
-   will not reach the PC.
+### Mac (client, Apple Silicon)
 
-Leave the host running (or tick **Start with Windows** in its settings).
-Copy the ticket.
-
-### Mac (client)
+Install [Tailscale](https://tailscale.com/download/mac) and sign in. Then
+either
 
 ```bash
-cargo build --release -p brolink-client --target aarch64-apple-darwin
-./scripts/bundle-macos.sh
-open dist/BroLink.app
+curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
 ```
 
-Paste the ticket, click **Connect**, enter the PIN once. Click the picture to
-capture the mouse. **fn+F8** releases it (so does switching to another app).
-**F11** fullscreen. **F7** hides the overlay. **Ctrl+Shift+Q** disconnects.
-
-Use **borderless windowed** in games. Exclusive fullscreen can bypass Desktop
-Duplication on some titles.
-
-From a browser download of the `.app`, also run:
+or download `brolink-macos-arm64.tar.gz` from the release and
 
 ```bash
+tar xzf brolink-macos-arm64.tar.gz
 xattr -dr com.apple.quarantine BroLink.app
+open BroLink.app
 ```
 
-The app is ad-hoc signed; Gatekeeper otherwise reports it as damaged.
+The `xattr` step is required for a browser download: the app is ad-hoc
+signed rather than Developer-ID signed, so Gatekeeper calls it damaged
+otherwise (the script avoids this because `curl` sets no quarantine flag).
+See [docs/MACOS.md](docs/MACOS.md) for signing it properly.
 
-## Quality presets
+BroLink offers to install Moonlight if it is not in `/Applications`.
 
-| Preset | Resolution | FPS | Bitrate | Use |
-|--------|------------|-----|---------|-----|
-| Competitive | 1080p | 60 | 15 Mbps | Fast-twitch, long-haul |
-| Balanced | 1080p | 60 | 25 Mbps | Default |
-| Quality | 1440p | 60 | 40 Mbps | LAN / fat pipe |
+## Waking the PC, honestly
 
-The client can ask the host to step the bitrate down when it sees loss, then
-back up when the path is clean.
+A magic packet has to reach the PC's network card on its own network.
+Tailscale cannot deliver it, because the sleeping PC's Tailscale is asleep
+too. BroLink sends the packet:
 
-## How worldwide access works
+- to the LAN broadcast, which works whenever the Mac is on the same network;
+- to the PC's LAN address, which works from anywhere **if** something on
+  that network routes into it, such as a [Tailscale subnet
+  router](https://tailscale.com/kb/1019/subnets) on a NAS, a Raspberry
+  Pi, or a router that runs Tailscale. The card keeps answering ARP while
+  asleep (BroLink turns ARP offload on), so a unicast reaches it.
 
-The host binds **one UDP socket** (default `47850`) and publishes every
-address it can be reached on inside a pasteable `blk1_…` ticket:
+| PC state | From the same network | From elsewhere |
+|----------|----------------------|----------------|
+| Asleep | yes | with a subnet router on the PC's network |
+| Shut down | usually, if the BIOS allows wake from S5 | rarely |
 
-1. LAN IPv4, plus any globally-routable IPv6
-2. A UPnP / NAT-PMP mapping, if the router will create one (this is what
-   makes most home connections work from another country with no extra software)
-3. A STUN reflexive address (Google, then Cloudflare)
-4. A Tailscale `100.64/10` address, if Tailscale is up
-5. An optional `brolink-relay`, if you configured one
+So: sleep, do not shut down, when you leave. BroLink learns the MAC and LAN
+address the first time it sees the PC awake with BroLink Host running.
 
-The client sends `Hello` to every candidate. The first `HelloAck` wins. It
-also includes *its* STUN address so the host can send a packet back and
-finish a hole punch. When the ticket names a relay, the client also asks the
-relay's rendezvous service where the host is *now* and the relay tells the
-host to punch towards the client, so a months-old ticket still connects.
+## Settings that matter
 
-**UPnP is the default internet path.** Enable it in the host (on by default)
-and, if your router allows local applications to map a port, the WAN
-candidate in the ticket is a real forward, not a hope. The mapping is
-requested as permanent, so it survives the PC sleeping for days and a wake
-packet from outside still reaches it.
+| Setting | Default | Notes |
+|---------|---------|-------|
+| Mouse | Desktop | 1:1 cursor for desktop use; **Game** sends raw movement for first-person games |
+| Resolution | 1440p | **This Mac** streams the Mac's exact pixel size. Pixel-for-pixel only with a virtual display on the PC ([Apollo](https://github.com/ClassicOldSong/Apollo) creates one automatically; BroLink works with Apollo as a drop-in for Sunshine). With a physical monitor, Sunshine scales it. |
+| Frame rate | 60 | 120 on a ProMotion Mac with a fast link |
+| Bitrate | 30 Mbps | Raise on a LAN or a direct Tailscale path; lower on a thin uplink |
+| Codec | Auto | Moonlight negotiates AV1 if the M3 and the GPU both do it (RX 7000 / RTX 40 and up), else HEVC |
 
-If UPnP is blocked (CGNAT, locked-down ISP router, campus NAT), pick one of
-these — they all work, none require changing the protocol:
+## Security model
 
-| Path | Router changes | Notes |
-|------|----------------|-------|
-| **UPnP / NAT-PMP** | none (router cooperates) | Default. Host does it for you. |
-| **Public IPv6** | none | Advertised automatically when the PC has a global address. |
-| **Tailscale** | none | Install on both machines; connect to the `100.x` address. |
-| **Self-hosted relay** | none | Both sides send *outbound* to the relay. Any NAT works. |
-| **Port-forward** | UDP 47850 | Direct and lowest latency; needs router access. |
+- The host's control service listens on TCP 47850 but answers only
+  loopback and Tailscale addresses that `tailscale whois` attributes to
+  **the same account the PC is signed in as**. Everyone else gets a 403.
+  The firewall rule setup adds is scoped to `100.64.0.0/10`.
+- The stream itself is Moonlight to Sunshine over Tailscale (WireGuard),
+  with Sunshine's own certificate pairing on top.
+- No BroLink credentials exist. The Sunshine web login BroLink generates
+  stays on the PC.
+- Remote power actions can be turned off in the host window.
 
-To run the relay yourself:
-
-```bash
-cargo run --release -p brolink-relay -- --bind 0.0.0.0:47851
-```
-
-then in the host UI set **Relay** to `your.vps.example:47851` (or start with
-`--relay your.vps.example:47851`). The address and a random per-host token
-ride inside the ticket, so the Mac picks the fallback up automatically. The
-relay only ever sees already-encrypted bytes. See [docs/RELAY.md](docs/RELAY.md)
-for a systemd unit and a Dockerfile.
-
-The raw STUN candidate without UPnP is a bonus, not the internet path. The
-host is reactive — it replies to the address a packet arrived from. On a
-restricted-cone or symmetric NAT the first client packet is dropped unless
-UPnP, IPv6, Tailscale, a relay, or a manual forward is in play.
-
-## Testing
-
-Unit tests cover the protocol, crypto, ticket parsing (including IPv6),
-UPnP/NAT-PMP message codecs, adaptive bitrate, frame assembly, colour
-conversion, input mapping, audio resampling, and relay routing:
+## Building from source
 
 ```powershell
+cargo build --release -p brolink-host        # Windows
+```
+
+```bash
+./scripts/install-macos.sh                    # macOS: builds, bundles, installs
+```
+
+Tests, lint and the UI snapshots (PNGs of every screen, no display needed):
+
+```bash
 cargo test --workspace
-```
-
-The check that actually matters is the end-to-end loopback, which runs a real
-host and a real client against the real GPU encoder on one machine:
-
-```powershell
-.\scripts\test-loopback.ps1
-```
-
-It builds first, waits for the host to publish a ticket, then connects twice —
-once by bare address and once by ticket — and requires 30 decoded frames each
-time. It also plays a 440 Hz tone for the host to capture and requires 100 ms
-of it to reach the client's output device, with a non-zero peak. Pass
-`-NoAudio` on a machine with no output device.
-
-### Looking at the UI without a PC
-
-Both windows can be rendered to PNGs on any machine with a GPU, no host, no
-display and no Windows PC required:
-
-```bash
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p brolink-client -p brolink-host snapshots -- --ignored
 ```
-
-The images land in `target/ui-snapshots/`. Use them to review a visual change
-before shipping it; they are not compared against anything.
-
-### What this does not cover
-
-The loopback runs a Windows client against a Windows host over `127.0.0.1`.
-It says nothing about the Mac client, the relay, or NAT traversal, all of
-which are unit-tested. Treat a green loopback as "the pipeline works", not
-"the product works".
 
 ## Repository layout
 
 ```
-crates/core     protocol, crypto, tickets, STUN, UPnP, discovery, wake, rendezvous
-crates/host     Windows host (capture / encode / input / power / GUI)
-crates/client   Mac + Windows client (decode / display / input / GUI)
-crates/ui       the theme and widgets both GUIs are built from
-crates/relay    optional UDP relay + rendezvous
-deploy/         systemd unit and Dockerfile for the relay
-docs/           protocol and platform notes
-scripts/        macOS .app bundle, Windows installer, loopback test
+crates/core     control API types, tiny HTTP, Tailscale CLI, wake packets, downloads
+crates/host     Windows: background control service + control panel + setup
+crates/client   macOS: PC list, wake → pair → Moonlight, power menu
+crates/ui       the theme and widgets both windows are built from
+docs/           platform notes
+scripts/        installers and the macOS bundle
 ```
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE) (FFmpeg and OpenH264 are
-separate programs/libraries with their own terms).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Sunshine, Moonlight and
+Tailscale are separate programs with their own licenses; BroLink downloads
+them from their own release pages and never redistributes them.

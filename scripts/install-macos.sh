@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build and install the BroLink Mac client into /Applications.
+# Build and install the BroLink Mac app into /Applications. A locally built
+# app never carries the quarantine flag, so Gatekeeper leaves it alone.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,4 +16,4 @@ xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 rm -rf /Applications/BroLink.app
 cp -R "$APP" /Applications/BroLink.app
 echo "installed /Applications/BroLink.app"
-echo "open it, paste the ticket from your PC, click Connect."
+echo "open it; it will offer to install Moonlight and list the PCs on your Tailscale account."

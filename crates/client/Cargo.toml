@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "BroLink client — play your Windows PC from a Mac (or another Windows box)"
+description = "BroLink for Mac: wake your Windows PC over Tailscale and stream it with Moonlight in one click"
 
 [[bin]]
 name = "brolink-client"
@@ -14,21 +14,19 @@ path = "src/main.rs"
 brolink-core.workspace = true
 brolink-ui.workspace = true
 anyhow.workspace = true
-bytes.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio.workspace = true
+rand.workspace = true
+clap.workspace = true
 eframe.workspace = true
 egui.workspace = true
-clap.workspace = true
-openh264.workspace = true
-cpal.workspace = true
-gilrs.workspace = true
-arboard = "3"
 
 [dev-dependencies]
-# Renders the screens to PNGs without a display or a host, so the UI can be
-# reviewed from any machine. See the `snapshots` test module in app.rs.
+toml.workspace = true
+# Renders the screens to PNGs without a display, so the UI can be reviewed
+# from any machine. See the `snapshots` test module in app.rs.
 egui_kittest = { version = "0.31", features = ["wgpu", "eframe"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

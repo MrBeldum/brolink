@@ -1,1004 +1,570 @@
-//! Client connection: handshake, video/audio receive, input send.
+//! Finding PCs, and the one-click path from "asleep in another room" to a
+//! Moonlight window: wake, wait, pair if needed, stream.
 
-use crate::audio::{AudioPlayer, AudioStats};
-use crate::decode::{H264Decoder, VideoSink};
-use anyhow::{Context, Result};
-use brolink_core::codec::FrameAssembler;
-use brolink_core::config::ClientConfig;
-use brolink_core::crypto::{random_bytes, verify_handshake, EphKey, ReplayWindow, SessionKeys};
-use brolink_core::identity::Identity;
-use brolink_core::net::{RelayLink, Transport, RECV_BUF};
-use brolink_core::proto::*;
-use brolink_core::rendezvous::{Lookup, LookupAck, PunchProbe, Retry, COOKIE_LEN, NONCE_LEN};
-use brolink_core::stun::discover_wan;
-use brolink_core::ticket::{parse_endpoint, Ticket};
-use brolink_core::wake::{send_wake, wake_targets, MacAddr};
-use bytes::BytesMut;
-use std::net::SocketAddr;
+use crate::config::{ClientConfig, KnownPc, StreamSettings};
+use crate::moonlight;
+use anyhow::{anyhow, bail, Result};
+use brolink_core::api::{Ack, PinRequest, PowerAction, PowerRequest, Status};
+use brolink_core::{http, tailscale, wake, CONTROL_PORT, SUNSHINE_PORT};
+use parking_lot::Mutex;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 
-/// How long to wait for a host to answer `Hello` on any candidate address.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(8);
-/// With a MAC on file, send a wake-up once the PC has been silent this long.
-const WAKE_AFTER: Duration = Duration::from_millis(2500);
-/// Then keep knocking: a PC resuming from sleep answers in 10-20 s, one
-/// booting from cold can take most of a minute.
-const WAKE_TIMEOUT: Duration = Duration::from_secs(90);
-const WAKE_REPEAT: Duration = Duration::from_secs(8);
-/// Retransmit `Hello` this often while waiting — the first datagram is also the
-/// one punching the NAT hole, and it is the most likely to be dropped.
-const HELLO_RETRY: Duration = Duration::from_millis(400);
-/// The host probes encoders before it can answer, which takes a few seconds.
-const READY_TIMEOUT: Duration = Duration::from_secs(90);
-const PING_INTERVAL: Duration = Duration::from_millis(250);
-/// Give up if the host goes completely quiet.
-const HOST_TIMEOUT: Duration = Duration::from_secs(8);
-const RELAY_KEEPALIVE: Duration = Duration::from_secs(10);
-/// How often the network loop services the socket when it is otherwise idle.
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
 
-pub enum ClientCmd {
-    Connect(Box<ConnectRequest>),
-    Pin(String),
-    Input(Vec<InputEvent>),
-    Control(ControlMsg),
-    /// Send a wake-up to a saved PC without connecting.
-    Wake {
-        ticket: String,
-        mac: String,
-    },
-    Disconnect,
+/// A Windows machine on the tailnet, as far as the client can tell.
+#[derive(Debug, Clone, Default)]
+pub struct Pc {
+    pub node_id: String,
+    pub name: String,
+    pub ip: Option<Ipv4Addr>,
+    /// Tailscale's view; lags a wake-up by up to half a minute.
+    pub online: bool,
+    /// The BroLink control service answered.
+    pub host: Option<Status>,
+    /// Sunshine's port answered.
+    pub sunshine: bool,
+    /// What we remembered from an earlier visit: enough to wake it.
+    pub known: Option<KnownPc>,
 }
 
-pub struct ConnectRequest {
-    pub target: String,
-    pub cfg: ClientConfig,
-    pub identity: Identity,
-    /// The PC's MAC, if a previous session reported one.
-    pub wake_mac: Option<String>,
-    /// Send a wake-up if the PC does not answer. Only for a connection the
-    /// user asked for: an automatic reconnect must not wake a PC the user
-    /// just put to sleep.
-    pub wake: bool,
-}
-
-#[derive(Clone)]
-pub enum ClientEvent {
-    Log(String),
-    NeedPin {
-        host: String,
-    },
-    Ready {
-        ready: SessionReady,
-        host_name: String,
-    },
-    Stats {
-        rtt_ms: f32,
-        fps: f32,
-        bitrate_kbps: f32,
-        loss: f32,
-        decoder_ms: f32,
-    },
-    Error(String),
-    Disconnected,
-    Clipboard {
-        text: String,
-    },
-}
-
-pub fn spawn(
-    cmd_rx: mpsc::UnboundedReceiver<ClientCmd>,
-    ev_tx: mpsc::UnboundedSender<ClientEvent>,
-    video: Arc<VideoSink>,
-    audio_stats: Arc<AudioStats>,
-) {
-    std::thread::Builder::new()
-        .name("brolink-client-net".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("client tokio runtime");
-            rt.block_on(run(cmd_rx, ev_tx, video, audio_stats));
-        })
-        .expect("spawn client net thread");
-}
-
-async fn run(
-    mut cmd_rx: mpsc::UnboundedReceiver<ClientCmd>,
-    ev_tx: mpsc::UnboundedSender<ClientEvent>,
-    video: Arc<VideoSink>,
-    audio_stats: Arc<AudioStats>,
-) {
-    let mut live: Option<Live> = None;
-    // A fixed cadence rather than a fresh sleep each iteration: recreating the
-    // timer inside `select!` lets a steady stream of input commands starve the
-    // poll branch, which shows up as video freezing while the mouse moves.
-    let mut ticker = tokio::time::interval(POLL_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break };
-                match cmd {
-                    ClientCmd::Connect(req) => {
-                        if let Some(mut old) = live.take() {
-                            let _ = old.goodbye().await;
-                        }
-                        match connect(&req, &ev_tx, video.clone(), audio_stats.clone()).await {
-                            Ok(l) => {
-                                if !l.awaiting_pin {
-                                    let _ = ev_tx.send(l.ready_event());
-                                }
-                                live = Some(l);
-                            }
-                            Err(e) => {
-                                let _ = ev_tx.send(ClientEvent::Error(format!("{e:#}")));
-                                let _ = ev_tx.send(ClientEvent::Disconnected);
-                            }
-                        }
-                    }
-                    ClientCmd::Pin(pin) => {
-                        if let Some(l) = live.as_mut() {
-                            if let Err(e) = l.send_pin(&pin).await {
-                                let _ = ev_tx.send(ClientEvent::Error(format!("{e:#}")));
-                            }
-                        }
-                    }
-                    ClientCmd::Input(events) => {
-                        if let Some(l) = live.as_mut() {
-                            if let Err(e) = l.send_input(events).await {
-                                tracing::debug!("input send failed: {e:#}");
-                            }
-                        }
-                    }
-                    ClientCmd::Control(msg) => {
-                        if let Some(l) = live.as_mut() {
-                            if let Err(e) = l.send_control(msg).await {
-                                tracing::debug!("control send failed: {e:#}");
-                            }
-                        }
-                    }
-                    ClientCmd::Wake { ticket, mac } => {
-                        let _ = ev_tx.send(ClientEvent::Log(match wake_only(&ticket, &mac).await {
-                            Ok(n) => format!("Wake-up sent to {mac} ({n} packets)"),
-                            Err(e) => format!("Could not send a wake-up: {e:#}"),
-                        }));
-                    }
-                    ClientCmd::Disconnect => {
-                        if let Some(mut l) = live.take() {
-                            let _ = l.goodbye().await;
-                        }
-                        let _ = ev_tx.send(ClientEvent::Disconnected);
-                    }
-                }
-            }
-            _ = ticker.tick(), if live.is_some() => {
-                let Some(l) = live.as_mut() else { continue };
-                match l.poll(&ev_tx).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        live = None;
-                        let _ = ev_tx.send(ClientEvent::Disconnected);
-                    }
-                    Err(e) => {
-                        let _ = ev_tx.send(ClientEvent::Error(format!("{e:#}")));
-                        live = None;
-                        let _ = ev_tx.send(ClientEvent::Disconnected);
-                    }
-                }
-            }
-        }
+impl Pc {
+    pub fn can_wake(&self) -> bool {
+        self.known.as_ref().and_then(|k| k.mac.as_ref()).is_some()
+    }
+    pub fn can_stream(&self) -> bool {
+        self.ip.is_some() && (self.sunshine || self.host.is_some() || self.can_wake())
+    }
+    pub fn power_allowed(&self) -> bool {
+        self.host.as_ref().is_some_and(|h| h.power_allowed)
     }
 }
 
-struct Live {
-    transport: Transport,
-    peer: SocketAddr,
-    keys: SessionKeys,
-    seq: SeqCounter,
-    session_id: [u8; 16],
-    host_name: String,
-    ready: SessionReady,
-    assembler: FrameAssembler,
-    decoder: H264Decoder,
-    video: Arc<VideoSink>,
-    audio: Option<AudioPlayer>,
-    audio_stats: Arc<AudioStats>,
-    replay: ReplayWindow,
-    scratch: Vec<u8>,
-    buf: Vec<u8>,
-    last_ping: Instant,
-    ping_sent: Option<Instant>,
-    last_host_packet: Instant,
-    last_relay_ka: Instant,
-    rtt_ms: f32,
-    frames: u32,
-    bytes: u64,
-    window: Instant,
-    last_decode_ms: f32,
-    awaiting_pin: bool,
-    last_stats_sent: Instant,
+#[derive(Debug, Clone, Default)]
+pub struct Discovery {
+    /// Why nothing can be listed, when Tailscale is down.
+    pub error: Option<String>,
+    pub login: String,
+    pub pcs: Vec<Pc>,
+    pub refreshed: Option<Instant>,
 }
 
-/// Work out where to send `Hello`, and which host identity to insist on.
-#[derive(Debug)]
-struct Destination {
-    candidates: Vec<SocketAddr>,
-    relay: Option<RelayLink>,
-    expected_host: Option<[u8; 32]>,
-    host_label: String,
-    /// The decoded ticket, when there was one: wake targets come from it.
-    ticket: Option<Ticket>,
-}
-
-fn resolve_target(target: &str) -> Result<Destination> {
-    if let Ok(t) = Ticket::decode(target) {
-        let relay = t.relay.map(|r| RelayLink {
-            addr: r.addr,
-            token: r.token,
-        });
-        let mut candidates = t.candidate_addrs();
-        if let Some(r) = relay {
-            // Last resort: direct paths are always faster when they work.
-            candidates.push(r.addr);
-        }
-        if candidates.is_empty() {
-            anyhow::bail!("this ticket contains no addresses to connect to");
-        }
-        return Ok(Destination {
-            candidates,
-            relay,
-            expected_host: Some(t.host_id),
-            host_label: t.name.clone(),
-            ticket: Some(t),
-        });
-    }
-    let addr = parse_endpoint(target, DEFAULT_PORT)?;
-    Ok(Destination {
-        candidates: vec![addr],
-        relay: None,
-        // Connecting to a bare address means there is no identity to check
-        // against; the PIN is what protects this path.
-        expected_host: None,
-        host_label: addr.to_string(),
-        ticket: None,
-    })
-}
-
-/// Wake a saved PC without connecting. Returns how many packets went out.
-async fn wake_only(ticket: &str, mac: &str) -> Result<usize> {
-    let mac = MacAddr::parse(mac).ok_or_else(|| anyhow::anyhow!("'{mac}' is not a MAC address"))?;
-    let t = Ticket::decode(ticket).context("the saved entry is not a ticket")?;
-    let transport = Transport::bind("0.0.0.0:0".parse().expect("literal addr"), None)?;
-    Ok(send_wake(&transport, mac, &wake_targets(&t)).await)
-}
-
-async fn send_lookup(
-    t: &Transport,
-    to: SocketAddr,
-    identity: &Identity,
-    host: &[u8; 32],
-    cookie: Option<[u8; COOKIE_LEN]>,
-    nonce: &[u8; NONCE_LEN],
-) {
-    let body = Lookup::signed(&identity.signing, host, cookie, nonce, now_us());
-    let pkt = encode_plain(PacketType::Lookup, 0, &body);
-    if let Err(e) = t.send_raw(&pkt, to).await {
-        tracing::debug!("lookup to {to}: {e}");
-    }
-}
-
-/// Add an address the coordinator or a punch just told us about, and knock on
-/// it straight away rather than waiting for the retry timer.
-async fn adopt_candidate(
-    t: &Transport,
-    candidates: &mut Vec<SocketAddr>,
-    addr: SocketAddr,
-    hello: &[u8],
-) {
-    if addr.ip().is_unspecified() || addr.port() == 0 || candidates.contains(&addr) {
-        return;
-    }
-    candidates.push(addr);
-    let _ = t.send_to(hello, addr).await;
-}
-
-async fn connect(
-    req: &ConnectRequest,
-    ev: &mpsc::UnboundedSender<ClientEvent>,
-    video: Arc<VideoSink>,
-    audio_stats: Arc<AudioStats>,
-) -> Result<Live> {
-    let ConnectRequest {
-        target,
-        cfg,
-        identity,
-        wake_mac,
-        wake,
-    } = req;
-    let dest = resolve_target(target)?;
-    let _ = ev.send(ClientEvent::Log(format!(
-        "Connecting to {}…",
-        dest.host_label
-    )));
-    if dest.expected_host.is_none() {
-        let _ = ev.send(ClientEvent::Log(
-            "No ticket — the host's identity cannot be verified on this connection.".into(),
-        ));
-    }
-
-    let transport = Transport::bind("0.0.0.0:0".parse().expect("literal addr"), dest.relay)?;
-    let client_wan = discover_wan(transport.socket())
-        .await
-        .map(|a| a.to_string());
-    if let Some(ref wan) = client_wan {
-        let _ = ev.send(ClientEvent::Log(format!("Our public address: {wan}")));
-    }
-    let eph = EphKey::generate();
-    let nonce = random_bytes::<16>();
-    let quality = cfg.quality.sanitized();
-    let hello = HelloMsg {
-        client_id: identity.public,
-        client_eph: eph.public,
-        nonce,
-        name: cfg.name.clone(),
-        app_version: env!("CARGO_PKG_VERSION").into(),
-        width: Some(quality.width),
-        height: Some(quality.height),
-        fps: Some(quality.fps),
-        bitrate_kbps: Some(quality.bitrate_kbps),
-        client_wan,
-    };
-    let pkt = encode_plain(PacketType::Hello, 1, &json_payload(&hello)?);
-
-    let mut candidates = dest.candidates.clone();
-    // With a ticket and a relay, the coordinator at the relay's address knows
-    // where the PC is *now*, which matters once the ticket's addresses are
-    // stale, and it tells the PC to punch a hole towards us.
-    let coordinator = dest
-        .relay
-        .map(|r| r.addr)
-        .filter(|_| dest.expected_host.is_some());
-    let lookup_nonce = random_bytes::<NONCE_LEN>();
-    let mut cookie: Option<[u8; COOKIE_LEN]> = None;
-    let mut looked_up = false;
-    // Only a connection the user clicked may wake the PC, and only when a
-    // previous session told us its MAC.
-    let wake = wake
-        .then(|| wake_mac.as_deref().and_then(MacAddr::parse))
-        .flatten()
-        .zip(dest.ticket.as_ref().map(wake_targets));
-    let mut woke = false;
-    let mut last_wake: Option<Instant> = None;
-
-    let mut buf = vec![0u8; RECV_BUF];
-    let start = Instant::now();
-    let mut deadline = start + HELLO_TIMEOUT;
-    let mut last_send: Option<Instant> = None;
-    let (from, ack) = loop {
-        let now = Instant::now();
-        if now >= deadline {
-            if woke {
-                anyhow::bail!(
-                    "The PC did not wake up within {}s. From a full shut down it can only be \
-                     woken from its own network; put it to sleep instead of shutting it down, \
-                     and check Wake-on-LAN is enabled in BroLink Host.",
-                    WAKE_TIMEOUT.as_secs()
+/// Rescan the tailnet every few seconds and remember wake details.
+pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
+    std::thread::spawn(move || loop {
+        let cfg = ClientConfig::load();
+        let scan = scan(&cfg);
+        let mut learned = cfg.clone();
+        for pc in &scan.pcs {
+            if let Some(h) = &pc.host {
+                learned.pcs.insert(
+                    pc.node_id.clone(),
+                    KnownPc {
+                        name: pc.name.clone(),
+                        mac: h.mac.clone(),
+                        lan_ip: h.lan_ip.clone(),
+                    },
                 );
             }
-            anyhow::bail!(
-                "No reply from the PC ({}) — is BroLink Host running, is UDP 47850 allowed \
-                 through Windows Firewall, and if you are not on the same network, is UPnP, \
-                 Tailscale, or a relay enabled on the host?",
-                describe(&candidates)
-            );
         }
-        if last_send.is_none_or(|t| t.elapsed() >= HELLO_RETRY) {
-            last_send = Some(now);
-            for c in &candidates {
-                if transport.send_to(&pkt, *c).await.is_ok() {
-                    tracing::debug!("Hello -> {c}");
-                }
-            }
-            if let (Some(coord), Some(host), false) = (coordinator, dest.expected_host, looked_up) {
-                send_lookup(&transport, coord, identity, &host, cookie, &lookup_nonce).await;
+        if learned.pcs != cfg.pcs {
+            if let Err(e) = learned.save() {
+                tracing::warn!("could not save what was learned: {e:#}");
             }
         }
-        if let Some((mac, targets)) = &wake {
-            if start.elapsed() >= WAKE_AFTER && last_wake.is_none_or(|t| t.elapsed() >= WAKE_REPEAT)
-            {
-                last_wake = Some(now);
-                if !woke {
-                    woke = true;
-                    deadline = start + WAKE_TIMEOUT;
-                    let _ = ev.send(ClientEvent::Log(format!(
-                        "No answer — waking {} ({mac}). A sleeping PC takes about 15 s.",
-                        dest.host_label
-                    )));
-                }
-                let n = send_wake(&transport, *mac, targets).await;
-                tracing::debug!("sent {n} wake packets");
-            }
-        }
-        let wait = HELLO_RETRY.min(deadline.saturating_duration_since(now));
-        let Ok(Ok((n, from))) = tokio::time::timeout(wait, transport.recv_from(&mut buf)).await
-        else {
-            continue;
-        };
-        let Ok(h) = parse_header(&buf[..n]) else {
-            continue;
-        };
-        let payload = &buf[HEADER_LEN..n];
-        match h.typ {
-            PacketType::HelloAck => match json_from_slice::<HelloAck>(payload) {
-                Ok(ack) => break (from, ack),
-                Err(e) => tracing::debug!("malformed HelloAck from {from}: {e}"),
-            },
-            PacketType::Retry if Some(from) == coordinator => {
-                if let (Ok(r), Some(host)) = (Retry::decode(payload), dest.expected_host) {
-                    cookie = Some(r.cookie);
-                    send_lookup(&transport, from, identity, &host, cookie, &lookup_nonce).await;
-                }
-            }
-            PacketType::LookupAck if Some(from) == coordinator && !looked_up => {
-                looked_up = true;
-                match LookupAck::decode(payload).map(|a| a.host) {
-                    Ok(Some(rec)) if Some(rec.host_id) == dest.expected_host => {
-                        let _ = ev.send(ClientEvent::Log(format!(
-                            "The relay last heard from {} at {}",
-                            dest.host_label, rec.observed
-                        )));
-                        adopt_candidate(&transport, &mut candidates, rec.observed, &pkt).await;
-                        for c in rec.candidates {
-                            adopt_candidate(&transport, &mut candidates, c.addr, &pkt).await;
-                        }
-                    }
-                    Ok(None) => {
-                        let _ = ev.send(ClientEvent::Log(
-                            "The relay has not heard from the PC lately (off, asleep, or offline)."
-                                .into(),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            PacketType::PunchProbe => {
-                if let Ok(probe) = PunchProbe::decode(payload) {
-                    if probe.nonce == lookup_nonce
-                        && dest.expected_host.is_none_or(|h| h == probe.host_id)
-                    {
-                        tracing::info!("punch probe from {from}: direct path is open");
-                        adopt_candidate(&transport, &mut candidates, from, &pkt).await;
-                    }
-                }
-            }
-            _ => {}
-        }
-    };
+        *shared.lock() = scan;
+        ctx.request_repaint();
+        std::thread::sleep(Duration::from_secs(3));
+    });
+}
 
-    // Confirm we are talking to the machine the ticket names, *before* trusting
-    // its signature. Verifying the signature against the identity the responder
-    // supplied only proves it holds some key, so without this check any machine
-    // that can reach us could answer in the host's place.
-    if let Some(expected) = dest.expected_host {
-        if ack.server_id != expected {
-            anyhow::bail!(
-                "the machine at {from} is not the host this ticket is for \
-                 (expected {}…, got {}…) — refusing to connect",
-                short_id(&expected),
-                short_id(&ack.server_id)
-            );
-        }
-    }
-    verify_handshake(
-        &ack.server_id,
-        &ack.signature,
-        &eph.public,
-        &ack.server_eph,
-        &nonce,
-        &ack.nonce,
-    )
-    .context("the host's handshake signature did not verify")?;
-
-    let keys = SessionKeys::derive(&eph.shared(&ack.server_eph), &nonce, &ack.nonce, false)?;
-    let via = path_name(from, dest.relay.map(|r| r.addr));
-    let _ = ev.send(ClientEvent::Log(format!(
-        "Connected to {} via {via}",
-        ack.host_name
-    )));
-
-    let audio = match AudioPlayer::start(cfg.volume, audio_stats.clone()) {
-        Ok(a) => Some(a),
+pub fn scan(cfg: &ClientConfig) -> Discovery {
+    let st = match tailscale::status() {
+        Ok(s) => s,
         Err(e) => {
-            let _ = ev.send(ClientEvent::Log(format!("Audio output unavailable: {e:#}")));
-            None
+            return Discovery {
+                error: Some(e.to_string()),
+                refreshed: Some(Instant::now()),
+                ..Default::default()
+            }
         }
     };
-
-    let mut live = Live {
-        transport,
-        peer: from,
-        keys,
-        seq: SeqCounter::new(),
-        session_id: ack.session_id,
-        host_name: ack.host_name.clone(),
-        ready: SessionReady {
-            width: quality.width,
-            height: quality.height,
-            fps: quality.fps,
-            bitrate_kbps: 0,
-            codec: "h264".into(),
-            encoder: String::new(),
-            audio: AudioFormat::PcmS16Le48kStereo,
-            monitor_name: String::new(),
-            host_name: ack.host_name.clone(),
-            wake_mac: None,
-            power_control: false,
-        },
-        assembler: FrameAssembler::default(),
-        decoder: H264Decoder::new()?,
-        video,
-        audio,
-        audio_stats,
-        replay: ReplayWindow::default(),
-        scratch: Vec::new(),
-        buf: vec![0u8; RECV_BUF],
-        last_ping: Instant::now(),
-        ping_sent: None,
-        last_host_packet: Instant::now(),
-        last_relay_ka: Instant::now(),
-        rtt_ms: 0.0,
-        frames: 0,
-        bytes: 0,
-        window: Instant::now(),
-        last_decode_ms: 0.0,
-        awaiting_pin: ack.needs_pin,
-        last_stats_sent: Instant::now(),
-    };
-
-    if ack.needs_pin {
-        let _ = ev.send(ClientEvent::NeedPin {
-            host: ack.host_name.clone(),
-        });
-        return Ok(live);
-    }
-    live.wait_ready().await?;
-    Ok(live)
-}
-
-pub fn path_name(peer: SocketAddr, relay: Option<SocketAddr>) -> String {
-    if relay.is_some_and(|r| r == peer) {
-        return format!("{peer} (relay)");
-    }
-    match peer.ip() {
-        std::net::IpAddr::V4(v4) if v4.is_loopback() || v4.is_private() => {
-            format!("{peer} (LAN)")
-        }
-        std::net::IpAddr::V4(v4) if brolink_core::config::is_cgnat_v4(v4) => {
-            format!("{peer} (Tailscale)")
-        }
-        _ => format!("{peer} (internet)"),
+    let pcs = st
+        .windows_peers()
+        .into_iter()
+        .map(|n| {
+            let ip = n.ipv4();
+            let (host, sunshine) = match (n.online, ip) {
+                (true, Some(ip)) => (
+                    host_status(ip, Duration::from_millis(900)),
+                    port_open(ip, SUNSHINE_PORT, Duration::from_millis(500)),
+                ),
+                _ => (None, false),
+            };
+            Pc {
+                node_id: n.id.clone(),
+                name: n.host_name.clone(),
+                ip,
+                online: n.online,
+                host,
+                sunshine,
+                known: cfg.pcs.get(&n.id).cloned(),
+            }
+        })
+        .collect();
+    Discovery {
+        error: None,
+        login: st.self_login().unwrap_or("").to_string(),
+        pcs,
+        refreshed: Some(Instant::now()),
     }
 }
 
-fn describe(addrs: &[SocketAddr]) -> String {
-    addrs
-        .iter()
-        .map(|a| a.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+fn host_status(ip: Ipv4Addr, timeout: Duration) -> Option<Status> {
+    http::get_json::<Status>((ip, CONTROL_PORT), "/v1/status", timeout)
+        .ok()
+        .filter(|s| s.app == "brolink")
 }
 
-fn short_id(id: &[u8; 32]) -> String {
-    data_encoding_hex(&id[..4])
+fn port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> bool {
+    TcpStream::connect_timeout(&SocketAddr::from((ip, port)), timeout).is_ok()
 }
 
-fn data_encoding_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+// ---------------------------------------------------------------------------
+// Connecting
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    Idle,
+    Waking,
+    Waiting,
+    Pairing {
+        pin: String,
+    },
+    Launching,
+    Streaming,
+    /// The session is over; `error` says why if it was not the user.
+    Ended {
+        error: Option<String>,
+    },
 }
 
-impl Live {
-    fn ready_event(&self) -> ClientEvent {
-        ClientEvent::Ready {
-            ready: self.ready.clone(),
-            host_name: if self.ready.host_name.is_empty() {
-                self.host_name.clone()
-            } else {
-                self.ready.host_name.clone()
-            },
+#[derive(Debug, Clone)]
+pub struct Progress {
+    pub pc: String,
+    pub step: Step,
+    pub detail: String,
+    pub since: Instant,
+    pub cancel: bool,
+    /// Sunshine's app list, once Moonlight has fetched it.
+    pub apps: Vec<String>,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            pc: String::new(),
+            step: Step::Idle,
+            detail: String::new(),
+            since: Instant::now(),
+            cancel: false,
+            apps: Vec::new(),
         }
     }
+}
 
-    async fn send(&mut self, typ: PacketType, payload: &[u8]) -> Result<()> {
-        let mut out = BytesMut::with_capacity(MAX_DATAGRAM);
-        seal(&self.keys, typ, self.seq.next_seq()?, 0, payload, &mut out)?;
-        self.transport.send_to(&out, self.peer).await?;
-        Ok(())
+impl Progress {
+    pub fn active(&self) -> bool {
+        !matches!(self.step, Step::Idle | Step::Ended { .. })
     }
+    fn set(&mut self, step: Step, detail: impl Into<String>) {
+        if self.step != step {
+            self.since = Instant::now();
+        }
+        self.step = step;
+        self.detail = detail.into();
+    }
+}
 
-    async fn send_pin(&mut self, pin: &str) -> Result<()> {
-        let msg = PairPin {
-            session_id: self.session_id,
-            pin: pin.trim().to_string(),
+/// Everything the worker needs about the PC, copied so the UI can move on.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub name: String,
+    pub ip: Ipv4Addr,
+    pub online: bool,
+    pub mac: Option<wake::MacAddr>,
+    pub lan_ip: Option<Ipv4Addr>,
+}
+
+impl Target {
+    pub fn from_pc(pc: &Pc) -> Option<Self> {
+        Some(Self {
+            name: pc.name.clone(),
+            ip: pc.ip?,
+            online: pc.online && (pc.sunshine || pc.host.is_some()),
+            mac: pc
+                .known
+                .as_ref()
+                .and_then(|k| k.mac.as_deref())
+                .and_then(wake::MacAddr::parse),
+            lan_ip: pc
+                .known
+                .as_ref()
+                .and_then(|k| k.lan_ip.as_deref())
+                .and_then(|s| s.parse().ok()),
+        })
+    }
+}
+
+/// Wake, wait, pair, stream: on its own thread, reporting into `progress`.
+pub fn connect(
+    target: Target,
+    settings: StreamSettings,
+    native: (u32, u32),
+    progress: Arc<Mutex<Progress>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut p = progress.lock();
+        *p = Progress {
+            pc: target.name.clone(),
+            ..Default::default()
         };
-        self.send(PacketType::PairPin, &json_payload(&msg)?).await
+        p.set(Step::Launching, "Starting…");
     }
-
-    async fn send_input(&mut self, events: Vec<InputEvent>) -> Result<()> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        // A burst of events can exceed the MTU; split it rather than letting
-        // the whole batch fail to seal and vanish.
-        for batch in chunk_input_events(events) {
-            let msg = InputMsg { events: batch };
-            self.send(PacketType::Input, &json_payload(&msg)?).await?;
-        }
-        Ok(())
-    }
-
-    async fn send_control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.send(PacketType::Control, &json_payload(&msg)?).await
-    }
-
-    async fn goodbye(&mut self) -> Result<()> {
-        // Ask the host to let go of anything we were holding down before we go.
-        let _ = self.send_control(ControlMsg::ReleaseAllInput).await;
-        self.send(PacketType::Goodbye, b"{}").await
-    }
-
-    async fn wait_ready(&mut self) -> Result<()> {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let mut buf = vec![0u8; RECV_BUF];
-        while Instant::now() < deadline {
-            let Ok(Ok((n, from))) = tokio::time::timeout(
-                Duration::from_millis(500),
-                self.transport.recv_from(&mut buf),
-            )
-            .await
-            else {
-                continue;
-            };
-            if !self.transport.accepts_from(self.peer, from) {
-                continue;
-            }
-            let Ok((h, pt)) = open(&self.keys, &buf[..n], &mut self.scratch) else {
-                continue;
-            };
-            match h.typ {
-                PacketType::PairResult => {
-                    let r: PairResult = json_from_slice(pt)?;
-                    if !r.ok {
-                        anyhow::bail!("{}", r.message);
-                    }
-                    self.awaiting_pin = false;
+    std::thread::spawn(move || {
+        let result = run(&target, &settings, native, &progress, &ctx);
+        let mut p = progress.lock();
+        if !matches!(p.step, Step::Ended { .. }) {
+            let error = match result {
+                Ok(()) => None,
+                Err(e) if p.cancel => {
+                    tracing::info!("cancelled: {e:#}");
+                    None
                 }
-                PacketType::SessionReady => {
-                    self.ready = json_from_slice(pt)?;
-                    self.last_host_packet = Instant::now();
-                    return Ok(());
-                }
-                _ => {}
-            }
+                Err(e) => Some(format!("{e:#}")),
+            };
+            p.set(Step::Ended { error }, "");
         }
-        anyhow::bail!("timed out waiting for the host to start streaming (the encoder probe can take a few seconds)")
-    }
+        ctx.request_repaint();
+    });
+}
 
-    /// Returns `Ok(false)` when the session has ended.
-    async fn poll(&mut self, ev: &mpsc::UnboundedSender<ClientEvent>) -> Result<bool> {
-        if self.awaiting_pin {
-            return self.poll_pairing(ev).await;
-        }
+fn cancelled(progress: &Mutex<Progress>) -> bool {
+    progress.lock().cancel
+}
 
-        if self.last_host_packet.elapsed() > HOST_TIMEOUT {
-            anyhow::bail!("the host stopped responding");
-        }
-        if self.last_ping.elapsed() >= PING_INTERVAL {
-            self.last_ping = Instant::now();
-            self.ping_sent = Some(Instant::now());
-            let t = now_us();
-            let _ = self.send(PacketType::Ping, &t.to_le_bytes()).await;
-        }
-        if self.transport.relay().is_some() && self.last_relay_ka.elapsed() >= RELAY_KEEPALIVE {
-            self.last_relay_ka = Instant::now();
-            let _ = self.transport.relay_keepalive().await;
-        }
+fn run(
+    t: &Target,
+    settings: &StreamSettings,
+    native: (u32, u32),
+    progress: &Arc<Mutex<Progress>>,
+    ctx: &egui::Context,
+) -> Result<()> {
+    let report = |step: Step, detail: String| {
+        progress.lock().set(step, detail);
+        ctx.request_repaint();
+    };
 
-        // Drain everything the socket has for us this tick.
+    // 1. Wake it if nothing answers.
+    if !t.online && !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1200)) {
+        let mac = t.mac.ok_or_else(|| {
+            anyhow!("{} is not answering and this Mac does not know how to wake it yet. Turn the PC on once while BroLink Host is running so it can learn.", t.name)
+        })?;
+        let start = Instant::now();
+        let mut last_wake = Instant::now() - Duration::from_secs(60);
         loop {
-            let mut buf = std::mem::take(&mut self.buf);
-            let got =
-                tokio::time::timeout(Duration::ZERO, self.transport.recv_from(&mut buf)).await;
-            let result = match got {
-                Ok(Ok((n, from))) if self.transport.accepts_from(self.peer, from) => {
-                    self.handle_pkt(&buf[..n], ev)
-                }
-                Ok(Ok(_)) => Ok(true),
-                _ => {
-                    self.buf = buf;
-                    break;
-                }
-            };
-            self.buf = buf;
-            match result {
-                Ok(true) => {}
-                Ok(false) => return Ok(false),
-                // Stray, duplicated, and corrupt datagrams are ordinary on the
-                // open internet. Dropping a working session over one would be a
-                // far worse outcome than ignoring it.
-                Err(e) => tracing::debug!("ignored packet: {e:#}"),
+            if cancelled(progress) {
+                bail!("cancelled");
             }
-        }
-
-        if self.window.elapsed() >= Duration::from_secs(1) {
-            let dt = self.window.elapsed().as_secs_f32().max(0.001);
-            let fps = self.frames as f32 / dt;
-            let loss = self.assembler.loss_pct();
-            let _ = ev.send(ClientEvent::Stats {
-                rtt_ms: self.rtt_ms,
-                fps,
-                bitrate_kbps: (self.bytes as f32 * 8.0 / dt) / 1000.0,
-                loss,
-                decoder_ms: self.last_decode_ms,
-            });
-            if self.last_stats_sent.elapsed() >= Duration::from_secs(1) {
-                self.last_stats_sent = Instant::now();
-                let _ = self
-                    .send_control(ControlMsg::Stats {
-                        loss_pct: loss,
-                        rtt_ms: self.rtt_ms,
-                        fps,
-                    })
-                    .await;
+            if last_wake.elapsed() >= Duration::from_secs(6) {
+                let n = wake::send(mac, t.lan_ip);
+                tracing::info!("sent {n} wake packets for {mac}");
+                last_wake = Instant::now();
             }
-            self.frames = 0;
-            self.bytes = 0;
-            self.window = Instant::now();
+            report(
+                Step::Waking,
+                format!("Waking {}… {}s", t.name, start.elapsed().as_secs()),
+            );
+            if port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500))
+                || port_open(t.ip, CONTROL_PORT, Duration::from_millis(1500))
+            {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(120) {
+                bail!(
+                    "{} did not wake up. Wake-on-LAN only reaches it from its own network unless a Tailscale subnet router is on that network; if the PC was shut down rather than asleep, it may not wake at all.",
+                    t.name
+                );
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
-        Ok(true)
     }
 
-    async fn poll_pairing(&mut self, ev: &mpsc::UnboundedSender<ClientEvent>) -> Result<bool> {
-        let mut buf = std::mem::take(&mut self.buf);
-        let got =
-            tokio::time::timeout(Duration::from_millis(5), self.transport.recv_from(&mut buf))
-                .await;
-        let outcome = match got {
-            Ok(Ok((n, from))) if self.transport.accepts_from(self.peer, from) => {
-                match open(&self.keys, &buf[..n], &mut self.scratch) {
-                    Ok((h, pt)) if h.typ == PacketType::PairResult => {
-                        json_from_slice::<PairResult>(pt).ok()
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        self.buf = buf;
-        let Some(result) = outcome else {
-            return Ok(true);
-        };
-        if !result.ok {
-            anyhow::bail!("{}", result.message);
+    // 2. Sunshine's port.
+    let start = Instant::now();
+    while !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
+        if cancelled(progress) {
+            bail!("cancelled");
         }
-        self.awaiting_pin = false;
-        let _ = ev.send(ClientEvent::Log("Paired. Starting the stream…".into()));
-        self.wait_ready().await?;
-        let _ = ev.send(self.ready_event());
-        Ok(true)
+        report(
+            Step::Waiting,
+            format!(
+                "Waiting for Sunshine on {}… {}s",
+                t.name,
+                start.elapsed().as_secs()
+            ),
+        );
+        if start.elapsed() > Duration::from_secs(60) {
+            bail!("{} is up but Sunshine is not answering on port {SUNSHINE_PORT}. Open BroLink Host on the PC and run setup.", t.name);
+        }
+        std::thread::sleep(Duration::from_secs(1));
     }
 
-    /// Returns `Ok(false)` when the host said goodbye.
-    fn handle_pkt(&mut self, pkt: &[u8], ev: &mpsc::UnboundedSender<ClientEvent>) -> Result<bool> {
-        // The plaintext buffer lives outside `self` for the duration of the
-        // call so the decoder and assembler can take `&mut self` while holding
-        // a slice of it. It is put back either way, so decrypting never costs
-        // an allocation in the steady state.
-        let mut scratch = std::mem::take(&mut self.scratch);
-        let result = self.handle_decrypted(pkt, &mut scratch, ev);
-        self.scratch = scratch;
-        result
+    // 3. Paired?
+    report(Step::Launching, "Checking pairing…".into());
+    let apps = match moonlight::list(t.ip) {
+        Ok(apps) => apps,
+        Err(e) if e.downcast_ref::<moonlight::NotPaired>().is_some() => {
+            pair(t, progress, ctx)?;
+            moonlight::list(t.ip).unwrap_or_default()
+        }
+        Err(e) => return Err(e),
+    };
+    progress.lock().apps = apps.clone();
+    if !apps.is_empty() && !apps.iter().any(|a| a.eq_ignore_ascii_case(&settings.app)) {
+        bail!(
+            "Sunshine on {} has no app called \"{}\". It offers: {}. Pick one under Settings.",
+            t.name,
+            settings.app,
+            apps.join(", ")
+        );
     }
 
-    fn handle_decrypted(
-        &mut self,
-        pkt: &[u8],
-        scratch: &mut Vec<u8>,
-        ev: &mpsc::UnboundedSender<ClientEvent>,
-    ) -> Result<bool> {
-        let (h, payload) = open(&self.keys, pkt, scratch)?;
-        if !h.typ.is_plaintext() && !self.replay.check_and_update(h.seq) {
-            return Ok(true);
-        }
-        self.last_host_packet = Instant::now();
-        self.bytes += pkt.len() as u64;
-        let mut result = Ok(true);
-        match h.typ {
-            PacketType::Video => {
-                if let Some(frame) = self.assembler.push(payload) {
-                    // Reclaim whatever the UI finished with, so a steady stream
-                    // decodes into the same buffer instead of allocating 8 MB
-                    // per frame.
-                    if let Some(buf) = self.video.take_spare() {
-                        self.decoder.reuse(buf);
-                    }
-                    match self.decoder.decode(&frame) {
-                        Ok(Some(pic)) => {
-                            self.frames += 1;
-                            self.last_decode_ms = pic.decode_ms;
-                            if let Some(old) = self.video.put(pic) {
-                                self.decoder.reuse(old);
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => tracing::debug!("decode: {e:#}"),
-                    }
-                }
-            }
-            PacketType::Audio => {
-                if let Ok((_ts, data)) = parse_audio_payload(payload) {
-                    // Counted before the device check so a missing output
-                    // device stays distinguishable from a silent host.
-                    self.audio_stats.packet();
-                    if let Some(a) = self.audio.as_ref() {
-                        a.push_s16_48k_stereo(data);
-                    }
-                }
-            }
-            PacketType::Pong => {
-                if let Some(sent) = self.ping_sent.take() {
-                    // Smooth a little so a single delayed reply does not make
-                    // the readout jump.
-                    let sample = sent.elapsed().as_secs_f32() * 1000.0;
-                    self.rtt_ms = if self.rtt_ms == 0.0 {
-                        sample
-                    } else {
-                        self.rtt_ms * 0.8 + sample * 0.2
-                    };
-                }
-            }
-            PacketType::Goodbye => {
-                let _ = ev.send(ClientEvent::Log("The host ended the session.".into()));
-                result = Ok(false);
-            }
-            PacketType::SessionReady => {
-                if let Ok(ready) = json_from_slice::<SessionReady>(payload) {
-                    self.ready = ready;
-                    let _ = ev.send(self.ready_event());
-                }
-            }
-            PacketType::Control => {
-                if let Ok(ControlMsg::Clipboard { text }) = json_from_slice(payload) {
-                    let _ = ev.send(ClientEvent::Clipboard { text });
-                }
-            }
-            _ => {}
-        }
-        result
+    // 4. Stream.
+    if cancelled(progress) {
+        bail!("cancelled");
     }
+    report(Step::Launching, "Starting Moonlight…".into());
+    let mut child = moonlight::stream(t.ip, settings, native)?;
+    let stderr = child.stderr.take();
+    let err_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(mut r) = stderr {
+            let _ = std::io::Read::read_to_string(&mut r, &mut s);
+        }
+        s
+    });
+    let started = Instant::now();
+    report(Step::Streaming, format!("Streaming {}", t.name));
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if cancelled(progress) {
+            moonlight::stop(&mut child);
+            bail!("cancelled");
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let stderr = err_reader.join().unwrap_or_default();
+    // Moonlight exits non-zero for its own errors; a stream the user ended
+    // exits clean. A very short session with a message is a failure to start.
+    if !status.success()
+        || (started.elapsed() < Duration::from_secs(8) && stderr.contains("Failed"))
+    {
+        bail!(
+            "{}",
+            moonlight::first_line(&stderr, "Moonlight stopped unexpectedly")
+        );
+    }
+    Ok(())
+}
+
+/// Moonlight waits with a PIN; the PC's BroLink host accepts it. Order
+/// matters: Sunshine only takes the PIN once Moonlight has asked to pair.
+fn pair(t: &Target, progress: &Arc<Mutex<Progress>>, ctx: &egui::Context) -> Result<()> {
+    let pin = format!("{:04}", rand::random::<u16>() % 10_000);
+    progress.lock().set(
+        Step::Pairing { pin: pin.clone() },
+        format!("Pairing with {}…", t.name),
+    );
+    ctx.request_repaint();
+    let mut child = moonlight::pair(t.ip, &pin)?;
+    let req = PinRequest {
+        pin: pin.clone(),
+        name: brolink_core::config::machine_name(),
+    };
+    let start = Instant::now();
+    let mut accepted = false;
+    let mut last_err = String::new();
+    while start.elapsed() < Duration::from_secs(30) {
+        if cancelled(progress) {
+            let _ = child.kill();
+            bail!("cancelled");
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        match http::post_json::<_, Ack>(
+            (t.ip, CONTROL_PORT),
+            "/v1/pin",
+            &req,
+            Duration::from_secs(10),
+        ) {
+            Ok(a) if a.ok => {
+                accepted = true;
+                break;
+            }
+            Ok(a) => last_err = a.error.unwrap_or_default(),
+            Err(e) => last_err = e.to_string(),
+        }
+        if let Some(s) = child.try_wait()? {
+            if !s.success() {
+                bail!("Moonlight gave up pairing: {last_err}");
+            }
+        }
+    }
+    if !accepted {
+        let _ = child.kill();
+        bail!(
+            "{} did not accept the PIN. {}",
+            t.name,
+            if last_err.is_empty() {
+                String::new()
+            } else {
+                format!("({last_err})")
+            }
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(s) = child.try_wait()? {
+            if s.success() {
+                return Ok(());
+            }
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut e, &mut err);
+            }
+            bail!(
+                "pairing failed: {}",
+                moonlight::first_line(&err, "Moonlight exited")
+            );
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            bail!("pairing did not complete in time");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Power
+// ---------------------------------------------------------------------------
+
+/// Ask the host to sleep, restart, or shut down.
+pub fn power(ip: Ipv4Addr, action: PowerAction) -> Result<()> {
+    let a: Ack = http::post_json(
+        (ip, CONTROL_PORT),
+        "/v1/power",
+        &PowerRequest { action },
+        Duration::from_secs(6),
+    )?;
+    if a.ok {
+        Ok(())
+    } else {
+        bail!("{}", a.error.unwrap_or_else(|| "refused".into()))
+    }
+}
+
+/// Send the wake packet once, without connecting.
+pub fn wake_only(pc: &Pc) -> Result<usize> {
+    let t = Target::from_pc(pc).ok_or_else(|| anyhow!("no address for {}", pc.name))?;
+    let mac = t
+        .mac
+        .ok_or_else(|| anyhow!("this Mac does not know {}'s MAC address yet", pc.name))?;
+    Ok(wake::send(mac, t.lan_ip))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brolink_core::ticket::{Candidate, CandidateKind, RelayHint};
-    use std::net::{Ipv4Addr, SocketAddrV4};
 
-    fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
+    #[test]
+    fn a_pc_is_streamable_when_reachable_or_wakeable() {
+        let mut pc = Pc {
+            ip: Some("203.0.113.10".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(!pc.can_stream());
+        pc.sunshine = true;
+        assert!(pc.can_stream());
+        pc.sunshine = false;
+        pc.known = Some(KnownPc {
+            mac: Some("02:00:00:00:00:01".into()),
+            ..Default::default()
+        });
+        assert!(pc.can_wake() && pc.can_stream());
+        pc.ip = None;
+        assert!(!pc.can_stream());
     }
 
     #[test]
-    fn a_ticket_pins_the_expected_host_identity() {
-        let id = Identity::generate();
-        let t = Ticket::new(
-            &id,
-            vec![Candidate {
-                kind: CandidateKind::Lan,
-                addr: v4(192, 168, 1, 5, 47850),
-            }],
-            None,
-            "PC",
-        );
-        let dest = resolve_target(&t.display_code()).unwrap();
-        assert_eq!(
-            dest.expected_host,
-            Some(id.public),
-            "the ticket's identity must be carried into the handshake check"
-        );
-        assert_eq!(dest.candidates, vec![v4(192, 168, 1, 5, 47850)]);
-        assert!(dest.relay.is_none());
-        assert_eq!(dest.host_label, "PC");
-    }
-
-    #[test]
-    fn a_bare_address_has_no_identity_to_pin() {
-        let dest = resolve_target("192.168.1.5").unwrap();
-        assert_eq!(dest.candidates, vec![v4(192, 168, 1, 5, DEFAULT_PORT)]);
-        assert!(
-            dest.expected_host.is_none(),
-            "there is no identity to check when the user typed an address"
-        );
-
-        let dest = resolve_target("192.168.1.5:9000").unwrap();
-        assert_eq!(dest.candidates, vec![v4(192, 168, 1, 5, 9000)]);
-    }
-
-    #[test]
-    fn every_ticket_address_is_tried_with_the_relay_last() {
-        let id = Identity::generate();
-        let t = Ticket::new(
-            &id,
-            vec![
-                Candidate {
-                    kind: CandidateKind::Wan,
-                    addr: v4(203, 0, 113, 9, 47850),
-                },
-                Candidate {
-                    kind: CandidateKind::Lan,
-                    addr: v4(192, 168, 1, 5, 47850),
-                },
-                Candidate {
-                    kind: CandidateKind::Tailscale,
-                    addr: v4(100, 90, 1, 2, 47850),
-                },
-            ],
-            Some(RelayHint {
-                addr: v4(198, 51, 100, 7, 47851),
-                token: [3u8; 16],
+    fn target_parses_what_it_learned() {
+        let pc = Pc {
+            name: "Gaming-PC".into(),
+            ip: Some("203.0.113.10".parse().unwrap()),
+            online: true,
+            sunshine: true,
+            known: Some(KnownPc {
+                name: "Gaming-PC".into(),
+                mac: Some("02:00:00:00:00:01".into()),
+                lan_ip: Some("192.168.1.10".into()),
             }),
-            "PC",
-        );
-        let dest = resolve_target(&t.encode()).unwrap();
-        assert_eq!(dest.candidates.len(), 4);
-        // LAN first (fastest when it works), relay last (slowest).
-        assert_eq!(dest.candidates[0], v4(192, 168, 1, 5, 47850));
-        assert_eq!(*dest.candidates.last().unwrap(), v4(198, 51, 100, 7, 47851));
-        let relay = dest.relay.expect("relay carried through");
-        assert_eq!(relay.token, [3u8; 16]);
+            ..Default::default()
+        };
+        let t = Target::from_pc(&pc).unwrap();
+        assert!(t.online);
+        assert_eq!(t.mac.unwrap().to_string(), "02:00:00:00:00:01");
+        assert_eq!(t.lan_ip, Some("192.168.1.10".parse().unwrap()));
+    }
+
+    /// `cargo test -p brolink-client scan_real -- --ignored --nocapture` on a
+    /// machine with Tailscale: prints what the lobby would list.
+    #[test]
+    #[ignore = "needs Tailscale"]
+    fn scan_real_tailnet() {
+        let d = scan(&ClientConfig::load());
+        eprintln!("error={:?} login={} pcs={}", d.error, d.login, d.pcs.len());
+        for pc in &d.pcs {
+            eprintln!(
+                "  {} ip={:?} online={} host={} sunshine={} wake={}",
+                pc.name,
+                pc.ip,
+                pc.online,
+                pc.host.is_some(),
+                pc.sunshine,
+                pc.can_wake()
+            );
+        }
+        assert!(d.error.is_some() || !d.login.is_empty());
     }
 
     #[test]
-    fn unusable_targets_are_rejected_with_a_message() {
-        assert!(resolve_target("").is_err());
-        assert!(resolve_target("not an address").is_err());
-        // A well-formed ticket with nothing reachable in it.
-        let id = Identity::generate();
-        let t = Ticket::new(&id, Vec::new(), None, "PC");
-        let err = resolve_target(&t.encode()).unwrap_err().to_string();
-        assert!(err.contains("no addresses"), "{err}");
-    }
-
-    #[test]
-    fn short_id_is_readable_hex() {
-        let id = [
-            0xAB, 0xCD, 0xEF, 0x01, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        assert_eq!(short_id(&id), "abcdef01");
-    }
-
-    #[test]
-    fn describe_lists_every_candidate() {
-        let addrs = vec![v4(192, 168, 1, 5, 47850), v4(203, 0, 113, 9, 47850)];
-        let s = describe(&addrs);
-        assert!(s.contains("192.168.1.5:47850"));
-        assert!(s.contains("203.0.113.9:47850"));
-    }
-
-    #[test]
-    fn path_name_labels_lan_tailscale_wan_and_relay() {
-        let lan = v4(192, 168, 1, 5, 47850);
-        assert!(path_name(lan, None).contains("LAN"));
-        let ts = v4(100, 90, 1, 2, 47850);
-        assert!(path_name(ts, None).contains("Tailscale"));
-        let wan = v4(203, 0, 113, 9, 47850);
-        assert!(path_name(wan, None).contains("internet"));
-        let relay = v4(198, 51, 100, 7, 47851);
-        assert!(path_name(relay, Some(relay)).contains("relay"));
+    fn progress_tracks_step_changes() {
+        let mut p = Progress::default();
+        assert!(!p.active());
+        p.set(Step::Waking, "x");
+        assert!(p.active());
+        let since = p.since;
+        std::thread::sleep(Duration::from_millis(5));
+        p.set(Step::Waking, "y");
+        assert_eq!(p.since, since, "same step keeps its start time");
+        p.set(Step::Ended { error: None }, "");
+        assert!(!p.active());
     }
 }

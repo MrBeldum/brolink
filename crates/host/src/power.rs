@@ -1,11 +1,11 @@
-//! Remote power actions, performed after the session has been torn down.
+//! Remote power actions.
 
 use anyhow::Result;
-use brolink_core::proto::PowerAction;
+use brolink_core::api::PowerAction;
 
-/// Carry out `action`. Sleep and hibernate return once the request is
-/// accepted (the OS suspends a moment later); restart and shutdown schedule
-/// themselves a few seconds out so the Goodbye has left the machine.
+/// Carry out `action`. Sleep returns once the request is accepted (the OS
+/// suspends a moment later); restart and shutdown schedule themselves a few
+/// seconds out so the reply has left the machine.
 pub fn perform(action: PowerAction) -> Result<()> {
     #[cfg(windows)]
     {
@@ -13,11 +13,10 @@ pub fn perform(action: PowerAction) -> Result<()> {
         use windows::Win32::Foundation::BOOLEAN;
         use windows::Win32::System::Power::SetSuspendState;
         match action {
-            PowerAction::Sleep | PowerAction::Hibernate => {
-                let hibernate = BOOLEAN(u8::from(action == PowerAction::Hibernate));
+            PowerAction::Sleep => {
                 // Wake events stay enabled: that is what lets a magic packet
                 // bring the machine back.
-                let ok = unsafe { SetSuspendState(hibernate, BOOLEAN(1), BOOLEAN(0)) };
+                let ok = unsafe { SetSuspendState(BOOLEAN(0), BOOLEAN(1), BOOLEAN(0)) };
                 anyhow::ensure!(
                     ok.0 != 0,
                     "SetSuspendState refused: {}",
@@ -44,6 +43,6 @@ pub fn perform(action: PowerAction) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        anyhow::bail!("{} is only supported on Windows", action.as_str())
+        anyhow::bail!("{} is only supported on Windows", action.label())
     }
 }

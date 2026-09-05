@@ -1,59 +1,143 @@
-//! Host control panel.
+//! The host control panel: a status window with one setup button.
 
-use crate::engine::{Engine, HostStatus};
-use crate::windows_setup;
-use brolink_core::config::{
-    HostConfig, QualityPreset, StreamQuality, MAX_BITRATE_KBPS, MAX_FPS, MIN_BITRATE_KBPS, MIN_FPS,
-};
+use crate::config::{self, HostConfig};
+use crate::setup;
+use crate::streamer::Api;
+use brolink_core::api::Status;
+use brolink_core::http;
+use brolink_core::{CONTROL_PORT, SUNSHINE_WEB_PORT};
 use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// The window is 720 wide by default; leave a gutter either side.
 const COLUMN_WIDTH: f32 = 680.0;
 
+/// What the background threads know, read by the UI every frame.
+#[derive(Default)]
+pub struct Shared {
+    pub status: Option<Status>,
+    pub service_error: Option<String>,
+    pub clients: Vec<(String, String)>,
+    pub gamepad_driver: Option<bool>,
+    pub setup_running: bool,
+    pub setup_result: Option<Result<(), String>>,
+    pub setup_log: Vec<String>,
+}
+
 pub struct HostApp {
-    engine: Arc<Engine>,
+    shared: Arc<Mutex<Shared>>,
     cfg: HostConfig,
-    copied_until: Option<std::time::Instant>,
-    /// Set when a setting changes; saved once at the end of the frame so a
-    /// slider drag does not write the config file on every pixel.
+    autostart: bool,
     dirty: bool,
     brand: ui::Brand,
+    confirm_unpair: Option<String>,
+    busy_since: Option<Instant>,
 }
 
 impl HostApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, engine: Arc<Engine>, cfg: HostConfig) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        spawn_poller(shared.clone(), cc.egui_ctx.clone());
+        Self::with_shared(cc, shared)
+    }
+
+    fn with_shared(cc: &eframe::CreationContext<'_>, shared: Arc<Mutex<Shared>>) -> Self {
         ui::apply(&cc.egui_ctx);
         Self {
-            engine,
-            cfg,
-            copied_until: None,
+            shared,
+            cfg: HostConfig::load(),
+            autostart: setup::starts_with_windows(),
             dirty: false,
             brand: ui::Brand::new(&cc.egui_ctx),
+            confirm_unpair: None,
+            busy_since: None,
         }
     }
 
     fn commit(&mut self) {
-        if !self.dirty {
-            return;
+        if self.dirty {
+            self.dirty = false;
+            if let Err(e) = self.cfg.save() {
+                tracing::warn!("could not save host config: {e:#}");
+            }
         }
-        self.dirty = false;
-        if let Err(e) = self.cfg.save() {
-            tracing::warn!("could not save host config: {e:#}");
+    }
+
+    fn api(&self) -> Option<Api<'_>> {
+        self.cfg.has_creds().then_some(Api {
+            user: &self.cfg.sunshine_user,
+            pass: &self.cfg.sunshine_pass,
+        })
+    }
+
+    /// Generate a Sunshine login if there is none, save it, and run the
+    /// elevated script on a thread.
+    fn start_setup(&mut self, status: &Status) {
+        if !self.cfg.has_creds() {
+            self.cfg.sunshine_user = "brolink".into();
+            self.cfg.sunshine_pass = config::random_password();
+            self.dirty = true;
+            self.commit();
         }
-        self.engine.update_config(self.cfg.clone());
+        let shared = self.shared.clone();
+        {
+            let mut s = shared.lock();
+            s.setup_running = true;
+            s.setup_result = None;
+            s.setup_log.clear();
+        }
+        let cfg = self.cfg.clone();
+        let install_sunshine = !status.streamer.installed;
+        let adapter = status.wake_adapter.clone();
+        let desc = status.wake_adapter_description.clone();
+        std::thread::spawn(move || {
+            let result = std::env::current_exe()
+                .map_err(|e| e.to_string())
+                .and_then(|exe| {
+                    setup::run(&setup::Plan {
+                        exe: &exe,
+                        install_sunshine,
+                        sunshine_user: &cfg.sunshine_user,
+                        sunshine_pass: &cfg.sunshine_pass,
+                        adapter: &adapter,
+                        adapter_description: &desc,
+                    })
+                    .map_err(|e| e.to_string())?;
+                    // The service is what the Mac needs at logon; turn it on
+                    // once setup has succeeded rather than asking.
+                    let _ = setup::set_start_with_windows(true, &exe);
+                    Ok(())
+                });
+            let mut s = shared.lock();
+            s.setup_running = false;
+            s.setup_log = read_setup_log();
+            s.setup_result = Some(result);
+        });
     }
 }
 
 impl eframe::App for HostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(200));
-        let status = self.engine.status.lock().clone();
+        ctx.request_repaint_after(Duration::from_millis(500));
+        let shared = self.shared.lock();
+        let status = shared.status.clone();
+        let service_error = shared.service_error.clone();
+        let clients = shared.clients.clone();
+        let gamepad = shared.gamepad_driver;
+        let setup_running = shared.setup_running;
+        let setup_result = shared.setup_result.clone();
+        let setup_log = shared.setup_log.clone();
+        drop(shared);
+        if setup_running {
+            self.busy_since.get_or_insert_with(Instant::now);
+        } else {
+            self.busy_since = None;
+        }
 
         ui::top_bar(ctx, "top", |ui| {
-            let (label, tone) = status_of(&status);
+            let (label, tone) = pill(status.as_ref(), service_error.as_deref());
             self.brand
                 .header(ui, "BroLink Host", "Your PC, from your Mac", |ui| {
                     ui::status_pill(ui, label, tone);
@@ -64,9 +148,16 @@ impl eframe::App for HostApp {
             ui.horizontal(|ui| {
                 ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
                 ui.label("·");
-                ui.label(format!("UDP {}", self.cfg.port));
-                ui.label("·");
-                ui.label(format!("encoder {}", status.encoder));
+                ui.label(format!("control port TCP {CONTROL_PORT}"));
+                if let Some(s) = &status {
+                    if s.version != env!("CARGO_PKG_VERSION") {
+                        ui.label("·");
+                        ui.colored_label(
+                            P.accent,
+                            format!("service is v{}, restarting it", s.version),
+                        );
+                    }
+                }
             });
         });
 
@@ -77,29 +168,35 @@ impl eframe::App for HostApp {
                     ui.add_space(20.0);
                     ui::content_column(ui, COLUMN_WIDTH, |ui| {
                         ui.spacing_mut().item_spacing.y = 14.0;
-                        if !status.ffmpeg_ok {
-                            ui::toned_card(ui, Tone::Danger, |ui| {
-                                ui::heading(ui, "Encoder setup", None);
-                                ui.label(
-                                    "FFmpeg is required to capture this desktop. The host downloads \
-                                     it automatically the first time; leave this window open until \
-                                     the log says it is ready. You can also drop ffmpeg.exe next to \
-                                     the app.",
+                        match &status {
+                            Some(s) => {
+                                self.setup_card(
+                                    ui,
+                                    s,
+                                    setup_running,
+                                    setup_result.as_ref(),
+                                    &setup_log,
                                 );
-                            });
+                                self.pc_card(ui, s, gamepad);
+                                self.paired_card(ui, &clients);
+                                self.settings_card(ui);
+                                ui::titled_card(ui, "Log", None, |ui| {
+                                    ui::log_view(ui, "host_log", &s.log, 200.0);
+                                });
+                            }
+                            None => {
+                                ui::toned_card(ui, Tone::Neutral, |ui| {
+                                    ui::heading(ui, "Starting the background service", None);
+                                    ui::empty_state(
+                                        ui,
+                                        service_error
+                                            .as_deref()
+                                            .unwrap_or("This takes a second or two."),
+                                        true,
+                                    );
+                                });
+                            }
                         }
-                        if let Some(pin) = status.pending_pin.clone() {
-                            self.pin_card(ui, &status, &pin);
-                        }
-                        self.ticket_card(ui, &status);
-                        self.session_card(ui, &status);
-                        self.internet_card(ui, &status);
-                        self.wake_card(ui, &status);
-                        self.paired_card(ui, &status);
-                        self.settings_card(ui, &status);
-                        ui::titled_card(ui, "Log", None, |ui| {
-                            ui::log_view(ui, "host_log", &status.log, 200.0);
-                        });
                         ui.add_space(10.0);
                     });
                 });
@@ -110,422 +207,431 @@ impl eframe::App for HostApp {
 }
 
 impl HostApp {
-    fn pin_card(&mut self, ui: &mut egui::Ui, status: &HostStatus, pin: &str) {
-        ui::toned_card(ui, Tone::Accent, |ui| {
+    fn setup_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &Status,
+        running: bool,
+        result: Option<&Result<(), String>>,
+        log: &[String],
+    ) {
+        // Tailscale is the user's job (sign in), not the script's.
+        let admin_items: Vec<&String> = s
+            .setup
+            .iter()
+            .filter(|l| !l.starts_with("Tailscale"))
+            .collect();
+        let tailscale_item = s.setup.iter().find(|l| l.starts_with("Tailscale"));
+        if admin_items.is_empty() && tailscale_item.is_none() && result.is_none() && !running {
+            return;
+        }
+        let tone = if admin_items.is_empty() && tailscale_item.is_none() {
+            Tone::Success
+        } else {
+            Tone::Accent
+        };
+        ui::toned_card(ui, tone, |ui| {
             ui::heading(
                 ui,
-                "Pairing PIN",
-                Some(&format!(
-                    "“{}” wants to connect. Enter this PIN on the Mac; it is only asked once.",
-                    status.pending_name.clone().unwrap_or_else(|| "Mac".into())
-                )),
+                "Set up this PC",
+                Some("One administrator prompt does everything below. Nothing else needs configuring."),
             );
-            ui.vertical_centered(|ui| {
-                ui::display_digits(ui, pin);
+            if let Some(t) = tailscale_item {
+                ui::notice(ui, Tone::Danger, t);
+                ui.horizontal(|ui| {
+                    if ui::ghost_button(ui, "Get Tailscale").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(
+                            "https://tailscale.com/download/windows",
+                        ));
+                    }
+                    ui::caption(ui, "Sign in with the same account as your Mac.");
+                });
+            }
+            for item in &admin_items {
+                ui::dot_label(ui, Tone::Accent, item);
+            }
+            if admin_items.is_empty() && tailscale_item.is_none() {
+                ui::dot_label(ui, Tone::Success, "Everything is in place.");
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if running {
+                    ui::empty_state(
+                        ui,
+                        &format!(
+                            "Waiting for the administrator prompt and the setup steps… {}s",
+                            self.busy_since.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+                        ),
+                        true,
+                    );
+                } else {
+                    let label = if admin_items.is_empty() {
+                        "Run setup again"
+                    } else {
+                        "Set up this PC (administrator)"
+                    };
+                    if ui::primary_button(ui, label).clicked() {
+                        self.start_setup(s);
+                    }
+                    if !s.streamer.installed {
+                        ui::caption(
+                            ui,
+                            "Downloads Sunshine from GitHub and installs it silently.",
+                        );
+                    }
+                }
+            });
+            match result {
+                Some(Ok(())) => {
+                    ui::notice(
+                        ui,
+                        Tone::Success,
+                        "Setup finished. The service re-checks everything within a few seconds.",
+                    );
+                }
+                Some(Err(e)) => {
+                    ui::notice(ui, Tone::Danger, e);
+                }
+                None => {}
+            }
+            if !log.is_empty() {
+                ui::collapsible(
+                    ui,
+                    "setup_log",
+                    "Setup log",
+                    result.as_ref().is_some_and(|r| r.is_err()),
+                    |ui| {
+                        ui::log_view(ui, "setup_log_view", log, 160.0);
+                    },
+                );
+            }
+        });
+    }
+
+    fn pc_card(&mut self, ui: &mut egui::Ui, s: &Status, gamepad: Option<bool>) {
+        ui::titled_card(ui, "This PC", None, |ui| {
+            let tailscale = match (&s.tailscale_ip, &s.tailscale_login) {
+                (Some(ip), Some(login)) => format!("{ip} · signed in as {login}"),
+                (Some(ip), None) => ip.clone(),
+                _ => "not running".into(),
+            };
+            let streamer = if !s.streamer.installed {
+                "not installed".to_string()
+            } else {
+                format!(
+                    "{} · {}{}",
+                    s.streamer.kind,
+                    if s.streamer.running {
+                        "running"
+                    } else {
+                        "not running"
+                    },
+                    if s.streamer.api_ok {
+                        " · BroLink logged in"
+                    } else {
+                        ""
+                    }
+                )
+            };
+            let wake = match (&s.mac, s.wake_ready) {
+                (Some(mac), Some(true)) => format!("ready · {} · {mac}", s.wake_adapter),
+                (Some(mac), Some(false)) => format!("off · {} · {mac}", s.wake_adapter),
+                (Some(mac), None) => format!("unknown · {} · {mac}", s.wake_adapter),
+                (None, _) => "no wired adapter found".into(),
+            };
+            let gamepad_text = match gamepad {
+                Some(true) => "virtual controller driver installed",
+                Some(false) => "virtual controller driver missing",
+                None => "unknown until Sunshine is running",
+            };
+            ui::kv_grid(
+                ui,
+                "pc_grid",
+                &[
+                    ("Name", s.name.clone()),
+                    ("Tailscale", tailscale),
+                    ("Streaming", streamer),
+                    ("Wake-on-LAN", wake),
+                    (
+                        "LAN address",
+                        s.lan_ip.clone().unwrap_or_else(|| "—".into()),
+                    ),
+                    ("Gamepads", gamepad_text.into()),
+                ],
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if s.streamer.running && ui::ghost_button(ui, "Open Sunshine settings").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
+                        "https://localhost:{SUNSHINE_WEB_PORT}"
+                    )));
+                }
+                if gamepad == Some(false)
+                    && ui::ghost_button(ui, "Install controller driver").clicked()
+                {
+                    if let Some(api) = self.api() {
+                        if let Err(e) = api.install_gamepad_driver() {
+                            tracing::warn!("ViGEmBus install: {e:#}");
+                        }
+                    }
+                }
+            });
+            if s.streamer.api_ok && self.cfg.has_creds() {
+                ui::caption(
+                    ui,
+                    format!(
+                        "Sunshine web login for you: {} / {}",
+                        self.cfg.sunshine_user, self.cfg.sunshine_pass
+                    ),
+                );
+            }
+        });
+    }
+
+    fn paired_card(&mut self, ui: &mut egui::Ui, clients: &[(String, String)]) {
+        ui::titled_card(
+            ui,
+            "Paired Macs",
+            Some("A Mac pairs itself the first time it connects; nothing to type here."),
+            |ui| {
+                if clients.is_empty() {
+                    ui::empty_state(ui, "No Mac has paired yet.", false);
+                }
+                for (i, (name, uuid)) in clients.iter().enumerate() {
+                    if i > 0 {
+                        ui::row_separator(ui);
+                    }
+                    ui::list_row(ui, name, &uuid[..uuid.len().min(8)], |ui| {
+                        if self.confirm_unpair.as_deref() == Some(uuid) {
+                            if ui::toned_button(ui, "Unpair", Tone::Danger).clicked() {
+                                if let Some(api) = self.api() {
+                                    if let Err(e) = api.unpair(uuid) {
+                                        tracing::warn!("unpair: {e:#}");
+                                    }
+                                }
+                                self.confirm_unpair = None;
+                            }
+                            if ui::ghost_button(ui, "Keep").clicked() {
+                                self.confirm_unpair = None;
+                            }
+                        } else if ui::danger_button(ui, "Unpair…").clicked() {
+                            self.confirm_unpair = Some(uuid.clone());
+                        }
+                    });
+                }
+            },
+        );
+    }
+
+    fn settings_card(&mut self, ui: &mut egui::Ui) {
+        ui::titled_card(ui, "Settings", None, |ui| {
+            if ui::toggle_row(
+                ui,
+                &mut self.cfg.power_allowed,
+                "Let a paired Mac sleep, restart, or shut down this PC",
+                Some("Only a Mac on your own Tailscale account can ask. Asleep, the PC wakes from the Mac in seconds."),
+            ) {
+                self.dirty = true;
+            }
+            ui::row_separator(ui);
+            let mut auto = self.autostart;
+            if ui::toggle_row(
+                ui,
+                &mut auto,
+                "Start the background service with Windows",
+                Some("Otherwise the Mac cannot pair with or sleep this PC until this window is opened."),
+            ) {
+                if let Ok(exe) = std::env::current_exe() {
+                    match setup::set_start_with_windows(auto, &exe) {
+                        Ok(()) => self.autostart = auto,
+                        Err(e) => tracing::warn!("autostart: {e:#}"),
+                    }
+                }
+            }
+            ui::row_separator(ui);
+            ui.horizontal(|ui| {
+                if ui::danger_button(ui, "Stop the background service").clicked() {
+                    let _ = http::request(
+                        ("127.0.0.1", CONTROL_PORT),
+                        "POST",
+                        "/v1/quit",
+                        None,
+                        Duration::from_secs(2),
+                    );
+                    let mut s = self.shared.lock();
+                    s.status = None;
+                    s.service_error =
+                        Some("Stopped. It starts again next time this window opens.".into());
+                }
+                if ui::ghost_button(ui, "Open log folder").clicked() {
+                    if let Ok(dir) = brolink_core::config::data_dir() {
+                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                    }
+                }
             });
         });
     }
+}
 
-    fn ticket_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        ui::titled_card(
-            ui,
-            "Connect from your Mac",
-            Some(
-                "On your Mac, paste this ticket and click Connect. It carries every address \
-                 this PC can be reached on.",
-            ),
-            |ui| {
-                let ready = !status.ticket_display.is_empty();
-                ui::well(ui, |ui| {
-                    if ready {
-                        ui.label(
-                            egui::RichText::new(&status.ticket_display)
-                                .monospace()
-                                .color(P.text),
-                        );
-                    } else {
-                        ui::empty_state(ui, "Preparing the ticket…", true);
-                    }
-                });
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(ready, |ui| {
-                        if ui::primary_button(ui, "Copy ticket").clicked() {
-                            ui.ctx().copy_text(status.ticket_display.clone());
-                            self.copied_until =
-                                Some(std::time::Instant::now() + Duration::from_secs(2));
-                        }
-                    });
-                    if self
-                        .copied_until
-                        .is_some_and(|t| t > std::time::Instant::now())
-                    {
-                        ui::dot_label(ui, Tone::Success, "Copied");
-                    }
-                });
-                ui.add_space(6.0);
-                let mut rows: Vec<(&str, String)> = Vec::new();
-                rows.push((
-                    "LAN",
-                    status
-                        .lan
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|| "no local address found".into()),
-                ));
-                rows.push((
-                    "Internet",
-                    status.wan.map(|a| a.to_string()).unwrap_or_else(|| {
-                        "not available — use a relay, Tailscale, or port-forward UDP".into()
-                    }),
-                ));
-                if let Some(ts) = status.tailscale {
-                    rows.push(("Tailscale", ts.to_string()));
-                }
-                if let Some(relay) = status.relay {
-                    rows.push(("Relay", relay.to_string()));
-                }
-                if let Some(upnp) = &status.upnp {
-                    rows.push(("Port mapping", upnp.clone()));
-                }
-                ui::kv_grid(ui, "addresses", &rows);
-            },
-        );
-    }
-
-    fn session_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        ui::titled_card(ui, "Session", None, |ui| {
-            match &status.client {
-                Some(c) => {
-                    let mut rows: Vec<(&str, String)> = vec![
-                        ("Client", c.clone()),
-                        (
-                            "Streaming",
-                            if status.streaming { "yes" } else { "starting" }.into(),
-                        ),
-                        ("Frames sent", status.frames_sent.to_string()),
-                        ("Rate", format!("{:.0} fps", status.fps)),
-                        (
-                            "Bitrate",
-                            format!("{:.1} Mbps", status.bitrate_kbps / 1000.0),
-                        ),
-                    ];
-                    if !status.path.is_empty() {
-                        rows.push(("Path", status.path.clone()));
-                    }
-                    ui::kv_grid(ui, "session", &rows);
-                    ui.add_space(6.0);
-                    if ui::danger_button(ui, "Disconnect the Mac").clicked() {
-                        self.engine.kick_client();
-                    }
-                }
-                None => {
-                    ui::empty_state(
-                        ui,
-                        "Waiting for a Mac to connect. Keep this window open, or turn on \
-                         Start with Windows.",
-                        status.running,
-                    );
-                    if !status.path.is_empty() {
-                        ui::kv(ui, "Path", status.path.clone());
-                    }
-                }
-            }
-            if let Some(err) = &status.last_error {
-                ui.add_space(6.0);
-                ui::notice(ui, Tone::Danger, err);
-            }
-        });
-    }
-
-    fn internet_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        ui::titled_card(ui, "Internet access", None, |ui| {
-            let reachable =
-                status.upnp.is_some() || status.tailscale.is_some() || status.relay.is_some();
-            let tone = if reachable {
-                Tone::Success
-            } else {
-                Tone::Accent
-            };
-            ui::dot_label(ui, tone, &status.internet);
-            ui.add_space(4.0);
-            if ui::toggle_row(
-                ui,
-                &mut self.cfg.enable_upnp,
-                "Ask my router to open the port",
-                Some("UPnP / NAT-PMP. Most home routers allow it; CGNAT cannot be mapped."),
-            ) {
-                self.dirty = true;
-            }
-            ui::caption(
-                ui,
-                "If this stays on the local network only, set a relay in Settings below or \
-                 install Tailscale on both machines. Neither needs any router changes.",
-            );
-        });
-    }
-
-    fn wake_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        ui::titled_card(ui, "Wake and power from the Mac", None, |ui| {
-            match &status.wake {
-                None => {
-                    ui::empty_state(ui, "Checking whether this PC can be woken remotely…", true);
-                }
-                Some(w) => {
-                    ui::kv_grid(
-                        ui,
-                        "wake",
-                        &[
-                            ("Adapter", w.adapter.clone()),
-                            ("MAC", w.mac.clone().unwrap_or_else(|| "not found".into())),
-                        ],
-                    );
-                    ui.add_space(4.0);
-                    match w.magic_packet {
-                        Some(true) => ui::dot_label(
-                            ui,
-                            Tone::Success,
-                            "Wake-on-LAN is on: the Mac can wake this PC from sleep.",
-                        ),
-                        Some(false) => {
-                            ui::dot_label(
-                                ui,
-                                Tone::Danger,
-                                "Wake-on-LAN is off, so a sleeping PC cannot be woken from the Mac.",
-                            );
-                            if ui::primary_button(ui, "Enable Wake-on-LAN")
-                                .on_hover_text("Asks for administrator approval")
-                                .clicked()
-                            {
-                                self.engine.enable_wake();
-                            }
-                        }
-                        None => {
-                            ui::caption(ui, "Could not read the adapter's wake settings.");
-                        }
-                    }
-                    if w.fast_startup == Some(true) {
-                        ui::caption(
-                            ui,
-                            "Fast Startup is on, so waking after a full shut down is unreliable. \
-                             Use Sleep from the Mac; it wakes in seconds with everything still open.",
-                        );
-                    }
-                }
-            }
-            ui.add_space(4.0);
-            if ui::toggle_row(
-                ui,
-                &mut self.cfg.allow_power_control,
-                "Let a paired Mac sleep, restart, or shut down this PC",
-                None,
-            ) {
-                self.dirty = true;
-            }
-            ui::caption(
-                ui,
-                "Turn on Start with Windows in Settings so the host is waiting after a restart. \
-                 A sleeping PC keeps the host running and resumes on its own.",
-            );
-        });
-    }
-
-    fn paired_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        if status.paired.is_empty() {
-            return;
+fn pill(status: Option<&Status>, err: Option<&str>) -> (&'static str, Tone) {
+    match status {
+        None if err.is_some() => ("Service stopped", Tone::Neutral),
+        None => ("Starting", Tone::Neutral),
+        Some(s) if s.setup.iter().any(|l| l.starts_with("Tailscale")) => {
+            ("Tailscale off", Tone::Danger)
         }
-        let mut revoke = None;
-        ui::titled_card(ui, "Paired Macs", None, |ui| {
-            for (i, (name, hex)) in status.paired.iter().enumerate() {
-                if i > 0 {
-                    ui::row_separator(ui);
-                }
-                ui::list_row(ui, name, &hex[..hex.len().min(12)], |ui| {
-                    if ui::danger_button(ui, "Revoke").clicked() {
-                        revoke = Some(hex.clone());
-                    }
-                });
-            }
-        });
-        if let Some(hex) = revoke {
-            self.engine.revoke_client(hex);
-        }
-    }
-
-    fn settings_card(&mut self, ui: &mut egui::Ui, status: &HostStatus) {
-        ui::titled_card(
-            ui,
-            "Settings",
-            Some("The Mac picks a preset; the quality here is the most this PC will encode."),
-            |ui| {
-                ui::setting_row(ui, "Maximum quality", None, |ui| {
-                    let mut preset = self.cfg.quality.preset;
-                    let options = [
-                        (QualityPreset::Competitive, "Competitive"),
-                        (QualityPreset::Balanced, "Balanced"),
-                        (QualityPreset::Quality, "Quality"),
-                    ];
-                    if ui::segmented(ui, &options, &mut preset) {
-                        self.cfg.quality = StreamQuality::from_preset(preset);
-                        self.dirty = true;
-                    }
-                });
-                ui::setting_row(ui, "Bitrate", None, |ui| {
-                    let mut br = self.cfg.quality.bitrate_kbps as f32;
-                    if ui
-                        .add(
-                            egui::Slider::new(
-                                &mut br,
-                                MIN_BITRATE_KBPS as f32..=MAX_BITRATE_KBPS as f32,
-                            )
-                            .suffix(" kbps"),
-                        )
-                        .changed()
-                    {
-                        self.cfg.quality.preset = QualityPreset::Custom;
-                        self.cfg.quality.bitrate_kbps = br as u32;
-                        self.dirty = true;
-                    }
-                });
-                ui::setting_row(ui, "Frame rate", None, |ui| {
-                    let mut fps = self.cfg.quality.fps as f32;
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut fps, MIN_FPS as f32..=MAX_FPS as f32)
-                                .suffix(" fps"),
-                        )
-                        .changed()
-                    {
-                        self.cfg.quality.preset = QualityPreset::Custom;
-                        self.cfg.quality.fps = fps as u32;
-                        self.dirty = true;
-                    }
-                });
-                ui::setting_row(ui, "Monitor", Some("0 is the primary display"), |ui| {
-                    if ui
-                        .add(egui::DragValue::new(&mut self.cfg.monitor_index).range(0..=7))
-                        .changed()
-                    {
-                        self.dirty = true;
-                    }
-                });
-                ui::row_separator(ui);
-                // Every one of these used to change only the in-memory copy, so
-                // a restart silently reverted them; `dirty` saves at frame end.
-                if ui::toggle_row(ui, &mut self.cfg.enable_audio, "Capture system audio", None) {
-                    self.dirty = true;
-                }
-                if ui::toggle_row(
-                    ui,
-                    &mut self.cfg.enable_gamepad,
-                    "Virtual Xbox 360 gamepad",
-                    Some("Needs the ViGEmBus driver"),
-                ) {
-                    self.dirty = true;
-                }
-                if ui::toggle_row(
-                    ui,
-                    &mut self.cfg.enable_clipboard,
-                    "Share the clipboard",
-                    None,
-                ) {
-                    self.dirty = true;
-                }
-                if ui::toggle_row(
-                    ui,
-                    &mut self.cfg.adaptive_bitrate,
-                    "Adapt bitrate when the Mac reports loss",
-                    None,
-                ) {
-                    self.dirty = true;
-                }
-                if ui::toggle_row(
-                    ui,
-                    &mut self.cfg.start_with_windows,
-                    "Start with Windows",
-                    Some("For this user account"),
-                ) {
-                    self.dirty = true;
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Err(e) =
-                            windows_setup::set_start_with_windows(self.cfg.start_with_windows, &exe)
-                        {
-                            tracing::warn!("start with Windows: {e:#}");
-                        }
-                    }
-                }
-                if ui::toggle_row(
-                    ui,
-                    &mut self.cfg.auto_trust,
-                    "Skip the PIN for new clients",
-                    Some("Local network only: anyone who can reach this PC can connect"),
-                ) {
-                    self.dirty = true;
-                }
-                ui::row_separator(ui);
-                ui::setting_row(ui, "PC name", None, |ui| {
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut self.cfg.name).desired_width(240.0))
-                        .lost_focus()
-                    {
-                        self.dirty = true;
-                    }
-                });
-                ui::setting_row(
-                    ui,
-                    "Relay",
-                    Some("Optional. Lets the Mac connect from anywhere with no port forwarding."),
-                    |ui| {
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.cfg.relay)
-                                    .desired_width(240.0)
-                                    .hint_text("relay.example.com:47851"),
-                            )
-                            .lost_focus()
-                        {
-                            self.dirty = true;
-                        }
-                    },
-                );
-                ui.add_space(2.0);
-                ui::caption(
-                    ui,
-                    if status.client.is_some() {
-                        "Quality and relay changes apply the next time a Mac connects."
-                    } else {
-                        "Applied when a Mac connects."
-                    },
-                );
-            },
-        );
+        Some(s) if !s.setup.is_empty() => ("Needs setup", Tone::Accent),
+        Some(_) => ("Ready", Tone::Success),
     }
 }
 
-fn status_of(st: &HostStatus) -> (&'static str, Tone) {
-    if st.streaming {
-        ("STREAMING", Tone::Success)
-    } else if !st.ffmpeg_ok {
-        ("NEEDS SETUP", Tone::Danger)
-    } else if st.running {
-        ("READY", Tone::Accent)
+/// Last lines of the elevated script's transcript, BOM and blanks dropped.
+fn read_setup_log() -> Vec<String> {
+    let Some(path) = setup::log_path() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    let text = decode_log(&bytes);
+    let lines: Vec<String> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    lines.into_iter().rev().take(40).rev().collect()
+}
+
+/// `Out-File -Encoding utf8` writes a BOM; older PowerShell writes UTF-16.
+fn decode_log(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let u16s: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&u16s)
     } else {
-        ("STARTING", Tone::Neutral)
+        String::from_utf8_lossy(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes))
+            .into_owned()
     }
 }
 
-/// Render the control panel to PNGs without a GPU encoder or a Windows PC.
+/// Poll the service every second; refresh Sunshine's client list now and
+/// then; restart the service after an update.
+fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
+    std::thread::spawn(move || {
+        let mut failures = 0u32;
+        let mut tick = 0u64;
+        loop {
+            let r: Result<Status, _> = http::get_json(
+                ("127.0.0.1", CONTROL_PORT),
+                "/v1/status",
+                Duration::from_millis(800),
+            );
+            match r {
+                Ok(st) => {
+                    failures = 0;
+                    if st.version != env!("CARGO_PKG_VERSION") {
+                        let _ = http::request(
+                            ("127.0.0.1", CONTROL_PORT),
+                            "POST",
+                            "/v1/quit",
+                            None,
+                            Duration::from_secs(2),
+                        );
+                        std::thread::sleep(Duration::from_secs(1));
+                        crate::ensure_service_running();
+                    }
+                    let cfg = HostConfig::load();
+                    if st.streamer.api_ok && cfg.has_creds() && tick.is_multiple_of(10) {
+                        let api = Api {
+                            user: &cfg.sunshine_user,
+                            pass: &cfg.sunshine_pass,
+                        };
+                        let clients = api.clients();
+                        let gamepad = api.gamepad_driver();
+                        let mut s = shared.lock();
+                        s.clients = clients;
+                        s.gamepad_driver = gamepad;
+                    }
+                    let mut s = shared.lock();
+                    s.status = Some(st);
+                    if s.service_error
+                        .as_deref()
+                        .is_some_and(|e| !e.starts_with("Stopped"))
+                    {
+                        s.service_error = None;
+                    }
+                }
+                Err(e) => {
+                    failures += 1;
+                    let mut s = shared.lock();
+                    let stopped_by_user = s
+                        .service_error
+                        .as_deref()
+                        .is_some_and(|e| e.starts_with("Stopped"));
+                    s.status = None;
+                    if !stopped_by_user {
+                        s.service_error = Some(format!("{e}"));
+                    }
+                    drop(s);
+                    if failures % 4 == 2 && !stopped_by_user {
+                        crate::ensure_service_running();
+                    }
+                }
+            }
+            ctx.request_repaint();
+            tick += 1;
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_log_decodes_utf16_and_utf8_with_boms() {
+        let utf8 = [&[0xEF, 0xBB, 0xBF][..], "a\r\n\r\nb\n".as_bytes()].concat();
+        assert_eq!(
+            decode_log(&utf8)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count(),
+            2
+        );
+        let mut utf16 = vec![0xFF, 0xFE];
+        for c in "hi\n".encode_utf16() {
+            utf16.extend_from_slice(&c.to_le_bytes());
+        }
+        assert_eq!(decode_log(&utf16), "hi\n");
+    }
+
+    #[test]
+    fn pill_reflects_setup_state() {
+        assert_eq!(pill(None, None).0, "Starting");
+        let mut s = Status::default();
+        assert_eq!(pill(Some(&s), None).0, "Ready");
+        s.setup.push("Sunshine is not installed.".into());
+        assert_eq!(pill(Some(&s), None).0, "Needs setup");
+        s.setup.push("Tailscale: not running".into());
+        assert_eq!(pill(Some(&s), None).0, "Tailscale off");
+    }
+}
+
+/// Render the panel to PNGs for review without a PC:
 ///
 /// ```text
-/// cargo test -p brolink-host snapshots -- --ignored --nocapture
+/// cargo test -p brolink-host snapshots -- --ignored
 /// ```
-///
-/// Output lands in `target/ui-snapshots/`. Ignored by default: it needs a GPU
-/// and is a review aid, not a test.
 #[cfg(test)]
 mod snapshots {
     use super::*;
-    use crate::wake::WakeInfo;
-    use brolink_core::identity::Identity;
+    use brolink_core::api::Streamer;
 
     fn out_dir() -> std::path::PathBuf {
         let dir =
@@ -540,47 +646,44 @@ mod snapshots {
         eprintln!("wrote {}", path.display());
     }
 
-    fn sample_status() -> HostStatus {
-        HostStatus {
-            running: true,
-            encoder: "h264_nvenc".into(),
-            lan: Some("192.168.1.20:47850".parse().unwrap()),
-            wan: Some("203.0.113.9:47850".parse().unwrap()),
-            tailscale: Some("100.101.102.103:47850".parse().unwrap()),
-            ticket_display: "blk1_eyJ2IjoxLCJuIjoiR0FNSU5HLVBDIiwiayI6IjM0YjA4ZjEwYzJlNDliN2E4NzFlNjEyOWU4ZTNjOWQxYzY4YTAxNmE0ZjMxOGNlN2ZlOTIzMDFiNTk5ZjA0ZDMiLCJhIjpbIjE5Mi4xNjguMS4yMDo0Nzg1MCIsIjIwMy4wLjExMy45OjQ3ODUwIiwiMTAwLjEwMS4xMDIuMTAzOjQ3ODUwIl19".into(),
-            ffmpeg_ok: true,
-            upnp: Some("UDP 47850 → 47850 on 203.0.113.9 (permanent)".into()),
-            internet: "Reachable from the internet: the router opened UDP 47850.".into(),
-            paired: vec![
-                ("Example Mac".into(), "0000000000000001".into()),
-                ("Second Example Mac".into(), "0000000000000002".into()),
-            ],
-            wake: Some(WakeInfo {
-                mac: Some("02:00:00:00:00:02".into()),
-                adapter: "Example NIC".into(),
-                magic_packet: Some(true),
-                fast_startup: Some(true),
-            }),
+    fn ready_status() -> Status {
+        Status {
+            app: "brolink".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            name: "GAMING-PC".into(),
+            tailscale_ip: Some("100.64.0.10".into()),
+            tailscale_login: Some("user@example.com".into()),
+            lan_ip: Some("192.168.1.10".into()),
+            mac: Some("02:00:00:00:00:01".into()),
+            wake_ready: Some(true),
+            wake_adapter: "Ethernet".into(),
+            wake_adapter_description: "Example NIC".into(),
+            streamer: Streamer {
+                kind: "Sunshine".into(),
+                installed: true,
+                running: true,
+                api_ok: true,
+            },
+            power_allowed: true,
+            setup: vec![],
             log: vec![
-                "host id 3f9a1c, listening on UDP 47850".into(),
-                "encoder probe: h264_nvenc ok".into(),
-                "UPnP: mapped UDP 47850 (permanent lease)".into(),
-                "STUN: 203.0.113.9:47850".into(),
-                "ticket ready".into(),
+                "BroLink Host 2.0.0 listening on TCP 47850".into(),
+                "Tailscale up as user@example.com (100.64.0.10)".into(),
+                "Sunshine is running and BroLink is logged in".into(),
+                "Wake-on-LAN ready on Ethernet (02:00:00:00:00:01)".into(),
+                "example-mac (user@example.com) asked".into(),
+                "paired \"Example Mac\"".into(),
             ],
-            ..HostStatus::default()
         }
     }
 
-    fn build(status: HostStatus) -> egui_kittest::Harness<'static, HostApp> {
-        let cfg = HostConfig::default();
-        let engine = Arc::new(Engine::new(cfg.clone(), Identity::generate()));
-        *engine.status.lock() = status;
+    fn build(shared: Shared) -> egui_kittest::Harness<'static, HostApp> {
+        let shared = Arc::new(Mutex::new(shared));
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(720.0, 2700.0))
+            .with_size(egui::vec2(720.0, 1500.0))
             .with_pixels_per_point(2.0)
             .with_max_steps(8)
-            .build_eframe(move |cc| HostApp::new(cc, engine, cfg));
+            .build_eframe(move |cc| HostApp::with_shared(cc, shared));
         harness.run_steps(3);
         harness
     }
@@ -588,37 +691,53 @@ mod snapshots {
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
     fn ready() {
-        let mut h = build(sample_status());
+        let mut h = build(Shared {
+            status: Some(ready_status()),
+            clients: vec![
+                ("Example Mac".into(), "0000000000000001".into()),
+                ("Second Example Mac".into(), "0000000000000002".into()),
+            ],
+            gamepad_driver: Some(true),
+            ..Default::default()
+        });
         save(h.render().unwrap(), "host-ready.png");
     }
 
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn streaming_with_pin() {
-        let mut st = sample_status();
-        st.pending_pin = Some("482913".into());
-        st.pending_name = Some("Example Mac".into());
-        st.client = Some("Example Mac (192.168.1.31)".into());
-        st.streaming = true;
-        st.fps = 60.0;
-        st.bitrate_kbps = 24_800.0;
-        st.frames_sent = 18_422;
-        st.path = "LAN, direct".into();
-        let mut h = build(st);
-        save(h.render().unwrap(), "host-streaming-pin.png");
+    fn needs_setup() {
+        let mut st = ready_status();
+        st.streamer = Streamer::default();
+        st.wake_ready = Some(false);
+        st.setup = vec![
+            "Sunshine is not installed.".into(),
+            "Wake-on-LAN is off on Ethernet.".into(),
+        ];
+        let mut h = build(Shared {
+            status: Some(st),
+            gamepad_driver: None,
+            ..Default::default()
+        });
+        save(h.render().unwrap(), "host-setup.png");
     }
 
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn needs_setup() {
-        let st = HostStatus {
-            running: true,
-            ffmpeg_ok: false,
-            internet: "Local network only so far.".into(),
-            last_error: Some("ffmpeg.exe not found; downloading…".into()),
-            ..HostStatus::default()
-        };
-        let mut h = build(st);
-        save(h.render().unwrap(), "host-setup.png");
+    fn setup_failed_no_tailscale() {
+        let mut st = ready_status();
+        st.tailscale_ip = None;
+        st.tailscale_login = None;
+        st.setup = vec!["Tailscale: Tailscale is not installed. Install it and sign in.".into()];
+        let mut h = build(Shared {
+            status: Some(st),
+            setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\BroLink\\setup.log)".into())),
+            setup_log: vec![
+                "[14:02:11] BroLink setup started".into(),
+                "[14:02:11] Downloading Sunshine".into(),
+                "  sunshine: curl: (6) Could not resolve host: api.github.com".into(),
+            ],
+            ..Default::default()
+        });
+        save(h.render().unwrap(), "host-setup-failed.png");
     }
 }

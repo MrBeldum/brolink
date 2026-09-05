@@ -1,34 +1,22 @@
-//! BroLink shared protocol, cryptography, tickets, STUN, and discovery.
+//! What the BroLink host and client share: the control API they speak, the
+//! Tailscale and download helpers, wake packets, config files, the icon.
+//!
+//! The picture itself never passes through BroLink. Sunshine on the PC and
+//! Moonlight on the Mac do the streaming; Tailscale carries it. BroLink is
+//! the part those three leave out: turning the PC on and off from the Mac,
+//! pairing without touching the PC, and one click to get there.
 
-pub mod abr;
-pub mod codec;
+pub mod api;
 pub mod config;
-pub mod crypto;
-pub mod discovery;
+pub mod download;
+pub mod http;
 pub mod icon;
-pub mod identity;
-pub mod net;
-pub mod proto;
-pub mod rendezvous;
-pub mod stun;
-pub mod ticket;
-pub mod upnp;
+pub mod tailscale;
 pub mod wake;
-mod wire;
-pub mod yuv;
-
-pub use config::{ClientConfig, HostConfig, QualityPreset, StreamQuality};
-pub use identity::Identity;
-pub use net::{RelayLink, Transport};
-pub use proto::{
-    AudioFormat, ControlMsg, HelloAck, HelloMsg, InputEvent, InputMsg, PacketType, PairPin,
-    PairResult, PowerAction, ProtocolError, SeqCounter, SessionReady, VideoFlags, DEFAULT_PORT,
-    HEADER_LEN, MAGIC, MAX_DATAGRAM, MAX_FRAME_BYTES, PROTO_VERSION,
-};
-pub use ticket::{Candidate, CandidateKind, RelayHint, Ticket};
 
 pub const APP_NAME: &str = "BroLink";
-pub const APP_ID: &str = "brolink";
-/// Clipboard payloads larger than this are truncated rather than fragmented.
-/// Sized so the JSON form still fits one datagram.
-pub const MAX_CLIPBOARD_CHARS: usize = 800;
+/// TCP port of the host's control API, on loopback and on its Tailscale IP.
+pub const CONTROL_PORT: u16 = 47850;
+/// Sunshine's HTTP port (Moonlight talks to this one); its web UI is one up.
+pub const SUNSHINE_PORT: u16 = 47989;
+pub const SUNSHINE_WEB_PORT: u16 = 47990;

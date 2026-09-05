@@ -1,121 +1,80 @@
-//! Whether this PC can be woken remotely, and the MAC a client needs to do it.
-//!
-//! Everything here shells out to PowerShell once, on a background thread: the
-//! adapter/power cmdlets are the documented way to read and change these
-//! settings, and a probe every start is cheap next to the encoder probe.
+//! Whether this PC can be woken remotely, and the MAC a Mac needs to do it.
+//! One PowerShell call, on the service's refresh thread.
 
 use anyhow::{Context, Result};
 use std::net::Ipv4Addr;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct WakeInfo {
-    /// `aa:bb:cc:dd:ee:ff` of the adapter that owns the LAN address.
-    pub mac: Option<String>,
+    /// The adapter that owns the LAN address, and that address.
     pub adapter: String,
-    /// `Some(true)` when the adapter is set to wake on a magic packet *and*
-    /// Windows allows the device to wake the machine.
+    pub description: String,
+    pub lan_ip: Option<Ipv4Addr>,
+    pub mac: Option<String>,
+    /// `Some(true)` when the adapter wakes on a magic packet *and* Windows
+    /// lets the device wake the machine.
     pub magic_packet: Option<bool>,
-    /// Fast Startup makes "shut down" a hybrid hibernate that most adapters
-    /// cannot wake from. Sleep is unaffected.
-    pub fast_startup: Option<bool>,
 }
 
-/// Look up the adapter that owns `lan` and how it is set up for waking.
-pub fn probe(lan: Ipv4Addr) -> WakeInfo {
+/// The adapter Windows would use to reach the internet, which is the one a
+/// wake packet arrives on.
+pub fn probe() -> WakeInfo {
     #[cfg(windows)]
     {
-        let script = format!(
-            "$a = Get-NetIPAddress -AddressFamily IPv4 -IPAddress '{lan}' -ErrorAction SilentlyContinue | Select-Object -First 1; \
-             $n = Get-NetAdapter -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1; \
-             $p = Get-NetAdapterPowerManagement -Name $n.Name -ErrorAction SilentlyContinue; \
+        // The NDIS keyword in the adapter's class key is what the driver
+        // reads; Get-NetAdapterPowerManagement fails outright on some
+        // drivers ("a device attached to the system is not functioning").
+        const SCRIPT: &str = "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -ne 'Tailscale' } | Sort-Object RouteMetric,InterfaceMetric | Select-Object -First 1; \
+             $n = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1; \
+             $ip = (Get-NetIPAddress -InterfaceIndex $r.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress; \
+             $k = Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -Name NetCfgInstanceId -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $n.InterfaceGuid } | Select-Object -First 1; \
+             $wol = ''; if ($k) { $wol = (Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue).'*WakeOnMagicPacket' }; \
              $armed = @(powercfg /devicequery wake_armed) -contains $n.InterfaceDescription; \
-             $h = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled; \
-             Write-Output \"$($n.MacAddress)|$($n.Name)|$($p.WakeOnMagicPacket)|$armed|$h\""
-        );
-        let out = match powershell(&["-NoProfile", "-NonInteractive", "-Command", &script]) {
-            Ok(o) => o,
+             Write-Output \"$($n.MacAddress)|$($n.Name)|$($n.InterfaceDescription)|$ip|$wol|$armed\"";
+        match powershell(SCRIPT) {
+            Ok(o) => parse_probe(&o),
             Err(e) => {
                 tracing::debug!("wake probe: {e:#}");
-                return WakeInfo::default();
+                WakeInfo::default()
             }
-        };
-        parse_probe(&out)
+        }
     }
     #[cfg(not(windows))]
-    {
-        let _ = lan;
-        WakeInfo::default()
-    }
+    WakeInfo::default()
 }
 
-/// Parse `mac|adapter|WakeOnMagicPacket|armed|hiberboot`.
+/// Parse `mac|adapter|description|ip|*WakeOnMagicPacket|armed`, where the
+/// keyword is `1`, `0`, or missing.
 fn parse_probe(line: &str) -> WakeInfo {
-    let mut f = line.trim().split('|');
+    let mut f = line.trim().split('|').map(str::trim);
     let mac = f
         .next()
         .and_then(brolink_core::wake::MacAddr::parse)
         .map(|m| m.to_string());
-    let adapter = f.next().unwrap_or("").trim().to_string();
-    let wol = f.next().unwrap_or("").trim().to_string();
-    let armed = f.next().unwrap_or("").trim().eq_ignore_ascii_case("true");
-    let magic_packet = match wol.as_str() {
-        "Enabled" => Some(armed),
-        "Disabled" | "Unsupported" => Some(false),
-        _ => None,
-    };
-    let fast_startup = match f.next().unwrap_or("").trim() {
-        "0" => Some(false),
-        "1" => Some(true),
+    let adapter = f.next().unwrap_or("").to_string();
+    let description = f.next().unwrap_or("").to_string();
+    let lan_ip = f.next().and_then(|s| s.parse().ok());
+    let wol = f.next().unwrap_or("");
+    let armed = f.next().unwrap_or("").eq_ignore_ascii_case("true");
+    let magic_packet = match wol {
+        "1" | "Enabled" => Some(armed),
+        "0" | "Disabled" | "Unsupported" => Some(false),
         _ => None,
     };
     WakeInfo {
-        mac,
         adapter,
+        description,
+        lan_ip,
+        mac,
         magic_packet,
-        fast_startup,
-    }
-}
-
-/// Turn on magic-packet wake for `adapter`, through a UAC prompt. Blocks until
-/// the elevated PowerShell has finished, so the caller can re-probe.
-pub fn enable_magic_packet(adapter: &str) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let dir = crate::ffmpeg_setup::install_dir();
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("enable-wake.ps1");
-        let name = adapter.replace('\'', "''");
-        std::fs::write(
-            &path,
-            format!(
-                "$ErrorActionPreference = 'Stop'\n\
-                 $n = Get-NetAdapter -Name '{name}'\n\
-                 Set-NetAdapterPowerManagement -Name '{name}' -WakeOnMagicPacket Enabled\n\
-                 # ARP offload lets the card answer for the PC's address while it sleeps,\n\
-                 # which is what makes a wake packet from the internet reach it.\n\
-                 Set-NetAdapterPowerManagement -Name '{name}' -ArpOffload Enabled -ErrorAction SilentlyContinue\n\
-                 powercfg /deviceenablewake \"$($n.InterfaceDescription)\"\n"
-            ),
-        )?;
-        let file = path.display().to_string().replace('\'', "''");
-        let launch = format!(
-            "Start-Process powershell -Verb RunAs -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','{file}')"
-        );
-        powershell(&["-NoProfile", "-NonInteractive", "-Command", &launch])
-            .map(|_| ())
-            .context("elevated PowerShell")
-    }
-    #[cfg(not(windows))]
-    {
-        anyhow::bail!("Wake-on-LAN setup for {adapter} is only supported on Windows")
     }
 }
 
 #[cfg(windows)]
-fn powershell(args: &[&str]) -> Result<String> {
+fn powershell(script: &str) -> Result<String> {
     use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("powershell")
-        .args(args)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(0x0800_0000)
         .output()
         .context("run powershell")?;
@@ -134,23 +93,22 @@ mod tests {
 
     #[test]
     fn probe_output_is_parsed() {
-        let w = parse_probe("AA-BB-CC-DD-EE-FF|Ethernet|Enabled|True|1\r\n");
-        assert_eq!(w.mac.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        let w = parse_probe("02-00-00-00-00-01|Ethernet|Example NIC|192.168.1.10|1|True\r\n");
+        assert_eq!(w.mac.as_deref(), Some("02:00:00:00:00:01"));
         assert_eq!(w.adapter, "Ethernet");
+        assert_eq!(w.description, "Example NIC");
+        assert_eq!(w.lan_ip, Some("192.168.1.10".parse().unwrap()));
         assert_eq!(w.magic_packet, Some(true));
-        assert_eq!(w.fast_startup, Some(true));
 
         // Enabled on the adapter but Windows will not let it wake the PC.
-        let w = parse_probe("AA-BB-CC-DD-EE-FF|Wi-Fi|Enabled|False|0");
+        let w = parse_probe("AA-BB-CC-DD-EE-FF|Wi-Fi|Intel Wi-Fi|10.0.0.5|1|False");
         assert_eq!(w.magic_packet, Some(false));
-        assert_eq!(w.fast_startup, Some(false));
 
-        let w = parse_probe("|||False|");
-        assert!(w.mac.is_none());
+        let w = parse_probe("|||||False");
+        assert!(w.mac.is_none() && w.lan_ip.is_none());
         assert_eq!(w.magic_packet, None);
-        assert_eq!(w.fast_startup, None);
 
-        let w = parse_probe("00-00-00-00-00-00|vEthernet|Unsupported|False|1");
+        let w = parse_probe("00-00-00-00-00-00|vEthernet|Hyper-V|172.16.0.1|0|False");
         assert!(w.mac.is_none(), "a nil MAC is not a wake target");
         assert_eq!(w.magic_packet, Some(false));
     }

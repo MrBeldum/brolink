@@ -30,12 +30,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key>
-  <string>public.app-category.entertainment</string>
+  <string>public.app-category.utilities</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 BroLink Contributors</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>BroLink discovers your Windows PC on the local network.</string>
+  <string>BroLink sends the wake-up packet to your PC over the local network.</string>
 </dict>
 </plist>
 PLIST
