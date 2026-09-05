@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Install the prebuilt Mac app from the latest GitHub release without the
-# Gatekeeper "damaged" dialog: files fetched by curl carry no quarantine
-# flag, unlike a browser download. Usage:
+# Gatekeeper "damaged" dialog: files fetched from the command line carry no
+# quarantine flag, unlike a browser download. Usage, from a checkout or a
+# copy of this file:
 #
-#   curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
+#   bash scripts/install-macos-release.sh
+#
 set -euo pipefail
 REPO="${BROLINK_REPO:-MrBeldum/brolink}"
 URL="https://github.com/$REPO/releases/latest/download/brolink-macos-arm64.tar.gz"
