@@ -1,0 +1,11 @@
+[package]
+name = "brolink-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared egui theme and widgets for the BroLink host and client"
+
+[dependencies]
+brolink-core.workspace = true
+egui.workspace = true

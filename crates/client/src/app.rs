@@ -9,16 +9,24 @@ use brolink_core::discovery::{decode_beacon, join_multicast, prune, upsert, Disc
 use brolink_core::identity::Identity;
 use brolink_core::net::bind_udp_blocking_reuse;
 use brolink_core::proto::{ControlMsg, PowerAction, DEFAULT_PORT};
+use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
-const GOLD: egui::Color32 = egui::Color32::from_rgb(245, 165, 36);
-const BG: egui::Color32 = egui::Color32::from_rgb(10, 12, 16);
-const CARD: egui::Color32 = egui::Color32::from_rgb(22, 27, 34);
-const RED: egui::Color32 = egui::Color32::from_rgb(248, 81, 73);
+/// Widest the lobby's column of cards gets; wider than this and a 1100 px
+/// window reads like a settings page rather than a launcher.
+const COLUMN_WIDTH: f32 = 720.0;
+
+/// The key that frees the pointer, as the user should press it. F8 is a media
+/// key on Mac keyboards unless Fn is held, so say so.
+const RELEASE_KEY: &str = if cfg!(target_os = "macos") {
+    "fn+F8"
+} else {
+    "F8"
+};
 
 #[derive(PartialEq, Clone, Copy)]
 enum Mode {
@@ -36,6 +44,8 @@ pub struct ClientApp {
     video: Arc<VideoSink>,
     target: String,
     pin: String,
+    /// Put the caret in the PIN box the first frame it appears.
+    pin_focus: bool,
     mode: Mode,
     log: Vec<String>,
     error: Option<String>,
@@ -60,6 +70,7 @@ pub struct ClientApp {
     power_control: bool,
     /// A restart or shut down waiting for the user to confirm it.
     pending_power: Option<PowerAction>,
+    brand: ui::Brand,
 }
 
 impl ClientApp {
@@ -71,7 +82,8 @@ impl ClientApp {
         ev: mpsc::UnboundedReceiver<ClientEvent>,
         video: Arc<VideoSink>,
     ) -> Self {
-        apply_theme(&cc.egui_ctx);
+        ui::apply(&cc.egui_ctx);
+        let brand = ui::Brand::new(&cc.egui_ctx);
         let target = cfg.last_ticket.clone();
         let show_hud = cfg.show_hud;
         let discovered = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -84,6 +96,7 @@ impl ClientApp {
             video,
             target,
             pin: String::new(),
+            pin_focus: false,
             mode: Mode::Lobby,
             log: vec!["BroLink client ready.".into()],
             error: None,
@@ -106,6 +119,7 @@ impl ClientApp {
             show_hud,
             power_control: false,
             pending_power: None,
+            brand,
         }
     }
 
@@ -192,6 +206,7 @@ impl ClientApp {
                 ClientEvent::NeedPin { host } => {
                     self.host_name = host;
                     self.mode = Mode::Pin;
+                    self.pin_focus = true;
                     self.log.push("Host asked for a pairing PIN.".into());
                 }
                 ClientEvent::Ready {
@@ -327,119 +342,156 @@ impl eframe::App for ClientApp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Lobby
+// ---------------------------------------------------------------------------
+
 impl ClientApp {
     fn lobby_ui(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.add_space(10.0);
+        ui::top_bar(ctx, "top", |ui| {
+            let (label, tone) = self.status();
+            self.brand
+                .header(ui, "BroLink", "Play your Windows PC", |ui| {
+                    ui::status_pill(ui, label, tone);
+                });
+        });
+        ui::bottom_bar(ctx, "bottom", |ui| {
             ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                ui.heading("BroLink");
-                ui.label(egui::RichText::new("  Play your Windows PC").weak());
+                ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
+                ui.label("·");
+                ui.label(format!("this Mac is “{}”", self.cfg.name));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!(
+                        "{RELEASE_KEY} frees the mouse  ·  F11 fullscreen  ·  Ctrl+Shift+Q disconnects"
+                    ));
+                });
             });
-            ui.add_space(8.0);
         });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(8.0);
-                // Lead with the ways to actually start a session: a PC you have
-                // connected to before, one announcing itself on this network, or
-                // a pasted ticket. Everything else is tucked below.
-                self.saved_card(ui);
-                ui.add_space(12.0);
-                self.discovery_card(ui);
-                ui.add_space(12.0);
-                self.connect_card(ui);
-                if self.mode == Mode::Pin {
-                    ui.add_space(12.0);
-                    self.pin_card(ui);
-                }
-                ui.add_space(12.0);
-                egui::CollapsingHeader::new(egui::RichText::new("Settings").strong().color(GOLD))
-                    .id_salt("settings")
-                    .default_open(false)
-                    .show(ui, |ui| self.settings_ui(ui));
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new(egui::RichText::new("Log").strong().color(GOLD))
-                    .id_salt("log_header")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(160.0)
-                            .stick_to_bottom(true)
-                            .id_salt("log")
-                            .show(ui, |ui| {
-                                for line in &self.log {
-                                    ui.monospace(line);
-                                }
-                            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(P.bg))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(22.0);
+                    ui::content_column(ui, COLUMN_WIDTH, |ui| {
+                        ui.spacing_mut().item_spacing.y = 14.0;
+                        // Lead with whatever starts a session fastest: a PIN the
+                        // host is waiting on, a PC we know, one announcing itself
+                        // on this network, then a pasted ticket. Everything else
+                        // is tucked below.
+                        if self.mode == Mode::Pin {
+                            self.pin_card(ui);
+                        }
+                        self.saved_card(ui);
+                        self.discovery_card(ui);
+                        self.connect_card(ui);
+                        ui::collapsible(ui, "settings", "Settings", false, |ui| {
+                            self.settings_ui(ui)
+                        });
+                        ui::collapsible(ui, "log", "Log", false, |ui| {
+                            ui::log_view(ui, "log_lines", &self.log, 180.0);
+                        });
+                        ui.add_space(10.0);
                     });
-                ui.add_space(16.0);
+                });
             });
-        });
+    }
+
+    /// What the pill in the header says.
+    fn status(&self) -> (&'static str, Tone) {
+        match self.mode {
+            Mode::Connecting => ("CONNECTING", Tone::Accent),
+            Mode::Pin => ("PAIRING", Tone::Accent),
+            Mode::Stream => ("STREAMING", Tone::Success),
+            Mode::Lobby if self.reconnect_at.is_some() => ("RECONNECTING", Tone::Accent),
+            Mode::Lobby => ("READY", Tone::Neutral),
+        }
     }
 
     fn connect_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, "Have a ticket?", |ui| {
-            ui.label("Paste the ticket from BroLink Host, or type an IP / Tailscale address.");
-            ui.add_space(6.0);
-            ui.add(
-                egui::TextEdit::multiline(&mut self.target)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(3)
-                    .hint_text("blk1_… or 192.168.1.20 or 100.x.y.z"),
-            );
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let ready = !self.target.trim().is_empty() && self.mode != Mode::Connecting;
-                if ui
-                    .add_enabled(ready, egui::Button::new("Connect"))
-                    .clicked()
-                {
-                    self.connect();
-                }
-                if self.mode == Mode::Connecting {
-                    ui.spinner();
-                    ui.label(
-                        self.log
-                            .last()
-                            .map(|l| short(l))
-                            .unwrap_or_else(|| "Connecting…".into()),
-                    );
-                    if ui.button("Cancel").clicked() {
-                        self.hangup();
-                        self.mode = Mode::Lobby;
-                    }
-                }
-            });
-            if let Some(err) = &self.error {
+        ui::titled_card(
+            ui,
+            "Connect with a ticket",
+            Some("Paste the ticket from BroLink Host, or type an IP or Tailscale address."),
+            |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.target)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(3)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("blk1_…  or  192.168.1.20  or  100.x.y.z"),
+                );
                 ui.add_space(4.0);
-                ui.colored_label(RED, err);
-            }
-        });
+                ui.horizontal(|ui| {
+                    let ready = !self.target.trim().is_empty() && self.mode != Mode::Connecting;
+                    let mut go = false;
+                    ui.add_enabled_ui(ready, |ui| {
+                        go = ui::primary_button(ui, "Connect").clicked();
+                    });
+                    if go {
+                        self.connect();
+                    }
+                    if self.mode == Mode::Connecting {
+                        ui.add(egui::Spinner::new().size(16.0).color(P.accent));
+                        ui::muted(
+                            ui,
+                            self.log
+                                .last()
+                                .map(|l| short(l))
+                                .unwrap_or_else(|| "Connecting…".into()),
+                        );
+                        if ui::ghost_button(ui, "Cancel").clicked() {
+                            self.hangup();
+                            self.mode = Mode::Lobby;
+                        }
+                    }
+                });
+                if let Some(err) = &self.error {
+                    ui.add_space(4.0);
+                    ui::notice(ui, Tone::Danger, err);
+                }
+            },
+        );
     }
 
     fn pin_card(&mut self, ui: &mut egui::Ui) {
         let mut submit = false;
-        card(ui, "Pairing PIN", |ui| {
-            ui.label(format!(
-                "Enter the 6-digit PIN shown on '{}':",
-                self.host_name
-            ));
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.pin)
-                    .char_limit(6)
-                    .hint_text("000000"),
+        ui::toned_card(ui, Tone::Accent, |ui| {
+            ui::heading(
+                ui,
+                "Pairing PIN",
+                Some(&format!(
+                    "Enter the 6-digit PIN shown on “{}”. You only do this once per PC.",
+                    self.host_name
+                )),
             );
-            self.pin.retain(|c| c.is_ascii_digit());
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                submit = true;
-            }
-            if ui
-                .add_enabled(self.pin.len() == 6, egui::Button::new("Submit PIN"))
-                .clicked()
-            {
-                submit = true;
-            }
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.pin)
+                        .char_limit(6)
+                        .font(egui::FontId::monospace(26.0))
+                        .desired_width(190.0)
+                        .horizontal_align(egui::Align::Center)
+                        .hint_text("000000"),
+                );
+                if self.pin_focus {
+                    resp.request_focus();
+                    self.pin_focus = false;
+                }
+                self.pin.retain(|c| c.is_ascii_digit());
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+                ui.add_enabled_ui(self.pin.len() == 6, |ui| {
+                    if ui::primary_button(ui, "Pair").clicked() {
+                        submit = true;
+                    }
+                });
+                if ui::ghost_button(ui, "Cancel").clicked() {
+                    self.pin.clear();
+                    self.hangup();
+                    self.mode = Mode::Lobby;
+                }
+            });
         });
         if submit && self.pin.len() == 6 {
             let _ = self.cmd.send(ClientCmd::Pin(self.pin.clone()));
@@ -454,47 +506,69 @@ impl ClientApp {
         let mut connect_to: Option<String> = None;
         let mut forget: Option<String> = None;
         let mut wake: Option<(String, String)> = None;
-        card(ui, "Your PCs", |ui| {
-            if let Some(at) = self.reconnect_at {
-                let left = at.saturating_duration_since(Instant::now()).as_secs();
-                ui.label(format!(
-                    "Reconnecting to {} in {left}s…",
-                    short(&self.target)
-                ));
-                if ui.button("Stop reconnecting").clicked() {
-                    self.hangup();
+        let now = unix_now();
+        ui::titled_card(
+            ui,
+            "Your PCs",
+            Some(
+                "Connect wakes a sleeping PC on its own. Leave the PC asleep rather than shut \
+                 down: it comes back in seconds with everything still open.",
+            ),
+            |ui| {
+                if let Some(at) = self.reconnect_at {
+                    let left = at.saturating_duration_since(Instant::now()).as_secs();
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(14.0).color(P.accent));
+                        ui.label(format!(
+                            "Reconnecting to {} in {left}s…",
+                            short(&self.target)
+                        ));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui::ghost_button(ui, "Stop").clicked() {
+                                self.hangup();
+                            }
+                        });
+                    });
+                    if !self.cfg.saved_hosts.is_empty() {
+                        ui::row_separator(ui);
+                    }
                 }
-            }
-            for h in &self.cfg.saved_hosts {
-                ui.horizontal(|ui| {
-                    ui.strong(&h.name);
-                    ui.weak(short(&h.ticket));
-                    if ui
-                        .add_enabled(self.mode != Mode::Connecting, egui::Button::new("Connect"))
-                        .on_hover_text("Wakes the PC first if it is asleep")
-                        .clicked()
-                    {
-                        connect_to = Some(h.ticket.clone());
+                let busy = self.mode == Mode::Connecting;
+                for (i, h) in self.cfg.saved_hosts.iter().enumerate() {
+                    if i > 0 {
+                        ui::row_separator(ui);
                     }
-                    if let Some(mac) = &h.wake_mac {
-                        if ui
-                            .small_button("Wake")
-                            .on_hover_text(format!("Send a wake-up to {mac} without connecting"))
-                            .clicked()
-                        {
-                            wake = Some((h.ticket.clone(), mac.clone()));
+                    let detail = format!(
+                        "{}  ·  {}",
+                        short(&h.ticket),
+                        ago(h.last_connected_unix, now)
+                    );
+                    ui::list_row(ui, &h.name, &detail, |ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            if ui::primary_button(ui, "Connect")
+                                .on_hover_text("Wakes the PC first if it is asleep")
+                                .clicked()
+                            {
+                                connect_to = Some(h.ticket.clone());
+                            }
+                        });
+                        if let Some(mac) = &h.wake_mac {
+                            if ui::ghost_button(ui, "Wake")
+                                .on_hover_text(format!(
+                                    "Send a wake-up to {mac} without connecting"
+                                ))
+                                .clicked()
+                            {
+                                wake = Some((h.ticket.clone(), mac.clone()));
+                            }
                         }
-                    }
-                    if ui.small_button("Remove").clicked() {
-                        forget = Some(h.ticket.clone());
-                    }
-                });
-            }
-            ui.weak(
-                "Connect wakes a sleeping PC on its own. Leave the PC asleep rather than \
-                 shut down: it comes back in seconds and the session is still there.",
-            );
-        });
+                        if ui::danger_button(ui, "Remove").clicked() {
+                            forget = Some(h.ticket.clone());
+                        }
+                    });
+                }
+            },
+        );
         if let Some((ticket, mac)) = wake {
             let _ = self.cmd.send(ClientCmd::Wake { ticket, mac });
         }
@@ -510,23 +584,32 @@ impl ClientApp {
 
     fn discovery_card(&mut self, ui: &mut egui::Ui) {
         let mut connect_to: Option<String> = None;
-        card(ui, "PCs on this network", |ui| {
+        ui::titled_card(ui, "On this network", None, |ui| {
             if self.hosts.is_empty() {
-                ui.weak(
-                    "No BroLink hosts announcing yet. Make sure the Windows host is running \
-                     and on the same network.",
+                ui::empty_state(
+                    ui,
+                    "Looking for PCs running BroLink Host on this network…",
+                    true,
                 );
             }
-            for h in &self.hosts {
-                ui.horizontal(|ui| {
-                    ui.strong(&h.beacon.name);
-                    ui.weak(h.addr.to_string());
-                    if ui.button("Connect").clicked() {
-                        // Prefer the ticket the beacon carries: it names the
-                        // host key, so the client can verify who answered
-                        // instead of trusting whatever replies from that IP.
-                        connect_to = Some(h.connect_target());
-                    }
+            let busy = self.mode == Mode::Connecting;
+            for (i, h) in self.hosts.iter().enumerate() {
+                if i > 0 {
+                    ui::row_separator(ui);
+                }
+                let detail = format!(
+                    "{}  ·  {}  ·  v{}",
+                    h.addr, h.beacon.encoder, h.beacon.version
+                );
+                ui::list_row(ui, &h.beacon.name, &detail, |ui| {
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if ui::primary_button(ui, "Connect").clicked() {
+                            // Prefer the ticket the beacon carries: it names the
+                            // host key, so the client can verify who answered
+                            // instead of trusting whatever replies from that IP.
+                            connect_to = Some(h.connect_target());
+                        }
+                    });
                 });
             }
         });
@@ -537,54 +620,72 @@ impl ClientApp {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Quality").strong());
-        ui.horizontal(|ui| {
-            for p in QualityPreset::all() {
-                if p == QualityPreset::Custom {
-                    continue;
+        let mut save = false;
+        ui::setting_row(
+            ui,
+            "Quality",
+            Some("Applies on the next connection. Competitive is best for games."),
+            |ui| {
+                let mut preset = self.cfg.quality.preset;
+                let options = [
+                    (QualityPreset::Competitive, "Competitive"),
+                    (QualityPreset::Balanced, "Balanced"),
+                    (QualityPreset::Quality, "Quality"),
+                ];
+                if ui::segmented(ui, &options, &mut preset) {
+                    self.cfg.quality = StreamQuality::from_preset(preset);
+                    save = true;
                 }
-                let sel = self.cfg.quality.preset == p;
-                if ui.selectable_label(sel, p.as_str()).clicked() {
-                    self.cfg.quality = StreamQuality::from_preset(p);
-                    let _ = self.cfg.save();
-                }
+            },
+        );
+        ui::setting_row(ui, "Volume", None, |ui| {
+            let resp = ui.add(
+                egui::Slider::new(&mut self.cfg.volume, 0.0..=2.0)
+                    .show_value(false)
+                    .trailing_fill(true),
+            );
+            ui::caption(ui, format!("{:.0}%", self.cfg.volume * 100.0));
+            if resp.drag_stopped() {
+                save = true;
             }
         });
-        ui.weak("Applies on the next connection. Competitive is best for games.");
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label("Volume");
-            if ui
-                .add(egui::Slider::new(&mut self.cfg.volume, 0.0..=2.0))
-                .drag_stopped()
-            {
-                let _ = self.cfg.save();
-            }
-        });
-        if ui
-            .checkbox(
-                &mut self.cfg.auto_reconnect,
-                "Reconnect if the session drops",
-            )
-            .changed()
-        {
-            let _ = self.cfg.save();
+        ui::row_separator(ui);
+        if ui::toggle_row(
+            ui,
+            &mut self.cfg.auto_reconnect,
+            "Reconnect if the session drops",
+            None,
+        ) {
+            save = true;
         }
-        if ui
-            .checkbox(&mut self.cfg.enable_clipboard, "Share the clipboard")
-            .changed()
-        {
-            let _ = self.cfg.save();
+        if ui::toggle_row(
+            ui,
+            &mut self.cfg.enable_clipboard,
+            "Share the clipboard",
+            None,
+        ) {
+            save = true;
         }
-        if ui
-            .checkbox(&mut self.cfg.show_hud, "Show the overlay while streaming")
-            .changed()
-        {
+        if ui::toggle_row(
+            ui,
+            &mut self.cfg.show_hud,
+            "Show the overlay while streaming",
+            Some("F7 toggles it during a session"),
+        ) {
             self.show_hud = self.cfg.show_hud;
+            save = true;
+        }
+        if save {
             let _ = self.cfg.save();
         }
     }
+}
 
+// ---------------------------------------------------------------------------
+// Stream
+// ---------------------------------------------------------------------------
+
+impl ClientApp {
     fn stream_ui(&mut self, ctx: &egui::Context) {
         let (release, disconnect, toggle_fs, toggle_hud) = ctx.input(|i| {
             (
@@ -640,8 +741,10 @@ impl ClientApp {
                         });
                     }
                     None => {
-                        ui.centered_and_justified(|ui| {
-                            ui.label("Waiting for video…");
+                        ui.vertical_centered(|ui| {
+                            ui.add_space((avail.y / 2.0 - 24.0).max(0.0));
+                            ui.add(egui::Spinner::new().size(18.0).color(P.muted));
+                            ui::muted(ui, "Waiting for video…");
                         });
                     }
                 }
@@ -651,83 +754,9 @@ impl ClientApp {
         }
 
         if self.show_hud {
-            let mut power: Option<PowerAction> = None;
-            let mut confirm = false;
-            let mut cancel = false;
-            egui::Area::new(egui::Id::new("hud"))
-                .fixed_pos(egui::pos2(16.0, 12.0))
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        let hud = if self.captured {
-                            format!(
-                                "Mouse captured — press F8 or switch to another window to free it  ·  Ctrl+Shift+Q quit  ·  {}",
-                                self.stats
-                            )
-                        } else {
-                            format!(
-                                "Click the picture to control the PC  ·  {}",
-                                self.stats
-                            )
-                        };
-                        ui.label(
-                            egui::RichText::new(hud)
-                                .size(13.0)
-                                .color(egui::Color32::from_white_alpha(220)),
-                        );
-                        if self.power_control && !self.captured {
-                            ui.menu_button("PC ▾", |ui| {
-                                if ui.button("Sleep").clicked() {
-                                    power = Some(PowerAction::Sleep);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Restart…").clicked() {
-                                    power = Some(PowerAction::Restart);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Shut down…").clicked() {
-                                    power = Some(PowerAction::Shutdown);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Disconnect").clicked() {
-                                    power = None;
-                                    cancel = true;
-                                    ui.close_menu();
-                                }
-                            });
-                        }
-                    });
-                    if let Some(p) = self.pending_power {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(
-                                RED,
-                                format!(
-                                    "{} the PC? Unsaved work on it will be lost.",
-                                    capitalize(p.as_str())
-                                ),
-                            );
-                            if ui.button(capitalize(p.as_str())).clicked() {
-                                confirm = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.pending_power = None;
-                            }
-                        });
-                    }
-                });
-            match power {
-                // Sleep is safe to do at once: everything is still there on wake.
-                Some(PowerAction::Sleep) => self.send_power(PowerAction::Sleep),
-                Some(p) => self.pending_power = Some(p),
-                None => {}
-            }
-            if confirm {
-                if let Some(p) = self.pending_power {
-                    self.send_power(p);
-                }
-            }
-            if cancel {
-                self.hangup();
-                self.leave_stream(ctx);
+            self.hud(ctx);
+            if self.mode == Mode::Lobby {
+                // The HUD's Disconnect fired.
                 return;
             }
         }
@@ -747,6 +776,113 @@ impl ClientApp {
             let _ = self.cmd.send(ClientCmd::Input(events));
         }
     }
+
+    /// The overlay in the top-left corner of the stream.
+    fn hud(&mut self, ctx: &egui::Context) {
+        let mut power: Option<PowerAction> = None;
+        let mut confirm = false;
+        let mut leave = false;
+        let white = |a: u8| egui::Color32::from_white_alpha(a);
+        egui::Area::new(egui::Id::new("hud"))
+            .fixed_pos(egui::pos2(14.0, 12.0))
+            .show(ctx, |ui| {
+                ui::overlay_frame().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        ui.label(egui::RichText::new("●").size(9.0).color(P.success));
+                        ui.label(
+                            egui::RichText::new(&self.host_name)
+                                .font(brolink_ui::theme::medium(13.0))
+                                .color(white(235)),
+                        );
+                        hud_divider(ui);
+                        let hint = if self.captured {
+                            format!("Mouse captured  ·  {RELEASE_KEY} or switch windows to release")
+                        } else {
+                            "Click the picture to control the PC".to_string()
+                        };
+                        ui.label(egui::RichText::new(hint).size(12.5).color(white(200)));
+                        if !self.stats.is_empty() {
+                            hud_divider(ui);
+                            ui.label(
+                                egui::RichText::new(&self.stats)
+                                    .size(12.0)
+                                    .color(white(140)),
+                            );
+                        }
+                        if !self.captured {
+                            hud_divider(ui);
+                            if self.power_control {
+                                ui::menu_button(ui, "PC", |ui| {
+                                    if ui.button("Sleep").clicked() {
+                                        power = Some(PowerAction::Sleep);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Restart…").clicked() {
+                                        power = Some(PowerAction::Restart);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Shut down…").clicked() {
+                                        power = Some(PowerAction::Shutdown);
+                                        ui.close_menu();
+                                    }
+                                });
+                            }
+                            if ui::ghost_button(ui, "Disconnect").clicked() {
+                                leave = true;
+                            }
+                        }
+                    });
+                });
+                if let Some(p) = self.pending_power {
+                    ui.add_space(6.0);
+                    ui::overlay_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            ui.label(egui::RichText::new("●").size(9.0).color(P.danger));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} the PC? Unsaved work on it will be lost.",
+                                    capitalize(p.as_str())
+                                ))
+                                .color(white(235)),
+                            );
+                            if ui::toned_button(ui, &capitalize(p.as_str()), Tone::Danger).clicked()
+                            {
+                                confirm = true;
+                            }
+                            if ui::ghost_button(ui, "Cancel").clicked() {
+                                self.pending_power = None;
+                            }
+                        });
+                    });
+                }
+            });
+        match power {
+            // Sleep is safe to do at once: everything is still there on wake.
+            Some(PowerAction::Sleep) => self.send_power(PowerAction::Sleep),
+            Some(p) => self.pending_power = Some(p),
+            None => {}
+        }
+        if confirm {
+            if let Some(p) = self.pending_power {
+                self.send_power(p);
+            }
+        }
+        if leave {
+            self.hangup();
+            self.leave_stream(ctx);
+        }
+    }
+}
+
+fn hud_divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        brolink_ui::theme::stroke(1.0, egui::Color32::from_white_alpha(40)),
+    );
 }
 
 fn capitalize(s: &str) -> String {
@@ -767,30 +903,30 @@ fn short(target: &str) -> String {
     }
 }
 
-fn apply_theme(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BG;
-    visuals.window_fill = CARD;
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(33, 38, 45);
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 54, 61);
-    visuals.selection.bg_fill = GOLD;
-    visuals.selection.stroke.color = GOLD;
-    style.visuals = visuals;
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    ctx.set_style(style);
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
-fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new()
-        .fill(CARD)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(14))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(title).strong().size(16.0).color(GOLD));
-            ui.add_space(6.0);
-            add(ui);
-        });
+/// "last used 3 h ago", for a saved PC. Coarse on purpose; it is a memory
+/// jogger, not a log.
+fn ago(then_unix: u64, now_unix: u64) -> String {
+    if then_unix == 0 {
+        return "not connected yet".into();
+    }
+    let d = now_unix.saturating_sub(then_unix);
+    let s = if d < 60 {
+        "just now".to_string()
+    } else if d < 3600 {
+        format!("{} min ago", d / 60)
+    } else if d < 86_400 {
+        format!("{} h ago", d / 3600)
+    } else {
+        format!("{} d ago", d / 86_400)
+    };
+    format!("last used {s}")
 }
 
 /// Listen for host beacons on the LAN.
@@ -844,5 +980,188 @@ mod tests {
         // would panic, so anything short enough is returned whole.
         let s = short(&"é".repeat(20));
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn last_used_is_coarse_and_never_negative() {
+        assert_eq!(ago(0, 1_000), "not connected yet");
+        assert_eq!(ago(1_000, 1_030), "last used just now");
+        assert_eq!(ago(1_000, 1_000 + 5 * 60), "last used 5 min ago");
+        assert_eq!(ago(1_000, 1_000 + 3 * 3600), "last used 3 h ago");
+        assert_eq!(ago(1_000, 1_000 + 9 * 86_400), "last used 9 d ago");
+        // A clock that went backwards reads as "just now", not a panic.
+        assert_eq!(ago(5_000, 1_000), "last used just now");
+    }
+}
+
+/// Render the screens to PNGs without a host, a display, or a Windows PC.
+///
+/// ```text
+/// cargo test -p brolink-client snapshots -- --ignored --nocapture
+/// ```
+///
+/// Output lands in `target/ui-snapshots/`. Ignored by default: it needs a GPU
+/// (wgpu picks Metal, Vulkan or DX12) and is a review aid, not a test.
+#[cfg(test)]
+mod snapshots {
+    use super::*;
+    use brolink_core::config::SavedHost;
+    use brolink_core::discovery::Beacon;
+
+    fn out_dir() -> std::path::PathBuf {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-snapshots");
+        std::fs::create_dir_all(&dir).expect("create snapshot dir");
+        dir
+    }
+
+    fn save(img: image::RgbaImage, name: &str) {
+        let path = out_dir().join(name);
+        img.save(&path).expect("write png");
+        eprintln!("wrote {}", path.display());
+    }
+
+    fn sample_cfg() -> ClientConfig {
+        let now = unix_now();
+        ClientConfig {
+            name: "Example Mac".into(),
+            saved_hosts: vec![
+                SavedHost {
+                    name: "GAMING-PC".into(),
+                    ticket: "blk1_eyJ2IjoxLCJuIjoiR0FNSU5HLVBDIiwiayI6IjM0YjA".into(),
+                    last_connected_unix: now - 2 * 3600,
+                    wake_mac: Some("02:00:00:00:00:02".into()),
+                },
+                SavedHost {
+                    name: "OFFICE".into(),
+                    ticket: "blk1_eyJ2IjoxLCJuIjoiT0ZGSUNFIiwiayI6IjA4ZjEwYz".into(),
+                    last_connected_unix: now - 6 * 86_400,
+                    wake_mac: None,
+                },
+            ],
+            ..ClientConfig::default()
+        }
+    }
+
+    fn build(
+        size: egui::Vec2,
+        setup: impl FnOnce(&egui::Context, &mut ClientApp),
+    ) -> egui_kittest::Harness<'static, ClientApp> {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_ev_tx, ev_rx) = mpsc::unbounded_channel();
+        // Keep the command receiver alive so sends do not fail noisily.
+        std::mem::forget(cmd_rx);
+        let video = Arc::new(VideoSink::default());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(2.0)
+            .with_max_steps(8)
+            .build_eframe(|cc| {
+                let mut app =
+                    ClientApp::new(cc, sample_cfg(), Identity::generate(), cmd_tx, ev_rx, video);
+                setup(&cc.egui_ctx, &mut app);
+                app
+            });
+        harness.run_steps(3);
+        harness
+    }
+
+    fn discovered(name: &str, addr: &str) -> DiscoveredHost {
+        DiscoveredHost {
+            beacon: Beacon {
+                name: name.into(),
+                host_id: "3f9a1c".into(),
+                port: DEFAULT_PORT,
+                version: env!("CARGO_PKG_VERSION").into(),
+                encoder: "h264_nvenc".into(),
+                ticket: String::new(),
+            },
+            addr: addr.parse().unwrap(),
+            last_seen: Instant::now(),
+        }
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn lobby() {
+        let mut h = build(egui::vec2(1100.0, 720.0), |_, app| {
+            app.discovered
+                .lock()
+                .push(discovered("GAMING-PC", "192.168.1.20:47850"));
+        });
+        save(h.render().unwrap(), "client-lobby.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn lobby_pairing_and_error() {
+        let mut h = build(egui::vec2(1100.0, 720.0), |_, app| {
+            app.mode = Mode::Pin;
+            app.host_name = "GAMING-PC".into();
+            app.pin = "42".into();
+            app.error = Some("Timed out waiting for the host to answer.".into());
+        });
+        save(h.render().unwrap(), "client-lobby-pin.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn lobby_empty() {
+        let mut h = build(egui::vec2(1100.0, 720.0), |_, app| {
+            app.cfg.saved_hosts.clear();
+        });
+        save(h.render().unwrap(), "client-lobby-empty.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn lobby_settings_open() {
+        let mut h = build(egui::vec2(1100.0, 1200.0), |ctx, app| {
+            app.cfg.saved_hosts.truncate(1);
+            brolink_ui::set_collapsible_open(ctx, "settings", true);
+        });
+        save(h.render().unwrap(), "client-lobby-settings.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn stream() {
+        let mut h = build(egui::vec2(1100.0, 720.0), |ctx, app| {
+            let (w, hgt) = (1920usize, 1080usize);
+            let mut px = vec![0u8; w * hgt * 4];
+            for y in 0..hgt {
+                for x in 0..w {
+                    let i = (y * w + x) * 4;
+                    px[i] = (x * 255 / w) as u8 / 2 + 20;
+                    px[i + 1] = (y * 255 / hgt) as u8 / 2 + 30;
+                    px[i + 2] = 70;
+                    px[i + 3] = 255;
+                }
+            }
+            let img = egui::ColorImage::from_rgba_unmultiplied([w, hgt], &px);
+            app.video_tex = Some(ctx.load_texture("fake", img, egui::TextureOptions::LINEAR));
+            app.video_size = [w, hgt];
+            app.mode = Mode::Stream;
+            app.host_name = "GAMING-PC".into();
+            app.encoder = "h264_nvenc".into();
+            app.power_control = true;
+            app.stats =
+                "60 fps  ·  24.8 Mbps  ·  11 ms rtt  ·  dec 1.3 ms  ·  loss 0.0%  ·  h264_nvenc"
+                    .into();
+        });
+        save(h.render().unwrap(), "client-stream.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn stream_confirm_power() {
+        let mut h = build(egui::vec2(1100.0, 720.0), |_, app| {
+            app.mode = Mode::Stream;
+            app.host_name = "GAMING-PC".into();
+            app.power_control = true;
+            app.pending_power = Some(PowerAction::Restart);
+            app.stats = "60 fps  ·  24.8 Mbps  ·  11 ms rtt".into();
+        });
+        save(h.render().unwrap(), "client-stream-confirm.png");
     }
 }

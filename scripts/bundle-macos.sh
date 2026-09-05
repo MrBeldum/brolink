@@ -37,4 +37,15 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-echo "wrote $APP"
+# Sign the bundle. Ad-hoc by default: Apple Silicon refuses to launch an
+# unsigned binary at all, and the linker's signature does not cover the
+# bundle. Set CODESIGN_IDENTITY to a "Developer ID Application" certificate
+# for a build Gatekeeper accepts once notarized (see docs/MACOS.md).
+IDENTITY="${CODESIGN_IDENTITY:--}"
+codesign --force --deep --sign "$IDENTITY" "$APP"
+codesign --verify --deep --strict "$APP"
+if [[ "$IDENTITY" == "-" ]]; then
+  echo "wrote $APP (ad-hoc signed; set CODESIGN_IDENTITY for a Developer ID build)"
+else
+  echo "wrote $APP (signed as $IDENTITY; notarize before distributing)"
+fi

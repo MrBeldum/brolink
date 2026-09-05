@@ -30,9 +30,11 @@ A relay, if you use one, only ever sees ciphertext.
 2. If the PC is asleep, the Mac wakes it (Wake-on-LAN, also from another
    network through the router mapping the host set up) and connects once it
    answers, usually within 15 s.
-3. Play, work, whatever. Click the picture to capture the mouse; **F8** frees it.
-4. Done? Press **F8**, open **PC ▾** in the HUD, and pick **Sleep** (or restart
-   / shut down). The session ends cleanly and the PC goes down.
+3. Play, work, whatever. Click the picture to capture the mouse; **F8**
+   (**fn+F8** on a Mac keyboard) frees it, and so does switching to another
+   app.
+4. Done? Free the mouse, open **PC ▾** in the overlay, and pick **Sleep** (or
+   restart / shut down). The session ends cleanly and the PC goes down.
 
 Sleep is the state to leave the PC in: it comes back in seconds with every
 window still open, and the network card keeps listening for the wake packet.
@@ -86,8 +88,8 @@ open dist/BroLink.app
 ```
 
 Paste the ticket, click **Connect**, enter the PIN once. Click the picture to
-capture the mouse. **F8** releases it. **F11** fullscreen. **F7** hides the
-HUD. **Ctrl+Shift+Q** disconnects.
+capture the mouse. **fn+F8** releases it (so does switching to another app).
+**F11** fullscreen. **F7** hides the overlay. **Ctrl+Shift+Q** disconnects.
 
 Use **borderless windowed** in games. Exclusive fullscreen can bypass Desktop
 Duplication on some titles.
@@ -186,6 +188,18 @@ time. It also plays a 440 Hz tone for the host to capture and requires 100 ms
 of it to reach the client's output device, with a non-zero peak. Pass
 `-NoAudio` on a machine with no output device.
 
+### Looking at the UI without a PC
+
+Both windows can be rendered to PNGs on any machine with a GPU, no host, no
+display and no Windows PC required:
+
+```bash
+cargo test -p brolink-client -p brolink-host snapshots -- --ignored
+```
+
+The images land in `target/ui-snapshots/`. Use them to review a visual change
+before shipping it; they are not compared against anything.
+
 ### What this does not cover
 
 The loopback runs a Windows client against a Windows host over `127.0.0.1`.
@@ -199,6 +213,7 @@ which are unit-tested. Treat a green loopback as "the pipeline works", not
 crates/core     protocol, crypto, tickets, STUN, UPnP, discovery, wake, rendezvous
 crates/host     Windows host (capture / encode / input / power / GUI)
 crates/client   Mac + Windows client (decode / display / input / GUI)
+crates/ui       the theme and widgets both GUIs are built from
 crates/relay    optional UDP relay + rendezvous
 deploy/         systemd unit and Dockerfile for the relay
 docs/           protocol and platform notes

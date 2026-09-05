@@ -26,5 +26,17 @@ needs `-x264-params sliced-threads=0:slices=1` for this, and `gdigrab` capture
 needs an explicit `-pix_fmt nv12` or it produces 4:4:4 output the client
 cannot decode.
 
+Both windows are built from `crates/ui` (`brolink-ui`): one palette, one
+typeface, one set of cards, rows, pills and buttons. Put new visual elements
+there rather than styling them inline in an app, so the host and client keep
+looking like one product. To see what a change looks like without a Windows
+PC or a display, render the screens to PNGs:
+
+```bash
+cargo test -p brolink-client -p brolink-host snapshots -- --ignored
+```
+
+They land in `target/ui-snapshots/`.
+
 Please do not wrap Sunshine or Moonlight as a hidden subprocess — BroLink
 owns its protocol.

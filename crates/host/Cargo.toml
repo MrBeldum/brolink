@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 brolink-core.workspace = true
+brolink-ui.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true }
@@ -56,3 +57,9 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
 ] }
+
+[dev-dependencies]
+# Renders the screens to PNGs without a display or a host, so the UI can be
+# reviewed from any machine. See the `snapshots` test module in app.rs.
+egui_kittest = { version = "0.31", features = ["wgpu", "eframe"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

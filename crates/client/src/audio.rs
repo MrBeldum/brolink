@@ -569,4 +569,74 @@ mod tests {
         assert_eq!(out, [0.0; 64], "muted output is silent");
         assert_eq!(stats.frames_out(), 32, "but the frames were still consumed");
     }
+    /// Opens the real default output device and proves the callback runs.
+    ///
+    /// Ignored by default so CI machines without audio hardware stay green.
+    /// Run it on the Mac to confirm CoreAudio accepts the stream
+    /// `pick_output_config` chooses (the "silent on Mac" report):
+    ///
+    /// ```text
+    /// cargo test -p brolink-client output_device -- --ignored --nocapture
+    /// ```
+    ///
+    /// The player is muted, so nothing is audible; `frames_out` only moves
+    /// when the device actually pulls samples from the callback.
+    #[test]
+    #[ignore = "needs an audio output device"]
+    fn output_device_opens_and_the_callback_runs() {
+        use std::f32::consts::PI;
+
+        let device = cpal::default_host()
+            .default_output_device()
+            .expect("a default output device");
+        let picked = pick_output_config(&device).expect("pick a config");
+        eprintln!(
+            "picked {} Hz, {} ch, {:?} (device default {} Hz, {:?})",
+            picked.sample_rate().0,
+            picked.channels(),
+            picked.sample_format(),
+            device
+                .default_output_config()
+                .map(|c| c.sample_rate().0)
+                .unwrap_or(0),
+            device
+                .default_output_config()
+                .map(|c| c.sample_format())
+                .ok(),
+        );
+
+        let stats = Arc::new(AudioStats::default());
+        let player = AudioPlayer::start(0.0, stats.clone()).expect("open the output device");
+        // 300 ms of a 440 Hz tone, delivered as 20 ms packets in real time the
+        // way the network does. One big push would just be trimmed to the
+        // prebuffer by the overrun guard.
+        let packet = SOURCE_RATE as usize / 50;
+        for n in 0..15 {
+            let tone: Vec<(i16, i16)> = (n * packet..(n + 1) * packet)
+                .map(|i| {
+                    let v =
+                        ((i as f32 * 440.0 * 2.0 * PI / SOURCE_RATE as f32).sin() * 8000.0) as i16;
+                    (v, v)
+                })
+                .collect();
+            player.push_s16_48k_stereo(&pcm(&tone));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        assert!(stats.frames_in() > 0, "nothing was buffered");
+        // The same bar the Windows loopback test sets: 100 ms actually played.
+        assert!(
+            stats.frames_out() >= SOURCE_RATE as u64 / 10,
+            "the output stream pulled only {} of {} buffered frames",
+            stats.frames_out(),
+            stats.frames_in()
+        );
+        eprintln!(
+            "audio device OK: {} frames in, {} frames out, peak {}",
+            stats.frames_in(),
+            stats.frames_out(),
+            stats.peak()
+        );
+    }
 }

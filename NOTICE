@@ -14,3 +14,8 @@ https://www.openh264.org/BINARY_LICENSE.txt
 ViGEmBus (optional, for virtual Xbox 360 gamepads on the Windows host)
 is a separate driver by Nefarius, MIT licensed.
 https://github.com/nefarius/ViGEmBus
+
+The host and client user interfaces embed the Inter typeface by Rasmus
+Andersson and the Inter Project Authors, licensed under the SIL Open Font
+License 1.1. See crates/ui/assets/LICENSE-Inter.txt.
+https://github.com/rsms/inter
