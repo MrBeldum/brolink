@@ -331,7 +331,10 @@ impl Service {
                 self.log(format!("paired \"{}\"", p.name));
                 Response::json(200, &Ack::ok())
             }
-            Err(e) => Response::json(502, &Ack::err(e.to_string())),
+            Err(e) => {
+                self.log(format!("PIN from \"{}\" refused: {e:#}", p.name));
+                Response::json(502, &Ack::err(e.to_string()))
+            }
         }
     }
 

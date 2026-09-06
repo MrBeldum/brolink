@@ -681,7 +681,7 @@ mod snapshots {
             power_allowed: true,
             setup: vec![],
             log: vec![
-                "BroLink Host 3.0.0 listening on TCP 47850".into(),
+                "BroLink Host 3.0.1 listening on TCP 47850".into(),
                 "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
                 "Sunshine is running and BroLink is logged in".into(),

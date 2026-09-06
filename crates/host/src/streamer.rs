@@ -91,17 +91,7 @@ impl Api<'_> {
     /// Releases up to 2026.5 take `{pin, name}`; later ones list the waiting
     /// requests on `GET /api/pin` and want the request's `pairing_id` too.
     pub fn submit_pin(&self, pin: &str, name: &str) -> Result<()> {
-        let pending: Vec<Option<String>> = match self.call("GET", "/api/pin", None) {
-            Ok(v) => v["pairings"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|p| p["id"].as_str().map(|s| Some(s.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(_) => vec![None],
-        };
+        let pending = pending_pairings(self.call("GET", "/api/pin", None).ok());
         for id in pending {
             let mut body = serde_json::json!({ "pin": pin, "name": name });
             if let Some(id) = id {
@@ -143,6 +133,27 @@ impl Api<'_> {
 
     pub fn install_gamepad_driver(&self) -> Result<()> {
         self.call("POST", "/api/vigembus/install", None).map(|_| ())
+    }
+}
+
+/// The pairing ids `GET /api/pin` lists on a Sunshine master build. Every
+/// other reply (a release Sunshine answers 200 `{"error":"Not Found"}`, an
+/// old one 404, curl failing) means "no ids": still send the PIN once
+/// without one, which is what those versions want.
+fn pending_pairings(reply: Option<serde_json::Value>) -> Vec<Option<String>> {
+    let ids: Vec<Option<String>> = reply
+        .as_ref()
+        .and_then(|v| v["pairings"].as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p["id"].as_str().map(|s| Some(s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        vec![None]
+    } else {
+        ids
     }
 }
 
@@ -193,6 +204,23 @@ mod tests {
         let e = parse_reply("").unwrap_err();
         assert!(e.to_string().contains("wrong login"), "{e}");
         assert!(parse_reply("<html>401</html>").is_err());
+    }
+
+    #[test]
+    fn pin_is_sent_once_without_an_id_unless_sunshine_lists_some() {
+        // Release Sunshine: 200 with a "Not Found" body, no pairings key.
+        let not_found = serde_json::json!({"error": "Not Found", "status_code": 404});
+        assert_eq!(pending_pairings(Some(not_found)), vec![None]);
+        assert_eq!(pending_pairings(None), vec![None]);
+        assert_eq!(
+            pending_pairings(Some(serde_json::json!({"pairings": []}))),
+            vec![None]
+        );
+        let master = serde_json::json!({"pairings": [{"id": "a", "name": "mac"}, {"id": "b"}]});
+        assert_eq!(
+            pending_pairings(Some(master)),
+            vec![Some("a".to_string()), Some("b".to_string())]
+        );
     }
 
     #[test]
