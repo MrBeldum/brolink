@@ -1,19 +1,34 @@
 BroLink
 Copyright (c) 2026 BroLink Contributors
+Licensed under the GNU General Public License, version 3 or later (LICENSE).
 
-BroLink starts and configures separate programs that are not part of it
-and are not redistributed with it. Each is downloaded from its own release
-page under its own license:
+Compiled into the client (crates/stream):
 
-  Sunshine (LizardByte), GPL-3.0      https://github.com/LizardByte/Sunshine
-  Moonlight (moonlight-stream), GPL-3.0  https://github.com/moonlight-stream/moonlight-qt
-  Tailscale, BSD-3-Clause client      https://tailscale.com
-  Apollo (ClassicOldSong), GPL-3.0, used if already installed
-                                      https://github.com/ClassicOldSong/Apollo
-  ViGEmBus (Nefarius), MIT, installed through Sunshine on request
-                                      https://github.com/nefarius/ViGEmBus
+  moonlight-common-c, GPL-3.0, Moonlight Game Streaming Project
+    third_party/moonlight-common-c (commit 874ac954, see VERSION there)
+    https://github.com/moonlight-stream/moonlight-common-c
+    Includes ENet (MIT, Lee Salzman) and nanors (MIT, sleepybishop).
+  Opus, BSD-3-Clause, Xiph.Org Foundation; statically linked through the
+    audiopus_sys crate.                     https://opus-codec.org
+  OpenH264, BSD-2-Clause, Cisco Systems. Only the Windows development
+    client uses it, as a software H.264 decoder; the Mac uses VideoToolbox.
+    It is built from source, so Cisco's binary patent grant does not cover
+    it.                                     https://github.com/cisco/openh264
 
-The host and client user interfaces embed the Inter typeface by Rasmus
-Andersson and the Inter Project Authors, licensed under the SIL Open Font
-License 1.1. See crates/ui/assets/LICENSE-Inter.txt.
-https://github.com/rsms/inter
+Shipped inside brolink-windows-x64.zip and installed by setup:
+
+  Sunshine, GPL-3.0, LizardByte. The unmodified Windows installer; the
+    version is pinned in .github/workflows/release.yml and its source is at
+    https://github.com/LizardByte/Sunshine
+
+Used when present, never redistributed:
+
+  Tailscale, BSD-3-Clause client            https://tailscale.com
+  Apollo, GPL-3.0, ClassicOldSong           https://github.com/ClassicOldSong/Apollo
+  ViGEmBus, MIT, Nefarius (installed through Sunshine on request)
+                                            https://github.com/nefarius/ViGEmBus
+
+Fonts:
+
+  Inter, SIL Open Font License 1.1, Rasmus Andersson and the Inter Project
+    Authors. crates/ui/assets/LICENSE-Inter.txt   https://github.com/rsms/inter

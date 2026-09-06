@@ -1,0 +1,352 @@
+//! Drawing decoded frames with wgpu inside an egui rect: two textures (Y and
+//! interleaved UV) and a shader that does the BT.709 conversion.
+
+use brolink_stream::FrameSlot;
+use egui_wgpu::wgpu;
+use std::sync::Arc;
+
+const SHADER: &str = r#"
+struct Uniforms {
+    full_range: u32,
+    srgb_target: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+@group(0) @binding(0) var y_tex: texture_2d<f32>;
+@group(0) @binding(1) var uv_tex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> u: Uniforms;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> VsOut {
+    // One triangle that covers the whole viewport (the callback rect).
+    let x = f32(i32(i & 1u) * 4 - 1);
+    let y = f32(i32(i >> 1u) * 4 - 1);
+    var out: VsOut;
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
+}
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let y = textureSample(y_tex, samp, in.uv).r;
+    let c = textureSample(uv_tex, samp, in.uv).rg;
+    var yy: f32;
+    var cb: f32;
+    var cr: f32;
+    if (u.full_range == 1u) {
+        yy = y;
+        cb = c.x - 0.5;
+        cr = c.y - 0.5;
+    } else {
+        yy = (y - 16.0 / 255.0) * (255.0 / 219.0);
+        cb = (c.x - 128.0 / 255.0) * (255.0 / 224.0);
+        cr = (c.y - 128.0 / 255.0) * (255.0 / 224.0);
+    }
+    let r = yy + 1.5748 * cr;
+    let g = yy - 0.1873 * cb - 0.4681 * cr;
+    let b = yy + 1.8556 * cb;
+    var rgb = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
+    if (u.srgb_target == 1u) {
+        rgb = to_linear(rgb);
+    }
+    return vec4<f32>(rgb, 1.0);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Uniforms {
+    full_range: u32,
+    srgb_target: u32,
+    _pad: [u32; 2],
+}
+
+impl Uniforms {
+    fn bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[..4].copy_from_slice(&self.full_range.to_ne_bytes());
+        b[4..8].copy_from_slice(&self.srgb_target.to_ne_bytes());
+        b
+    }
+}
+
+struct Planes {
+    width: u32,
+    height: u32,
+    y: wgpu::Texture,
+    uv: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
+/// Lives in egui-wgpu's callback resources for the life of the window.
+pub struct Resources {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    uniforms: wgpu::Buffer,
+    srgb_target: bool,
+    planes: Option<Planes>,
+}
+
+impl Resources {
+    pub fn new(device: &wgpu::Device, target: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("brolink video"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("brolink video"),
+            entries: &[
+                texture_entry(0),
+                texture_entry(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("brolink video"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("brolink video"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("brolink video"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brolink video"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            layout,
+            sampler,
+            uniforms,
+            srgb_target: target.is_srgb(),
+            planes: None,
+        }
+    }
+
+    fn planes(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &Planes {
+        let stale = self
+            .planes
+            .as_ref()
+            .is_none_or(|p| p.width != width || p.height != height);
+        if stale {
+            let make = |w, h, format, label| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let y = make(width, height, wgpu::TextureFormat::R8Unorm, "brolink y");
+            let uv = make(
+                width.div_ceil(2),
+                height.div_ceil(2),
+                wgpu::TextureFormat::Rg8Unorm,
+                "brolink uv",
+            );
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("brolink video"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &y.create_view(&Default::default()),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            &uv.create_view(&Default::default()),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.uniforms.as_entire_binding(),
+                    },
+                ],
+            });
+            self.planes = Some(Planes {
+                width,
+                height,
+                y,
+                uv,
+                bind_group,
+            });
+        }
+        self.planes.as_ref().unwrap()
+    }
+
+    /// Upload the newest frame, if there is one.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slot: &FrameSlot) {
+        let Some(frame) = slot.take() else { return };
+        let srgb = self.srgb_target;
+        let planes = self.planes(device, frame.width, frame.height);
+        let write = |tex: &wgpu::Texture, data: &[u8], stride: usize, w: u32, h: u32| {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride as u32),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        write(
+            &planes.y,
+            &frame.y,
+            frame.y_stride,
+            frame.width,
+            frame.height,
+        );
+        write(
+            &planes.uv,
+            &frame.uv,
+            frame.uv_stride,
+            frame.width.div_ceil(2),
+            frame.height.div_ceil(2),
+        );
+        let u = Uniforms {
+            full_range: frame.full_range as u32,
+            srgb_target: srgb as u32,
+            _pad: [0; 2],
+        };
+        queue.write_buffer(&self.uniforms, 0, &u.bytes());
+    }
+}
+
+/// The paint callback egui runs for the video rect.
+pub struct Paint {
+    pub frames: Arc<FrameSlot>,
+}
+
+impl egui_wgpu::CallbackTrait for Paint {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(r) = resources.get_mut::<Resources>() {
+            r.upload(device, queue, &self.frames);
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Some(r) = resources.get::<Resources>() else {
+            return;
+        };
+        let Some(planes) = &r.planes else { return };
+        pass.set_pipeline(&r.pipeline);
+        pass.set_bind_group(0, &planes.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+/// Install the shared GPU resources; call once when the window is created.
+pub fn install(render_state: &egui_wgpu::RenderState) {
+    let res = Resources::new(&render_state.device, render_state.target_format);
+    render_state.renderer.write().callback_resources.insert(res);
+}

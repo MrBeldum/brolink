@@ -2,24 +2,26 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/stream",
     "crates/host",
     "crates/client",
     "crates/ui",
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-or-later"
 authors = ["BroLink Contributors"]
-description = "Your Windows PC on your Mac: Sunshine + Moonlight over Tailscale, with wake and sleep"
+description = "Your Windows PC on your Mac"
 repository = "https://github.com/MrBeldum/brolink"
 homepage = "https://github.com/MrBeldum/brolink"
 readme = "README.md"
 
 [workspace.dependencies]
-brolink-core = { path = "crates/core", version = "2.0.0" }
-brolink-ui = { path = "crates/ui", version = "2.0.0" }
+brolink-core = { path = "crates/core", version = "3.0.0" }
+brolink-stream = { path = "crates/stream", version = "3.0.0" }
+brolink-ui = { path = "crates/ui", version = "3.0.0" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,8 +32,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 rand = "0.8"
 directories = "5"
 clap = { version = "4", features = ["derive"] }
-eframe = { version = "0.31", default-features = true }
+eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
 egui = "0.31"
+egui-wgpu = "0.31"
 
 [profile.release]
 lto = "thin"
@@ -42,3 +45,6 @@ strip = true
 
 [profile.dev]
 opt-level = 1
+# The decoders and the protocol engine are too slow unoptimised.
+[profile.dev.package."*"]
+opt-level = 2

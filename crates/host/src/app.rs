@@ -34,6 +34,8 @@ pub struct HostApp {
     brand: ui::Brand,
     confirm_unpair: Option<String>,
     busy_since: Option<Instant>,
+    /// The Sunshine installer sits beside the exe, so setup needs no download.
+    bundled_sunshine: bool,
 }
 
 impl HostApp {
@@ -53,6 +55,7 @@ impl HostApp {
             brand: ui::Brand::new(&cc.egui_ctx),
             confirm_unpair: None,
             busy_since: None,
+            bundled_sunshine: std::env::current_exe().is_ok_and(|e| setup::bundled_sunshine(&e)),
         }
     }
 
@@ -138,10 +141,9 @@ impl eframe::App for HostApp {
 
         ui::top_bar(ctx, "top", |ui| {
             let (label, tone) = pill(status.as_ref(), service_error.as_deref());
-            self.brand
-                .header(ui, "BroLink Host", "Your PC, from your Mac", |ui| {
-                    ui::status_pill(ui, label, tone);
-                });
+            self.brand.header(ui, "BroLink Host", |ui| {
+                ui::status_pill(ui, label, tone);
+            });
         });
 
         ui::bottom_bar(ctx, "bottom", |ui| {
@@ -276,7 +278,11 @@ impl HostApp {
                     if !s.streamer.installed {
                         ui::caption(
                             ui,
-                            "Downloads Sunshine from GitHub and installs it silently.",
+                            if self.bundled_sunshine {
+                                "Installs the Sunshine that ships with BroLink, silently."
+                            } else {
+                                "Downloads Sunshine from GitHub and installs it silently."
+                            },
                         );
                     }
                 }
@@ -333,12 +339,18 @@ impl HostApp {
                     }
                 )
             };
-            let wake = match (&s.mac, s.wake_ready) {
+            let mut wake = match (&s.mac, s.wake_ready) {
                 (Some(mac), Some(true)) => format!("ready · {} · {mac}", s.wake_adapter),
                 (Some(mac), Some(false)) => format!("off · {} · {mac}", s.wake_adapter),
                 (Some(mac), None) => format!("unknown · {} · {mac}", s.wake_adapter),
                 (None, _) => "no wired adapter found".into(),
             };
+            if s.fast_startup == Some(true) {
+                wake.push_str(" · Fast Startup on");
+            }
+            if let Some(age) = s.wake_packet_age_secs {
+                wake.push_str(&format!(" · packet received {age}s ago"));
+            }
             let gamepad_text = match gamepad {
                 Some(true) => "virtual controller driver installed",
                 Some(false) => "virtual controller driver missing",
@@ -658,6 +670,8 @@ mod snapshots {
             wake_ready: Some(true),
             wake_adapter: "Ethernet".into(),
             wake_adapter_description: "Example NIC".into(),
+            wake_packet_age_secs: Some(42),
+            fast_startup: Some(false),
             streamer: Streamer {
                 kind: "Sunshine".into(),
                 installed: true,
@@ -667,7 +681,8 @@ mod snapshots {
             power_allowed: true,
             setup: vec![],
             log: vec![
-                "BroLink Host 2.0.0 listening on TCP 47850".into(),
+                "BroLink Host 3.0.0 listening on TCP 47850".into(),
+                "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
                 "Sunshine is running and BroLink is logged in".into(),
                 "Wake-on-LAN ready on Ethernet (02:00:00:00:00:01)".into(),
@@ -709,9 +724,11 @@ mod snapshots {
         let mut st = ready_status();
         st.streamer = Streamer::default();
         st.wake_ready = Some(false);
+        st.fast_startup = Some(true);
         st.setup = vec![
             "Sunshine is not installed.".into(),
             "Wake-on-LAN is off on Ethernet.".into(),
+            "Fast Startup is on, so the PC cannot be woken after a shutdown.".into(),
         ];
         let mut h = build(Shared {
             status: Some(st),

@@ -34,9 +34,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: test core + client
-        run: cargo test -p brolink-core -p brolink-client
+      - name: clippy
+        run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client --all-targets -- -D warnings
+      - name: test
+        run: cargo test -p brolink-core -p brolink-stream -p brolink-client
       - name: release client
         run: cargo build --release -p brolink-client --target aarch64-apple-darwin
       - name: bundle

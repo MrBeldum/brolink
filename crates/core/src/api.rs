@@ -36,6 +36,12 @@ pub struct Status {
     /// needs to arm it.
     pub wake_adapter: String,
     pub wake_adapter_description: String,
+    /// Seconds since a magic packet for this PC's MAC last arrived, so a Mac
+    /// can check its wake path while the PC is awake.
+    pub wake_packet_age_secs: Option<u64>,
+    /// Windows Fast Startup turns shutdown into a hibernate the network card
+    /// cannot wake from. `None` while unknown.
+    pub fast_startup: Option<bool>,
     pub streamer: Streamer,
     /// Whether the owner lets a Mac sleep, restart, or shut this PC down.
     pub power_allowed: bool,
@@ -52,7 +58,7 @@ pub struct Streamer {
     /// "Sunshine" or "Apollo"; empty when neither is installed.
     pub kind: String,
     pub installed: bool,
-    /// Its Moonlight-facing port answers.
+    /// Its GameStream port answers.
     pub running: bool,
     /// The host can log in to its web API with the saved credentials, which
     /// is what auto-pairing needs.
@@ -61,7 +67,7 @@ pub struct Streamer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PinRequest {
-    /// The 4 digits Moonlight was started with.
+    /// The 4 digits the Mac is pairing with.
     pub pin: String,
     /// Shown in Sunshine's client list.
     pub name: String,

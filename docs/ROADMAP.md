@@ -1,32 +1,37 @@
 # Roadmap
 
-BroLink 2.0 stopped being a streaming stack and became the glue around
-Sunshine, Moonlight and Tailscale. Everything the stream itself needs is
-their job; what stays here is turning the PC on and off, pairing without
-touching it, and the one-click path.
+## v1.0 – v1.2 (retired)
 
-## v1.0 – v1.2 — the custom stack (retired)
+A custom H.264 protocol, encoder, decoder, tickets, UPnP, STUN, relay,
+rendezvous and PIN dialogs. Replaced in 2.0; the git history has it.
 
-Own H.264 protocol, encoder, decoder, tickets, UPnP, STUN, relay,
-rendezvous, PIN dialogs. Replaced wholesale in 2.0; the git history has it.
+## v2.0 (retired)
 
-## v2.0 — Sunshine + Moonlight + Tailscale
+Glue around Sunshine, Moonlight and Tailscale: the Mac app installed
+Moonlight and launched it; BroLink itself did wake, pairing and power.
 
-- [x] Windows host: background control service on the tailnet, identity by
-      `tailscale whois`
-- [x] One-click setup: silent Sunshine install, `--creds`, firewall,
-      Wake-on-LAN
-- [x] Mac: PCs listed from Tailscale, wake → pair → Moonlight in one click
-- [x] Pairing without the PC's screen (PIN forwarded to Sunshine's API)
-- [x] Sleep / restart / shut down from the Mac, refusable on the host
-- [x] Moonlight installed from the Mac app
-- [x] Apollo used automatically when installed (virtual display)
-- [x] Both GUIs on the shared theme, every screen renderable to PNG
+## v3.0
+
+- [x] The GameStream client compiled into the Mac app (moonlight-common-c,
+      VideoToolbox, Opus); no Moonlight to install
+- [x] Pairing, app list, launch and resume against Sunshine's HTTPS API with
+      a pinned certificate
+- [x] A stream window with a toolbar: capture, ⌘ mapping, Keys menu, stats,
+      full screen, power, disconnect
+- [x] Sunshine's installer shipped in the Windows zip; setup installs it
+      offline
+- [x] Wake: Fast Startup off, driver keywords for sleep/standby/shutdown,
+      a wake-packet listener on the host and **Test wake** on the Mac
+- [x] Both Sunshine PIN APIs (with and without pairing ids)
+- [x] GPL-3.0-or-later
 
 ## Later
 
-- [ ] Signed Windows/macOS binaries (Authenticode, Developer ID + notarize)
-- [ ] A wake helper mode for a second always-on Windows box on the LAN
+- [ ] AV1 decode on M3 and newer (moonlight-common-c negotiates it; the
+      VideoToolbox path is HEVC and H.264 today)
+- [ ] Gamepads on the Mac (GameController framework to Sunshine's virtual pad)
+- [ ] Clipboard sync between Mac and PC
+- [ ] Signed Windows and macOS binaries (Authenticode, Developer ID and
+      notarization)
 - [ ] Menu-bar presence on the Mac, tray icon on Windows
 - [ ] Per-PC stream settings
-- [ ] Windows as a client too (Moonlight's CLI is the same)

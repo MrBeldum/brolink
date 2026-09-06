@@ -1,7 +1,7 @@
-# Install BroLink Host for the current user: copy the exe into
-# %LOCALAPPDATA%\BroLink, add Start Menu and Desktop shortcuts, and open it.
-# The app itself runs the one administrator step (Sunshine, firewall,
-# Wake-on-LAN) when you click "Set up this PC".
+# Install BroLink Host for the current user: copy the exe and the bundled
+# Sunshine installer into %LOCALAPPDATA%\BroLink, add Start Menu and Desktop
+# shortcuts, and open it. The app itself runs the one administrator step
+# (Sunshine, firewall, Wake-on-LAN) when you click "Set up this PC".
 [CmdletBinding()]
 param(
     [string]$Exe = "",
@@ -33,6 +33,11 @@ try {
 } catch {}
 Copy-Item $Exe $DestExe -Force
 Write-Host "Installed: $DestExe"
+$Msi = Join-Path (Split-Path -Parent $Exe) "Sunshine-Windows-AMD64-installer.msi"
+if (Test-Path $Msi) {
+    Copy-Item $Msi $DestDir -Force
+    Write-Host "Bundled Sunshine installer copied; setup will not need to download it."
+}
 
 $Wsh = New-Object -ComObject WScript.Shell
 $Desktop = [Environment]::GetFolderPath("Desktop")

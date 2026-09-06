@@ -16,4 +16,4 @@ xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 rm -rf /Applications/BroLink.app
 cp -R "$APP" /Applications/BroLink.app
 echo "installed /Applications/BroLink.app"
-echo "open it; it will offer to install Moonlight and list the PCs on your Tailscale account."
+echo "open it; it lists the Windows PCs on your Tailscale account."

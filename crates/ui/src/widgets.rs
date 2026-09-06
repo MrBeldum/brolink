@@ -8,7 +8,7 @@ use crate::theme::{self, stroke, PALETTE as P, RADIUS, RADIUS_LG};
 use egui::{
     collapsing_header::CollapsingState, Align, Color32, ColorImage, CornerRadius, Frame, Id,
     InnerResponse, Label, Layout, Margin, Rect, Response, RichText, Sense, Stroke, StrokeKind,
-    TextStyle, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 
 /// Semantic colour for pills, notices and status text.
@@ -125,11 +125,8 @@ pub fn log_view(ui: &mut Ui, id: impl std::hash::Hash, lines: &[String], max_hei
     });
 }
 
-/// A card that opens and closes from its title row.
-///
-/// `id` is global to the context, not to the enclosing `Ui`, so a screen can
-/// open a section from elsewhere with [`set_collapsible_open`]. Use distinct
-/// ids within an app.
+/// A card that opens and closes from its title row. `id` is global to the
+/// context, not to the enclosing `Ui`; use distinct ids within an app.
 pub fn collapsible<R>(
     ui: &mut Ui,
     id: impl std::hash::Hash,
@@ -155,13 +152,6 @@ pub fn collapsible<R>(
         body.map(|b| b.inner)
     })
     .inner
-}
-
-/// Open or close a [`collapsible`] by id.
-pub fn set_collapsible_open(ctx: &egui::Context, id: impl std::hash::Hash, open: bool) {
-    let mut state = CollapsingState::load_with_default_open(ctx, collapsible_id(id), open);
-    state.set_open(open);
-    state.store(ctx);
 }
 
 fn collapsible_id(id: impl std::hash::Hash) -> Id {
@@ -300,14 +290,6 @@ pub fn kv_grid(ui: &mut Ui, id: impl std::hash::Hash, rows: &[(&str, String)]) {
                 ui.end_row();
             }
         });
-}
-
-/// One key/value pair on a line.
-pub fn kv(ui: &mut Ui, k: &str, v: impl Into<String>) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(k).color(P.muted));
-        ui.label(RichText::new(v).color(P.text));
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -731,9 +713,9 @@ impl Brand {
         }
     }
 
-    /// Icon, product name and tagline on the left; `right` is laid out from
-    /// the right edge.
-    pub fn header(&self, ui: &mut Ui, title: &str, tagline: &str, right: impl FnOnce(&mut Ui)) {
+    /// Icon and product name on the left; `right` is laid out from the
+    /// right edge.
+    pub fn header(&self, ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             ui.add(egui::Image::new((self.tex.id(), Vec2::splat(28.0))));
@@ -742,13 +724,7 @@ impl Brand {
                     .font(theme::semibold(17.0))
                     .color(P.text),
             );
-            ui.label(RichText::new(tagline).color(P.muted));
             ui.with_layout(Layout::right_to_left(Align::Center), right);
         });
     }
-}
-
-/// Text in the button style, for labels that sit next to buttons.
-pub fn button_text(text: &str) -> RichText {
-    RichText::new(text).text_style(TextStyle::Button)
 }

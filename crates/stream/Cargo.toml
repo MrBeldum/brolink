@@ -1,0 +1,38 @@
+[package]
+name = "brolink-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Moonlight-protocol client: pairing, session control, video and audio decode"
+build = "build.rs"
+links = "moonlight-common-c"
+
+[dependencies]
+brolink-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+# Pairing: the client identity is an RSA key and a self-signed certificate,
+# the PIN exchange is AES-128-ECB + SHA-256, and the paired HTTPS channel
+# presents that certificate to Sunshine.
+rsa = { version = "0.9", features = ["sha2"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+x509-parser = "0.18"
+sha2 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+aes-gcm = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Audio: Opus decode, output through the OS mixer.
+audiopus_sys = { version = "0.2", features = ["static"] }
+cpal = "0.18"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Software H.264 on Windows and Linux; macOS uses VideoToolbox.
+openh264 = "0.9"
+
+[build-dependencies]
+cc = "1"

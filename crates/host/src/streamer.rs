@@ -41,7 +41,7 @@ pub fn find() -> Option<Install> {
         .find(|i| i.exe().exists())
 }
 
-/// Moonlight's port answers on loopback.
+/// Sunshine's GameStream port answers on loopback.
 pub fn running() -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], SUNSHINE_PORT).into();
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
@@ -85,17 +85,34 @@ impl Api<'_> {
         self.call("GET", "/api/apps", None).is_ok()
     }
 
-    /// Accept the PIN Moonlight is waiting with. Sunshine answers
-    /// `{"status":false}` until Moonlight has actually started pairing, so
-    /// callers retry.
+    /// Accept the PIN the Mac is pairing with. Sunshine says no until the
+    /// Mac has actually started pairing, so callers retry.
+    ///
+    /// Releases up to 2026.5 take `{pin, name}`; later ones list the waiting
+    /// requests on `GET /api/pin` and want the request's `pairing_id` too.
     pub fn submit_pin(&self, pin: &str, name: &str) -> Result<()> {
-        let body = serde_json::json!({ "pin": pin, "name": name }).to_string();
-        let v = self.call("POST", "/api/pin", Some(&body))?;
-        if v["status"].as_bool() == Some(true) || v["status"].as_str() == Some("true") {
-            Ok(())
-        } else {
-            bail!("Sunshine did not accept the PIN (is Moonlight pairing right now?)")
+        let pending: Vec<Option<String>> = match self.call("GET", "/api/pin", None) {
+            Ok(v) => v["pairings"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p["id"].as_str().map(|s| Some(s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => vec![None],
+        };
+        for id in pending {
+            let mut body = serde_json::json!({ "pin": pin, "name": name });
+            if let Some(id) = id {
+                body["pairing_id"] = id.into();
+            }
+            let v = self.call("POST", "/api/pin", Some(&body.to_string()))?;
+            if v["status"].as_bool() == Some(true) || v["status"].as_str() == Some("true") {
+                return Ok(());
+            }
         }
+        bail!("Sunshine did not accept the PIN (is the Mac pairing right now?)")
     }
 
     /// End whatever is streaming, so a power action does not cut a session

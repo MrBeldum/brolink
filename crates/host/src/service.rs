@@ -26,6 +26,8 @@ pub struct Service {
     cfg: Mutex<HostConfig>,
     tailscale: Mutex<Result<tailscale::Status, String>>,
     wake: Mutex<WakeInfo>,
+    /// When a magic packet for this PC last arrived.
+    wake_seen: Mutex<Option<Instant>>,
     install: Mutex<Option<Install>>,
     streamer: Mutex<Streamer>,
     log: Mutex<VecDeque<String>>,
@@ -38,6 +40,7 @@ impl Service {
             cfg: Mutex::new(HostConfig::load()),
             tailscale: Mutex::new(Err("not checked yet".into())),
             wake: Mutex::new(WakeInfo::default()),
+            wake_seen: Mutex::new(None),
             install: Mutex::new(None),
             streamer: Mutex::new(Streamer::default()),
             log: Mutex::new(VecDeque::new()),
@@ -65,6 +68,10 @@ impl Service {
         ));
         let refresher = self.clone();
         std::thread::spawn(move || refresher.refresh_loop());
+        let svc = self.clone();
+        if let Err(e) = wake::listen(move |mac, from| svc.wake_packet(mac, from)) {
+            self.log(format!("not listening for wake packets: {e:#}"));
+        }
         let handler = self.clone();
         http::serve(listener, move |peer, req| handler.handle(peer, req));
         Ok(())
@@ -158,6 +165,19 @@ impl Service {
         }
     }
 
+    /// A magic packet arrived while awake: remember when, for the status.
+    fn wake_packet(&self, mac: brolink_core::wake::MacAddr, from: SocketAddr) {
+        let own = self.wake.lock().mac.clone();
+        if own.is_some_and(|o| o != mac.to_string()) {
+            return;
+        }
+        let mut seen = self.wake_seen.lock();
+        if seen.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+            self.log(format!("wake packet received from {from}"));
+        }
+        *seen = Some(Instant::now());
+    }
+
     pub fn status(&self, with_log: bool) -> Status {
         let cfg = self.cfg.lock().clone();
         let ts = self.tailscale.lock();
@@ -180,6 +200,9 @@ impl Service {
         if wake.magic_packet == Some(false) {
             setup.push(format!("Wake-on-LAN is off on {}.", wake.adapter));
         }
+        if wake.fast_startup == Some(true) {
+            setup.push("Fast Startup is on, so the PC cannot be woken after a shutdown.".into());
+        }
         Status {
             app: "brolink".into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -198,6 +221,8 @@ impl Service {
             wake_ready: wake.magic_packet,
             wake_adapter: wake.adapter.clone(),
             wake_adapter_description: wake.description.clone(),
+            wake_packet_age_secs: self.wake_seen.lock().map(|t| t.elapsed().as_secs()),
+            fast_startup: wake.fast_startup,
             streamer,
             power_allowed: cfg.power_allowed,
             setup,

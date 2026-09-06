@@ -1,63 +1,49 @@
-//! The client window: your PCs, one Connect button each, and the settings
-//! Moonlight is started with.
+//! The window: a list of PCs with a Connect button each, settings, and the
+//! stream screen once connected.
 
 use crate::config::{ClientConfig, Codec, Resolution};
-use crate::moonlight;
-use crate::session::{self, Discovery, Pc, Progress, Step, Target};
+use crate::session::{self, Connect, Discovery, Live, Pc, Progress, Step, Target};
+use crate::stream::{self, Action};
 use brolink_core::api::PowerAction;
 use brolink_core::tailscale;
+use brolink_stream::Event;
 use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const COLUMN_WIDTH: f32 = 520.0;
+const COLUMN_WIDTH: f32 = 560.0;
 
-/// A one-line result with the tone to show it in.
-type Notice = (Tone, String);
-
-/// Install-Moonlight progress, from its thread.
-#[derive(Default)]
-pub struct InstallState {
-    pub running: bool,
-    pub note: String,
-    pub result: Option<Result<(), String>>,
-}
+/// A one-line result, filled in by a worker thread.
+type Notice = Arc<Mutex<Option<(Tone, String)>>>;
 
 pub struct ClientApp {
     cfg: ClientConfig,
     dirty: bool,
     discovery: Arc<Mutex<Discovery>>,
     progress: Arc<Mutex<Progress>>,
-    install: Arc<Mutex<InstallState>>,
-    /// Checked once a second; Moonlight may be installed while we run.
-    moonlight_ok: bool,
-    moonlight_checked: Instant,
+    live: Arc<Mutex<Option<Live>>>,
+    view: stream::View,
     tailscale_ok: bool,
+    tailscale_checked: Instant,
     brand: ui::Brand,
     settings_open: bool,
+    fullscreen: bool,
     /// A restart or shutdown waits for a second click.
     confirm: Option<(String, PowerAction)>,
-    /// One-line result of the last power request.
     notice: Option<(Tone, String, Instant)>,
     /// After a session ends, offer to sleep this PC.
     offer_sleep: Option<Pc>,
     ended_seen: bool,
-    /// Filled by the power thread, moved into `notice` on the next frame.
-    pending_notice: Option<Arc<Mutex<Option<Notice>>>>,
+    pending_notice: Option<Notice>,
 }
 
 impl ClientApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let discovery = Arc::new(Mutex::new(Discovery::default()));
         session::spawn_discovery(discovery.clone(), cc.egui_ctx.clone());
-        Self::with_shared(
-            cc,
-            discovery,
-            Arc::new(Mutex::new(Progress::default())),
-            true,
-        )
+        Self::with_shared(cc, discovery, Arc::default(), true)
     }
 
     fn with_shared(
@@ -67,17 +53,21 @@ impl ClientApp {
         probe_tools: bool,
     ) -> Self {
         ui::apply(&cc.egui_ctx);
+        if let Some(rs) = &cc.wgpu_render_state {
+            crate::video::install(rs);
+        }
         Self {
             cfg: ClientConfig::load(),
             dirty: false,
             discovery,
             progress,
-            install: Arc::new(Mutex::new(InstallState::default())),
-            moonlight_ok: !probe_tools || moonlight::cli().is_some(),
-            moonlight_checked: Instant::now(),
+            live: Arc::default(),
+            view: stream::View::default(),
             tailscale_ok: !probe_tools || tailscale::cli().is_some(),
+            tailscale_checked: Instant::now(),
             brand: ui::Brand::new(&cc.egui_ctx),
             settings_open: false,
+            fullscreen: false,
             confirm: None,
             notice: None,
             offer_sleep: None,
@@ -110,42 +100,130 @@ impl ClientApp {
         };
         self.ended_seen = false;
         self.offer_sleep = None;
-        session::connect(
+        session::connect(Connect {
             target,
-            self.cfg.stream.clone(),
-            Self::native_pixels(ctx),
-            self.progress.clone(),
-            ctx.clone(),
-        );
+            settings: self.cfg.stream.clone(),
+            native: Self::native_pixels(ctx),
+            progress: self.progress.clone(),
+            live: self.live.clone(),
+            ctx: ctx.clone(),
+        });
     }
 
-    fn power(&mut self, pc: &Pc, action: PowerAction) {
-        let Some(ip) = pc.ip else { return };
-        let name = pc.name.clone();
-        let progress = self.progress.clone();
-        let notice = Arc::new(Mutex::new(None));
-        // End the stream first so Sunshine sees a clean disconnect.
-        if progress.lock().active() {
-            progress.lock().cancel = true;
+    fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        if self.fullscreen != on {
+            self.fullscreen = on;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
         }
+    }
+
+    /// Run `job` off the UI thread and show what it returns as the notice.
+    fn notify_later(&mut self, job: impl FnOnce() -> (Tone, String) + Send + 'static) {
+        let notice: Notice = Arc::default();
         let out = notice.clone();
-        std::thread::spawn(move || {
+        std::thread::spawn(move || *out.lock() = Some(job()));
+        self.pending_notice = Some(notice);
+    }
+
+    fn power(&mut self, ip: std::net::Ipv4Addr, name: &str, action: PowerAction) {
+        let name = name.to_string();
+        // End the stream first so Sunshine sees a clean disconnect.
+        self.disconnect();
+        self.notify_later(move || {
             std::thread::sleep(Duration::from_millis(600));
-            let r = session::power(ip, action);
-            *out.lock() = Some(match r {
+            match session::power(ip, action) {
                 Ok(()) => (
                     Tone::Success,
                     format!("{name}: {} requested.", action.label().to_lowercase()),
                 ),
                 Err(e) => (Tone::Danger, format!("{name}: {e}")),
-            });
+            }
         });
-        self.pending_notice = Some(notice);
     }
-}
 
-/// Deferred notice slot, filled by the power thread.
-impl ClientApp {
+    fn test_wake(&mut self, pc: &Pc) {
+        let pc = pc.clone();
+        self.notify_later(move || match session::wake_test(&pc) {
+            Ok(true) => (
+                Tone::Success,
+                format!("{} received the wake packet. Waking it from here will work.", pc.name),
+            ),
+            Ok(false) => (
+                Tone::Danger,
+                format!(
+                    "The wake packet did not reach {} from this network. Its router would have to forward UDP 9 to it.",
+                    pc.name
+                ),
+            ),
+            Err(e) => (Tone::Danger, format!("{}: {e}", pc.name)),
+        });
+    }
+
+    fn disconnect(&mut self) {
+        let mut p = self.progress.lock();
+        if p.active() {
+            p.cancel = true;
+        }
+        drop(p);
+        if let Some(l) = self.live.lock().as_ref() {
+            l.session.stop();
+        }
+    }
+
+    /// Move the stream's events into the progress state; drop the stream once
+    /// it has fully stopped.
+    fn poll_live(&mut self, ctx: &egui::Context) {
+        let mut fullscreen = None;
+        {
+            let mut guard = self.live.lock();
+            let Some(live) = guard.as_ref() else { return };
+            let mut prog = self.progress.lock();
+            while let Ok(ev) = live.events.try_recv() {
+                match ev {
+                    Event::Stage(s) => {
+                        if prog.step == Step::Connecting {
+                            prog.detail = s;
+                        }
+                    }
+                    Event::Connected => {
+                        prog.step = Step::Streaming;
+                        prog.since = Instant::now();
+                        if self.cfg.stream.fullscreen {
+                            fullscreen = Some(true);
+                        }
+                    }
+                    Event::Failed { stage, code } => {
+                        prog.step = Step::Ended {
+                            error: Some(format!("Connecting failed at {stage} (code {code}).")),
+                        };
+                    }
+                    Event::Terminated { code, message } => {
+                        let cancelled = prog.cancel;
+                        prog.step = Step::Ended {
+                            error: (code != 0 && !cancelled).then_some(message),
+                        };
+                    }
+                    Event::Poor(p) => self.view.set_poor(p),
+                }
+            }
+            // A stop we asked for ends without a Terminated event.
+            let ended = matches!(prog.step, Step::Ended { .. });
+            if live.session.finished() {
+                if !ended {
+                    prog.step = Step::Ended { error: None };
+                }
+                self.view.reset(ctx, Some(live));
+                *guard = None;
+                fullscreen = Some(false);
+            } else if ended {
+                live.session.stop();
+            }
+        }
+        if let Some(on) = fullscreen {
+            self.set_fullscreen(ctx, on);
+        }
+    }
+
     fn poll_notice(&mut self) {
         let ready = self.pending_notice.as_ref().and_then(|n| n.lock().take());
         if let Some((tone, text)) = ready {
@@ -157,19 +235,46 @@ impl ClientApp {
 
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_live(ctx);
+        self.poll_notice();
+
+        let streaming = self.live.lock().is_some();
+        if streaming {
+            // The stream repaints itself on every decoded frame.
+            ctx.request_repaint_after(Duration::from_millis(250));
+            let live = self.live.clone();
+            let guard = live.lock();
+            if let Some(l) = guard.as_ref() {
+                let actions = self.view.show(ctx, l, &self.cfg, self.fullscreen);
+                let (ip, name) = (l.ip, l.pc.clone());
+                drop(guard);
+                for a in actions {
+                    match a {
+                        Action::Disconnect => self.disconnect(),
+                        Action::Power(action) => self.power(ip, &name, action),
+                        Action::Fullscreen(on) => {
+                            self.set_fullscreen(ctx, on);
+                            self.cfg.stream.fullscreen = on;
+                            self.dirty = true;
+                        }
+                        Action::ToggleCmd => {
+                            self.cfg.cmd_is_ctrl = !self.cfg.cmd_is_ctrl;
+                            self.dirty = true;
+                        }
+                    }
+                }
+            }
+            self.commit();
+            return;
+        }
+
         ctx.request_repaint_after(Duration::from_millis(400));
-        if self.moonlight_checked.elapsed() > Duration::from_secs(2) {
-            self.moonlight_checked = Instant::now();
-            self.moonlight_ok = moonlight::cli().is_some();
+        if self.tailscale_checked.elapsed() > Duration::from_secs(2) {
+            self.tailscale_checked = Instant::now();
             self.tailscale_ok = tailscale::cli().is_some();
         }
-        self.poll_notice();
         let disc = self.discovery.lock().clone();
         let prog = self.progress.lock().clone();
-        let install = {
-            let i = self.install.lock();
-            (i.running, i.note.clone(), i.result.clone())
-        };
         if let Step::Ended { .. } = &prog.step {
             if !self.ended_seen {
                 self.ended_seen = true;
@@ -191,19 +296,14 @@ impl eframe::App for ClientApp {
         ui::top_bar(ctx, "top", |ui| {
             let (label, tone) = if !self.tailscale_ok || disc.error.is_some() {
                 ("Tailscale off", Tone::Danger)
-            } else if !self.moonlight_ok {
-                ("Moonlight missing", Tone::Accent)
-            } else if prog.step == Step::Streaming {
-                ("Streaming", Tone::Success)
             } else if prog.active() {
                 ("Connecting", Tone::Accent)
             } else {
                 ("Ready", Tone::Success)
             };
-            self.brand
-                .header(ui, "BroLink", "Your Windows PC, on this Mac", |ui| {
-                    ui::status_pill(ui, label, tone);
-                });
+            self.brand.header(ui, "BroLink", |ui| {
+                ui::status_pill(ui, label, tone);
+            });
         });
 
         ui::bottom_bar(ctx, "bottom", |ui| {
@@ -214,16 +314,12 @@ impl eframe::App for ClientApp {
                     ui.label(format!("Tailscale as {}", disc.login));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui::ghost_button(
-                        ui,
-                        if self.settings_open {
-                            "Close settings"
-                        } else {
-                            "Settings"
-                        },
-                    )
-                    .clicked()
-                    {
+                    let label = if self.settings_open {
+                        "Close settings"
+                    } else {
+                        "Settings"
+                    };
+                    if ui::ghost_button(ui, label).clicked() {
                         self.settings_open = !self.settings_open;
                     }
                 });
@@ -237,12 +333,12 @@ impl eframe::App for ClientApp {
                     ui.add_space(20.0);
                     ui::content_column(ui, COLUMN_WIDTH, |ui| {
                         ui.spacing_mut().item_spacing.y = 14.0;
-                        self.setup_card(ui, &disc, &install);
+                        self.tailscale_card(ui, &disc);
                         if let Some((tone, text, _)) = &self.notice {
                             ui::notice(ui, *tone, text);
                         }
                         if prog.active() {
-                            self.session_card(ui, &prog, &disc);
+                            self.session_card(ui, &prog);
                         } else if let Step::Ended { error } = &prog.step {
                             self.ended_card(ui, &prog, error.as_deref());
                         }
@@ -259,78 +355,23 @@ impl eframe::App for ClientApp {
 }
 
 impl ClientApp {
-    fn setup_card(
-        &mut self,
-        ui: &mut egui::Ui,
-        disc: &Discovery,
-        install: &(bool, String, Option<Result<(), String>>),
-    ) {
-        let tailscale_problem = if !self.tailscale_ok {
+    fn tailscale_card(&mut self, ui: &mut egui::Ui, disc: &Discovery) {
+        let problem = if !self.tailscale_ok {
             Some("Tailscale is not installed.".to_string())
         } else {
             disc.error.as_ref().map(|e| format!("Tailscale: {e}."))
         };
-        if tailscale_problem.is_none() && self.moonlight_ok && install.2.is_none() && !install.0 {
-            return;
-        }
-        ui::toned_card(ui, Tone::Accent, |ui| {
+        let Some(problem) = problem else { return };
+        ui::toned_card(ui, Tone::Danger, |ui| {
             ui::heading(
                 ui,
-                "Two things this Mac needs",
-                Some("Tailscale carries the connection; Moonlight shows the picture."),
+                "Tailscale is needed",
+                Some("It connects this Mac to your PC from anywhere and confirms it is yours."),
             );
-            ui::setting_row(
-                ui,
-                "Tailscale",
-                Some(
-                    tailscale_problem
-                        .as_deref()
-                        .unwrap_or("Installed and signed in."),
-                ),
-                |ui| {
-                    if tailscale_problem.is_some()
-                        && ui::primary_button(ui, "Get Tailscale").clicked()
-                    {
-                        ui.ctx()
-                            .open_url(egui::OpenUrl::new_tab("https://tailscale.com/download/mac"));
-                    }
-                    if tailscale_problem.is_none() {
-                        ui::status_pill(ui, "Ready", Tone::Success);
-                    }
-                },
-            );
-            ui::row_separator(ui);
-            let note = if install.0 {
-                install.1.clone()
-            } else {
-                match &install.2 {
-                    Some(Ok(())) => "Installed.".into(),
-                    Some(Err(e)) => e.clone(),
-                    None if self.moonlight_ok => "Installed.".into(),
-                    None => "Downloads the latest release into /Applications.".into(),
-                }
-            };
-            ui::setting_row(ui, "Moonlight", Some(&note), |ui| {
-                if install.0 {
-                    ui.add(egui::Spinner::new().size(16.0).color(P.accent));
-                } else if self.moonlight_ok {
-                    ui::status_pill(ui, "Ready", Tone::Success);
-                } else if ui::primary_button(ui, "Install Moonlight").clicked() {
-                    let state = self.install.clone();
-                    {
-                        let mut s = state.lock();
-                        s.running = true;
-                        s.result = None;
-                        s.note = "Starting…".into();
-                    }
-                    std::thread::spawn(move || {
-                        let note_state = state.clone();
-                        let r = moonlight::install(&|m| note_state.lock().note = m.to_string())
-                            .map_err(|e| e.to_string());
-                        let mut s = state.lock();
-                        s.running = false;
-                        s.result = Some(r);
-                    });
+            ui::setting_row(ui, "Tailscale", Some(&problem), |ui| {
+                if ui::primary_button(ui, "Get Tailscale").clicked() {
+                    ui.ctx()
+                        .open_url(egui::OpenUrl::new_tab("https://tailscale.com/download/mac"));
                 }
             });
         });
@@ -366,11 +407,7 @@ impl ClientApp {
                     let detail = describe(pc);
                     ui::list_row(ui, &pc.name, &detail, |ui| {
                         let busy = prog.active();
-                        if pc.can_stream()
-                            && self.moonlight_ok
-                            && !busy
-                            && ui::primary_button(ui, "Connect").clicked()
-                        {
+                        if pc.can_stream() && !busy && ui::primary_button(ui, "Connect").clicked() {
                             self.connect(ctx, pc);
                         }
                         if !pc.online
@@ -378,8 +415,7 @@ impl ClientApp {
                             && !busy
                             && ui::ghost_button(ui, "Wake").clicked()
                         {
-                            let r = session::wake_only(pc);
-                            self.notice = Some(match r {
+                            self.notice = Some(match session::wake_only(pc) {
                                 Ok(n) => (
                                     Tone::Info,
                                     format!("Sent {n} wake packets to {}.", pc.name),
@@ -395,17 +431,19 @@ impl ClientApp {
                 }
                 if let Some((name, action)) = self.confirm.clone() {
                     ui::notice(
-                    ui,
-                    Tone::Danger,
-                    &format!(
-                        "{} {name}? Anything unsaved on it is lost; programs are closed without asking.",
-                        action.label()
-                    ),
-                );
+                        ui,
+                        Tone::Danger,
+                        &format!(
+                            "{} {name}? Programs are closed without asking; anything unsaved is lost.",
+                            action.label()
+                        ),
+                    );
                     ui.horizontal(|ui| {
                         if ui::toned_button(ui, action.label(), Tone::Danger).clicked() {
-                            if let Some(pc) = pcs.iter().find(|p| p.name == name).cloned() {
-                                self.power(&pc, action);
+                            if let Some(pc) = pcs.iter().find(|p| p.name == name) {
+                                if let Some(ip) = pc.ip {
+                                    self.power(ip, &pc.name, action);
+                                }
                             }
                             self.confirm = None;
                         }
@@ -421,11 +459,17 @@ impl ClientApp {
     fn power_menu(&mut self, ui: &mut egui::Ui, pc: &Pc) {
         ui::menu_button(ui, "PC", |ui| {
             if ui.button("Sleep").clicked() {
-                self.power(pc, PowerAction::Sleep);
+                if let Some(ip) = pc.ip {
+                    self.power(ip, &pc.name, PowerAction::Sleep);
+                }
                 ui.close_menu();
             }
             if ui.button("Restart…").clicked() {
                 self.confirm = Some((pc.name.clone(), PowerAction::Restart));
+                ui.close_menu();
+            }
+            if pc.can_wake() && ui.button("Test wake").clicked() {
+                self.test_wake(pc);
                 ui.close_menu();
             }
             if ui.button("Shut down…").clicked() {
@@ -435,63 +479,32 @@ impl ClientApp {
         });
     }
 
-    fn session_card(&mut self, ui: &mut egui::Ui, prog: &Progress, disc: &Discovery) {
-        let tone = if prog.step == Step::Streaming {
-            Tone::Success
-        } else {
-            Tone::Accent
-        };
-        ui::toned_card(ui, tone, |ui| {
+    fn session_card(&mut self, ui: &mut egui::Ui, prog: &Progress) {
+        ui::toned_card(ui, Tone::Accent, |ui| {
             let title = match &prog.step {
                 Step::Waking => "Waking the PC",
                 Step::Waiting => "Waiting for the PC",
                 Step::Pairing { .. } => "Pairing",
-                Step::Launching => "Connecting",
-                Step::Streaming => "Streaming",
+                Step::Launching | Step::Connecting | Step::Streaming => "Connecting",
                 _ => "",
             };
             ui::heading(ui, title, None);
             match &prog.step {
-                Step::Streaming => {
-                    ui.label(format!(
-                        "Moonlight is showing {} full screen. Press Ctrl+Alt+Shift+Q in Moonlight to end the session, or switch back here.",
-                        prog.pc
-                    ));
-                    ui::caption(
-                        ui,
-                        format!("{} min so far", prog.since.elapsed().as_secs() / 60),
-                    );
-                }
                 Step::Pairing { pin } => {
                     ui.label(format!(
-                        "First time with {}: Moonlight is pairing with PIN {pin}. BroLink Host on the PC enters it for you.",
+                        "First time with {}. BroLink Host on the PC enters this PIN in Sunshine for you.",
                         prog.pc
                     ));
+                    ui::display_digits(ui, pin);
+                    if !prog.detail.is_empty() {
+                        ui::notice(ui, Tone::Accent, &prog.detail);
+                    }
                 }
-                _ => {
-                    ui::empty_state(ui, &prog.detail, true);
-                }
+                _ => ui::empty_state(ui, &prog.detail, true),
             }
             ui.horizontal(|ui| {
-                let label = if prog.step == Step::Streaming {
-                    "Disconnect"
-                } else {
-                    "Cancel"
-                };
-                if ui::danger_button(ui, label).clicked() {
-                    self.progress.lock().cancel = true;
-                }
-                if prog.step == Step::Streaming {
-                    if let Some(pc) = disc
-                        .pcs
-                        .iter()
-                        .find(|p| p.name == prog.pc && p.power_allowed())
-                        .cloned()
-                    {
-                        if ui::ghost_button(ui, "Disconnect and sleep the PC").clicked() {
-                            self.power(&pc, PowerAction::Sleep);
-                        }
-                    }
+                if ui::danger_button(ui, "Cancel").clicked() {
+                    self.disconnect();
                 }
             });
         });
@@ -509,35 +522,31 @@ impl ClientApp {
         ui::toned_card(ui, tone, |ui| {
             match error {
                 Some(e) => {
-                    ui::heading(ui, &format!("Could not connect to {}", prog.pc), None);
+                    ui::heading(ui, &format!("{} disconnected", prog.pc), None);
                     ui.label(e);
                 }
-                None => {
-                    ui::heading(
-                        ui,
-                        "Session ended",
-                        Some(&format!("Leave {} on, or put it to sleep?", prog.pc)),
-                    );
-                }
+                None => ui::heading(
+                    ui,
+                    "Session ended",
+                    Some(&format!("Leave {} on, or put it to sleep?", prog.pc)),
+                ),
             }
             ui.horizontal(|ui| {
                 if let Some(pc) = self.offer_sleep.clone() {
                     if ui::primary_button(ui, "Sleep the PC").clicked() {
-                        self.power(&pc, PowerAction::Sleep);
+                        if let Some(ip) = pc.ip {
+                            self.power(ip, &pc.name, PowerAction::Sleep);
+                        }
                         self.offer_sleep = None;
                         self.progress.lock().step = Step::Idle;
                     }
                 }
-                if ui::ghost_button(
-                    ui,
-                    if error.is_some() {
-                        "Dismiss"
-                    } else {
-                        "Leave it on"
-                    },
-                )
-                .clicked()
-                {
+                let label = if error.is_some() {
+                    "Dismiss"
+                } else {
+                    "Leave it on"
+                };
+                if ui::ghost_button(ui, label).clicked() {
                     self.offer_sleep = None;
                     self.progress.lock().step = Step::Idle;
                 }
@@ -551,20 +560,12 @@ impl ClientApp {
             "Settings",
             Some("Applied the next time you connect."),
             |ui| {
-                let s = &mut self.cfg.stream;
                 let native = Self::native_pixels(ctx);
-                ui::setting_row(ui, "Mouse", Some("Desktop maps your cursor 1:1 onto the PC; Game hides it and sends raw movement."), |ui| {
-                let mut game = s.game_mode;
-                if ui::segmented(ui, &[(false, "Desktop"), (true, "Game")], &mut game) {
-                    s.game_mode = game;
-                    self.dirty = true;
-                }
-            });
-                ui::row_separator(ui);
+                let s = &mut self.cfg.stream;
                 let hint = format!(
-                    "This Mac is {}×{}. Exact only with a virtual display on the PC (Apollo); Sunshine scales its monitor otherwise.",
-                    native.0, native.1
-                );
+                "This screen is {}×{}. “This screen” is exact only with a virtual display on the PC; otherwise the PC's monitor is scaled.",
+                native.0, native.1
+            );
                 ui::setting_row(ui, "Resolution", Some(&hint), |ui| {
                     if ui::segmented(
                         ui,
@@ -572,7 +573,7 @@ impl ClientApp {
                             (Resolution::P1080, "1080p"),
                             (Resolution::P1440, "1440p"),
                             (Resolution::P2160, "4K"),
-                            (Resolution::Native, "This Mac"),
+                            (Resolution::Native, "This screen"),
                         ],
                         &mut s.resolution,
                     ) {
@@ -602,21 +603,26 @@ impl ClientApp {
                     },
                 );
                 ui::row_separator(ui);
-                ui::setting_row(ui, "Codec", Some("Auto picks the best both sides support: AV1 on an M3 with a recent GPU, otherwise HEVC."), |ui| {
-                if ui::segmented(
+                ui::setting_row(
                     ui,
-                    &[(Codec::Auto, "Auto"), (Codec::Hevc, "HEVC"), (Codec::Av1, "AV1"), (Codec::H264, "H.264")],
-                    &mut s.codec,
-                ) {
-                    self.dirty = true;
-                }
-            });
+                    "Codec",
+                    Some("Auto uses HEVC when the PC can encode it."),
+                    |ui| {
+                        if ui::segmented(
+                            ui,
+                            &[(Codec::Auto, "Auto"), (Codec::H264, "H.264")],
+                            &mut s.codec,
+                        ) {
+                            self.dirty = true;
+                        }
+                    },
+                );
                 ui::row_separator(ui);
                 if ui::toggle_row(
                     ui,
                     &mut s.fullscreen,
                     "Full screen",
-                    Some("Off opens Moonlight in a window."),
+                    Some("Otherwise the stream fills this window."),
                 ) {
                     self.dirty = true;
                 }
@@ -624,7 +630,7 @@ impl ClientApp {
                 ui::setting_row(
                     ui,
                     "App",
-                    Some("What Sunshine launches. “Desktop” is the whole PC."),
+                    Some("What Sunshine starts. “Desktop” is the whole PC."),
                     |ui| {
                         let mut app = s.app.clone();
                         let mut changed = false;
@@ -651,10 +657,19 @@ impl ClientApp {
                 );
                 ui::row_separator(ui);
                 if ui::toggle_row(
+                ui,
+                &mut self.cfg.cmd_is_ctrl,
+                "Command key acts as Ctrl",
+                Some("So ⌘C, ⌘V and ⌘Z do what you expect on the PC. Off makes it the Windows key."),
+            ) {
+                self.dirty = true;
+            }
+                ui::row_separator(ui);
+                if ui::toggle_row(
                     ui,
                     &mut self.cfg.sleep_prompt,
                     "Offer to sleep the PC after each session",
-                    Some("Asleep, the PC wakes from this Mac in seconds and uses almost no power."),
+                    Some("Asleep, the PC wakes from this Mac in seconds."),
                 ) {
                     self.dirty = true;
                 }
@@ -676,8 +691,8 @@ fn describe(pc: &Pc) -> String {
     match (&pc.host, pc.sunshine) {
         (Some(h), true) if h.setup.is_empty() => format!("Ready · {ip}"),
         (Some(_), true) => format!("Ready · {ip} · the PC still needs setup"),
-        (Some(_), false) => format!("Online · {ip} · Sunshine is not running"),
-        (None, true) => format!("Online · {ip} · Sunshine only, no wake or sleep"),
+        (Some(_), false) => format!("Online · {ip} · nothing is streaming from it yet"),
+        (None, true) => format!("Online · {ip} · no BroLink Host: no wake or sleep"),
         (None, false) => format!("Online · {ip} · nothing to stream from"),
     }
 }
@@ -703,18 +718,15 @@ mod tests {
         pc.online = true;
         assert!(describe(&pc).contains("nothing to stream"));
         pc.sunshine = true;
-        assert!(describe(&pc).contains("Sunshine only"));
+        assert!(describe(&pc).contains("no BroLink Host"));
         assert!(describe(&pc).len() < 60, "{}", describe(&pc));
         pc.host = Some(brolink_core::api::Status::default());
         assert_eq!(describe(&pc), "Ready · 203.0.113.10");
     }
 }
 
-/// Render the window to PNGs for review without a Mac:
-///
-/// ```text
-/// cargo test -p brolink-client snapshots -- --ignored
-/// ```
+/// `cargo test -p brolink-client snapshots -- --ignored` writes PNGs of each
+/// screen to `target/ui-snapshots/`.
 #[cfg(test)]
 mod snapshots {
     use super::*;
@@ -750,6 +762,7 @@ mod snapshots {
                 name: "Gaming-PC".into(),
                 mac: Some("02:00:00:00:00:01".into()),
                 lan_ip: Some("192.168.1.10".into()),
+                ..Default::default()
             }),
         };
         let asleep = Pc {
@@ -786,7 +799,8 @@ mod snapshots {
         let disc = Arc::new(Mutex::new(disc));
         let prog = Arc::new(Mutex::new(prog));
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(560.0, 1200.0))
+            .wgpu()
+            .with_size(egui::vec2(640.0, 1100.0))
             .with_pixels_per_point(2.0)
             .with_max_steps(8)
             .build_eframe(move |cc| {
@@ -803,52 +817,35 @@ mod snapshots {
     fn lobby() {
         let mut h = build(pcs(), Progress::default(), false);
         save(h.render().unwrap(), "client-lobby.png");
-    }
-
-    #[test]
-    #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn lobby_settings() {
         let mut h = build(pcs(), Progress::default(), true);
         save(h.render().unwrap(), "client-settings.png");
     }
 
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn waking() {
+    fn pairing_and_waking() {
         let mut p = Progress {
-            pc: "Office".into(),
+            pc: "Gaming-PC".into(),
+            step: Step::Pairing { pin: "4821".into() },
             ..Default::default()
         };
+        let mut h = build(pcs(), p.clone(), false);
+        save(h.render().unwrap(), "client-pairing.png");
         p.step = Step::Waking;
-        p.detail = "Waking Office… 12s".into();
+        p.detail = "Waking Gaming-PC… 12s".into();
         let mut h = build(pcs(), p, false);
         save(h.render().unwrap(), "client-waking.png");
     }
 
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn pairing_then_streaming() {
-        let mut p = Progress {
-            pc: "Gaming-PC".into(),
-            ..Default::default()
-        };
-        p.step = Step::Pairing { pin: "4821".into() };
-        let mut h = build(pcs(), p.clone(), false);
-        save(h.render().unwrap(), "client-pairing.png");
-        p.step = Step::Streaming;
-        let mut h = build(pcs(), p, false);
-        save(h.render().unwrap(), "client-streaming.png");
-    }
-
-    #[test]
-    #[ignore = "renders with a GPU; run on demand to review the UI"]
     fn failed_and_empty() {
-        let mut p = Progress {
+        let p = Progress {
             pc: "Office".into(),
+            step: Step::Ended {
+                error: Some("Office did not wake up. A wake packet only reaches it from its own network, or through a router that forwards UDP 9 to it.".into()),
+            },
             ..Default::default()
-        };
-        p.step = Step::Ended {
-            error: Some("Office did not wake up. Wake-on-LAN only reaches it from its own network unless a Tailscale subnet router is on that network.".into()),
         };
         let mut h = build(pcs(), p, false);
         save(h.render().unwrap(), "client-failed.png");
@@ -862,5 +859,85 @@ mod snapshots {
             false,
         );
         save(h.render().unwrap(), "client-no-tailscale.png");
+    }
+}
+
+/// Streams from the Sunshine on this machine into the window for a few
+/// seconds and saves what the window shows:
+/// `BROLINK_DEV_LOCAL=1 cargo test -p brolink-client stream_snapshot -- --ignored --nocapture`
+#[cfg(test)]
+mod live_snapshot {
+    use super::*;
+    use crate::config::KnownPc;
+
+    #[test]
+    #[ignore = "needs a paired Sunshine on this machine and a GPU"]
+    fn stream_snapshot() {
+        let disc = Arc::new(Mutex::new(Discovery::default()));
+        let prog = Arc::new(Mutex::new(Progress::default()));
+        let mut harness = egui_kittest::Harness::builder()
+            .wgpu()
+            .with_size(egui::vec2(1512.0, 982.0))
+            .with_pixels_per_point(1.0)
+            .with_max_steps(8)
+            .build_eframe({
+                let (disc, prog) = (disc.clone(), prog.clone());
+                move |cc| {
+                    let mut app = ClientApp::with_shared(cc, disc, prog, false);
+                    app.cfg.stream.fullscreen = false;
+                    app.cfg.stream.resolution = Resolution::P1080;
+                    app.cfg.stream.codec = Codec::H264;
+                    app
+                }
+            });
+        harness.run_steps(2);
+        let pc = Pc {
+            node_id: "local".into(),
+            name: "GAMING-PC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            sunshine: true,
+            known: Some(KnownPc {
+                server_cert: std::fs::read(
+                    std::env::temp_dir().join("brolink-pair-test/server.der"),
+                )
+                .ok()
+                .map(|d| brolink_stream::nvhttp::hex(&d)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ctx = harness.ctx.clone();
+        harness.state_mut().connect(&ctx, &pc);
+        let start = Instant::now();
+        let mut shot = 0;
+        while start.elapsed() < Duration::from_secs(10) {
+            harness.run_steps(1);
+            let step = prog.lock().step.clone();
+            if let Step::Ended { error } = step {
+                panic!("ended: {error:?}");
+            }
+            if step == Step::Streaming && start.elapsed() > Duration::from_secs(3) && shot == 0 {
+                let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/ui-snapshots");
+                std::fs::create_dir_all(&dir).unwrap();
+                harness
+                    .render()
+                    .unwrap()
+                    .save(dir.join("client-stream.png"))
+                    .unwrap();
+                eprintln!("wrote client-stream.png");
+                shot += 1;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        assert_eq!(shot, 1, "never streamed: {:?}", prog.lock().step);
+        harness.state_mut().disconnect();
+        let t = Instant::now();
+        while harness.state().live.lock().is_some() && t.elapsed() < Duration::from_secs(8) {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(harness.state().live.lock().is_none(), "stream did not stop");
     }
 }

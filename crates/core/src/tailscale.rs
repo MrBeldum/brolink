@@ -60,6 +60,9 @@ pub struct Node {
     #[serde(rename = "TailscaleIPs")]
     pub tailscale_ips: Vec<String>,
     pub online: bool,
+    /// The public `ip:port` of the peer's last direct path, if any.
+    #[serde(rename = "CurAddr")]
+    pub cur_addr: String,
 }
 
 impl Node {
@@ -68,6 +71,10 @@ impl Node {
     }
     pub fn is_windows(&self) -> bool {
         self.os.eq_ignore_ascii_case("windows")
+    }
+    /// The peer's public IPv4 address, when Tailscale reached it directly.
+    pub fn public_ipv4(&self) -> Option<Ipv4Addr> {
+        self.cur_addr.rsplit_once(':')?.0.parse().ok()
     }
 }
 
@@ -171,7 +178,7 @@ mod tests {
         "nodekey:a": {"ID": "nMAC", "HostName": "Example Mac", "DNSName": "mac.example.ts.net.", "OS": "macOS",
                       "UserID": 42, "TailscaleIPs": ["100.64.0.20"], "Online": false},
         "nodekey:b": {"ID": "nPC2", "HostName": "Office", "DNSName": "office.example.ts.net.", "OS": "windows",
-                      "UserID": 42, "TailscaleIPs": ["fd7a::2", "100.64.0.30"], "Online": true},
+                      "UserID": 42, "TailscaleIPs": ["fd7a::2", "100.64.0.30"], "Online": true, "CurAddr": "203.0.113.5:41641"},
         "nodekey:c": {"ID": "nPC1", "HostName": "Den", "DNSName": "den.example.ts.net.", "OS": "windows",
                       "UserID": 43, "TailscaleIPs": ["100.64.0.31"], "Online": false}
       },
@@ -195,6 +202,8 @@ mod tests {
             "v4 is picked whatever the order"
         );
         assert!(pcs[1].online);
+        assert_eq!(pcs[1].public_ipv4(), Some("203.0.113.5".parse().unwrap()));
+        assert_eq!(pcs[0].public_ipv4(), None);
     }
 
     #[test]

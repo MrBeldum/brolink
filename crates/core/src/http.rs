@@ -152,9 +152,26 @@ pub fn request(
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let body = body.unwrap_or("");
+    exchange(
+        &mut stream,
+        method,
+        path,
+        &addr.to_string(),
+        body.unwrap_or(""),
+    )
+}
+
+/// One HTTP/1.1 request and its reply over any stream (TCP, or TLS on top of
+/// it). The body is read to `Content-Length`, or to the end of the stream.
+pub fn exchange<S: Read + Write>(
+    stream: &mut S,
+    method: &str,
+    path: &str,
+    host: &str,
+    body: &str,
+) -> Result<Response> {
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes())?;
@@ -193,7 +210,9 @@ pub fn request(
         }
         Some(n) => bail!("reply too large ({n} bytes)"),
         None => {
-            reader.take(MAX_BODY as u64).read_to_end(&mut body)?;
+            // TLS peers report a truncated close as an error after the data;
+            // the bytes read so far are the reply.
+            let _ = reader.take(MAX_BODY as u64).read_to_end(&mut body);
         }
     }
     Ok(Response {

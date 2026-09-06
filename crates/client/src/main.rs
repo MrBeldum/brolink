@@ -1,24 +1,13 @@
-//! BroLink for the Mac: the window with your PCs in it.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod config;
-mod moonlight;
+mod input;
 mod session;
+mod stream;
+mod video;
 
-use anyhow::Result;
-use clap::Parser;
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "brolink-client",
-    version,
-    about = "BroLink: your Windows PC, on this Mac"
-)]
-struct Args {}
-
-fn main() -> Result<()> {
-    let _ = Args::parse();
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -27,15 +16,16 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
     let native = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 720.0])
-            .with_min_inner_size([460.0, 520.0])
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([640.0, 420.0])
             .with_title("BroLink")
-            .with_icon(eframe::egui::IconData {
+            .with_icon(egui::IconData {
                 rgba: brolink_core::icon::render(64),
                 width: 64,
                 height: 64,
             }),
+        renderer: eframe::Renderer::Wgpu,
         vsync: true,
         ..Default::default()
     };

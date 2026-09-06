@@ -1,11 +1,12 @@
 //! The one administrator step, and the per-user autostart.
 //!
 //! Everything that needs elevation is done by a single PowerShell script
-//! behind a single UAC prompt: install Sunshine if it is missing, give it
-//! the login BroLink will use, open the control port to the tailnet, and
-//! arm the network card for Wake-on-LAN. Each step logs and carries on, so
-//! one failure does not undo the others; the service re-probes afterwards
-//! and the setup card says what is still missing.
+//! behind a single UAC prompt: install the bundled Sunshine if none is
+//! present, give it the login BroLink will use, open the control port to the
+//! tailnet, turn Fast Startup off and arm the network card for Wake-on-LAN.
+//! Each step logs and carries on, so one failure does not undo the others;
+//! the service re-probes afterwards and the setup card says what is still
+//! missing.
 
 use anyhow::{Context, Result};
 use brolink_core::config::data_dir;
@@ -28,52 +29,70 @@ pub fn log_path() -> Option<PathBuf> {
     data_dir().ok().map(|d| d.join("setup.log"))
 }
 
+/// The Sunshine installer shipped beside `brolink-host.exe`.
+pub const SUNSHINE_MSI: &str = "Sunshine-Windows-AMD64-installer.msi";
+
+pub fn bundled_sunshine(exe: &Path) -> bool {
+    exe.parent().is_some_and(|d| d.join(SUNSHINE_MSI).exists())
+}
+
 pub fn script(p: &Plan<'_>) -> String {
     let q = |s: &str| s.replace('\'', "''");
+    let exe_dir = p.exe.parent().unwrap_or(p.exe).display().to_string();
     let install = if p.install_sunshine {
         format!(
             r#"if (-not $dir) {{
-    Step "Downloading Sunshine"
-    $api = curl.exe -sSL -A brolink https://api.github.com/repos/{repo}/releases/latest | ConvertFrom-Json
-    $asset = $api.assets | Where-Object {{ $_.name -like '*Windows-AMD64-installer.msi' }} | Select-Object -First 1
-    if (-not $asset) {{ throw "no Windows installer in the latest Sunshine release" }}
-    $msi = Join-Path $env:TEMP 'Sunshine-installer.msi'
-    curl.exe -sSL -A brolink -o $msi $asset.browser_download_url
-    Step "Installing Sunshine $($api.tag_name) (silent)"
+    $msi = Join-Path '{exe_dir}' '{msi}'
+    $downloaded = $false
+    if (Test-Path $msi) {{
+        Step "Installing the Sunshine that ships with BroLink (silent)"
+    }} else {{
+        Step "Downloading Sunshine"
+        $api = curl.exe -sSL -A brolink https://api.github.com/repos/{repo}/releases/latest | ConvertFrom-Json
+        $asset = $api.assets | Where-Object {{ $_.name -like '*Windows-AMD64-installer.msi' }} | Select-Object -First 1
+        if (-not $asset) {{ throw "no Windows installer in the latest Sunshine release" }}
+        $msi = Join-Path $env:TEMP 'Sunshine-installer.msi'
+        curl.exe -sSL -A brolink -o $msi $asset.browser_download_url
+        $downloaded = $true
+        Step "Installing Sunshine $($api.tag_name) (silent)"
+    }}
     $r = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/quiet', '/norestart') -Wait -PassThru
     if ($r.ExitCode -ne 0) {{ throw "msiexec exited with $($r.ExitCode)" }}
     $dir = 'C:\Program Files\Sunshine'
-    Remove-Item $msi -ErrorAction SilentlyContinue
+    if ($downloaded) {{ Remove-Item $msi -ErrorAction SilentlyContinue }}
 }}
 "#,
+            exe_dir = q(&exe_dir),
+            msi = SUNSHINE_MSI,
             repo = crate::streamer::REPO
         )
     } else {
         String::new()
     };
-    let wake = if p.adapter.is_empty() {
+    let adapter = if p.adapter.is_empty() {
         "Step \"Wake-on-LAN: adapter unknown, skipped\"\n".to_string()
     } else {
         format!(
             r#"Step "Enabling Wake-on-LAN on '{adapter}'"
 try {{
     Set-NetAdapterPowerManagement -Name '{adapter}' -WakeOnMagicPacket Enabled -ErrorAction Stop
-    # ARP offload lets the card answer for the PC's address while it sleeps,
-    # which is what lets a unicast wake packet reach it through a router.
-    Set-NetAdapterPowerManagement -Name '{adapter}' -ArpOffload Enabled -ErrorAction SilentlyContinue
-}} catch {{
-    # Some drivers refuse the cmdlet; the NDIS keywords in the class key are
-    # what the driver actually reads, and take effect on the next reset.
-    Write-Output "  cmdlet failed ($_); writing the driver keywords directly"
-    $g = (Get-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue).InterfaceGuid
-    $k = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{{4d36e972-e325-11ce-bfc1-08002be10318}}' -ErrorAction SilentlyContinue | Where-Object {{ (Get-ItemProperty $_.PSPath -Name NetCfgInstanceId -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g }} | Select-Object -First 1
-    if ($k) {{
-        $before = (Get-ItemProperty $k.PSPath).'*WakeOnMagicPacket'
-        Set-ItemProperty $k.PSPath -Name '*WakeOnMagicPacket' -Value '1' -Type String
-        Set-ItemProperty $k.PSPath -Name '*PMARPOffload' -Value '1' -Type String -ErrorAction SilentlyContinue
-        if ($before -ne '1') {{ Restart-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue }}
-    }} else {{ Write-Output "  no class key for the adapter; wake state unchanged" }}
-}}
+}} catch {{ Write-Output "  cmdlet failed ($_); the driver keywords below still apply" }}
+# The NDIS keywords are what the driver reads: magic packet from sleep, from
+# modern standby, and (Realtek's own keyword) from a full shutdown. ARP and
+# NS offload keep the card answering for the PC's address while it sleeps,
+# which is what lets a unicast wake packet reach it through a router.
+$g = (Get-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue).InterfaceGuid
+$k = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{{4d36e972-e325-11ce-bfc1-08002be10318}}' -ErrorAction SilentlyContinue | Where-Object {{ (Get-ItemProperty $_.PSPath -Name NetCfgInstanceId -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g }} | Select-Object -First 1
+if ($k) {{
+    $changed = $false
+    foreach ($kw in '*WakeOnMagicPacket', '*ModernStandbyWoLMagicPacket', 'S5WakeOnLan', '*PMARPOffload', '*PMNSOffload') {{
+        if ((Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue).$kw -ne '1') {{
+            Set-ItemProperty $k.PSPath -Name $kw -Value '1' -Type String
+            $changed = $true
+        }}
+    }}
+    if ($changed) {{ Restart-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue }}
+}} else {{ Write-Output "  no class key for the adapter; keywords unchanged" }}
 try {{ powercfg /deviceenablewake '{desc}' | Out-Null }} catch {{ Write-Output "  powercfg: $_" }}
 "#,
             adapter = q(p.adapter),
@@ -102,6 +121,9 @@ try {{
 Step "Opening TCP {port} to the tailnet for BroLink Host"
 netsh advfirewall firewall delete rule name="BroLink Host" | Out-Null
 netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program="{exe}" | Out-Null
+Step "Opening UDP 9 so a Mac can check its wake path while this PC is awake"
+netsh advfirewall firewall delete rule name="BroLink wake" | Out-Null
+netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program="{exe}" | Out-Null
 if ($dir) {{
     # Sunshine's installer adds its own rules; these make sure the tailnet
     # can reach it even if that step was skipped or the rules were removed.
@@ -111,14 +133,16 @@ if ($dir) {{
     netsh advfirewall firewall add rule name="BroLink Sunshine TCP" dir=in action=allow protocol=TCP localport=47984-48010 remoteip=100.64.0.0/10 | Out-Null
     netsh advfirewall firewall add rule name="BroLink Sunshine UDP" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 | Out-Null
 }}
-{wake}Step "BroLink setup finished"
+Step "Turning Fast Startup off: a PC shut down with it on cannot be woken"
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord
+{adapter}Step "BroLink setup finished"
 "#,
         install = install,
         user = q(p.sunshine_user),
         pass = q(p.sunshine_pass),
         port = CONTROL_PORT,
         exe = p.exe.display(),
-        wake = wake,
+        adapter = adapter,
     )
 }
 
@@ -246,6 +270,9 @@ mod tests {
         assert!(!s.contains("Downloading Sunshine"));
         assert!(s.contains("Set-NetAdapterPowerManagement -Name 'Ethernet'"));
         assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
+        assert!(s.contains("'S5WakeOnLan'"));
+        assert!(s.contains("HiberbootEnabled -Value 0"));
+        assert!(s.contains("protocol=UDP localport=9 program=\"C:\\x\\brolink-host.exe\""));
         assert!(s.contains("localport=47984-48010 remoteip=100.64.0.0/10"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
         assert!(s.contains(
@@ -261,6 +288,7 @@ mod tests {
             adapter_description: "",
         });
         assert!(s.contains("Downloading Sunshine"));
+        assert!(s.contains("Join-Path 'C:\\x' 'Sunshine-Windows-AMD64-installer.msi'"));
         assert!(s.contains("adapter unknown, skipped"));
         assert!(!s.contains("Set-NetAdapterPowerManagement"));
     }

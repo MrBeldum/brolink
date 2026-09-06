@@ -1,8 +1,8 @@
 name: release
 
 # Two ways in:
-#   * workflow_dispatch -- build binaries to download from the run page.
-#   * a v* tag -- same binaries, published as a GitHub release.
+#   * workflow_dispatch: build the binaries and leave them on the run page.
+#   * a v* tag: the same binaries, published as a GitHub release.
 on:
   workflow_dispatch:
   push:
@@ -10,6 +10,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Sunshine installer shipped inside the Windows zip. Bump on purpose:
+  # the host's PIN hand-off is tested against this release.
+  SUNSHINE_VERSION: v2026.516.143833
 
 jobs:
   macos:
@@ -22,7 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Never ship a binary whose tests were not run.
       - name: test
-        run: cargo test -p brolink-core -p brolink-client
+        run: cargo test -p brolink-core -p brolink-stream -p brolink-client
       - name: build client
         run: cargo build --release -p brolink-client --target aarch64-apple-darwin
       # bundle-macos.sh ad-hoc signs and verifies the bundle itself.
@@ -31,7 +34,8 @@ jobs:
       - name: package
         run: |
           cp docs/MACOS.md dist/README-MACOS.md
-          cd dist && tar czf brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md
+          cp LICENSE NOTICE dist/
+          cd dist && tar czf brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md LICENSE NOTICE
       - uses: actions/upload-artifact@v4
         with:
           name: brolink-macos-arm64
@@ -54,7 +58,8 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\release\brolink-host.exe dist\
           Copy-Item docs\WINDOWS.md dist\README-WINDOWS.md
-          Copy-Item scripts\install-host.ps1 dist\
+          Copy-Item scripts\install-host.ps1, LICENSE, NOTICE dist\
+          Invoke-WebRequest "https://github.com/LizardByte/Sunshine/releases/download/$env:SUNSHINE_VERSION/Sunshine-Windows-AMD64-installer.msi" -OutFile dist\Sunshine-Windows-AMD64-installer.msi
           Compress-Archive -Path dist\* -DestinationPath brolink-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
@@ -82,28 +87,37 @@ jobs:
             *)   PRE= ;;
           esac
           cat > notes.md <<'EOF'
-          ## BroLink 2.0
+          ## BroLink 3.0
 
-          BroLink is now a thin layer over three tools that already do the
-          hard part well: **Sunshine** streams the PC, **Moonlight** shows it
-          on the Mac with hardware HEVC/AV1 decode, and **Tailscale** connects
-          the two from anywhere. BroLink adds what they leave out: waking the
-          PC from the Mac, putting it back to sleep, pairing without touching
-          the PC, and one click to get from "asleep in another room" to a full
-          screen desktop.
+          The Mac app streams by itself. Moonlight's GameStream client
+          library (moonlight-common-c) is compiled into BroLink, frames are
+          decoded with VideoToolbox and drawn in BroLink's own window. There
+          is no Moonlight to install. The Windows zip carries the Sunshine
+          installer, so the PC downloads nothing during setup either.
 
-          The custom protocol, encoder, decoder, relay, UPnP, STUN, tickets,
-          and PIN dialogs from 1.x are gone.
+          - A toolbar above the picture instead of a bare video: PC name and
+            stream details, mouse capture (Ctrl+Alt), what the Command key
+            does, a Keys menu (Ctrl+Alt+Del, Windows key, Alt+Tab, Esc,
+            Print Screen), stats, full screen, the PC's power menu, and
+            Disconnect. In full screen the toolbar sits in the letterbox bar
+            when there is one and drops down from the top edge when there is
+            not.
+          - Waking: setup turns Fast Startup off and writes the driver
+            keywords for magic-packet wake from sleep, modern standby and
+            shutdown. The host listens on UDP 9 while awake, and the PC menu
+            on the Mac has **Test wake**, which says whether wake packets
+            from where you are reach the PC at all.
+          - Pairing talks to both Sunshine's current PIN API and the next
+            one (pairing ids).
+          - License: GPL-3.0-or-later, as moonlight-common-c requires.
 
           ## Install
 
-          **Windows PC**: unzip, run `brolink-host.exe`, click **Set up this
-          PC** once (one administrator prompt: installs Sunshine, opens the
-          control port to your tailnet, arms Wake-on-LAN). Sign the PC in to
-          Tailscale with your account. Or run `install-host.ps1` to get
-          shortcuts and start-at-logon.
+          **Windows PC**: unzip, run `brolink-host.exe` (or `install-host.ps1`
+          for shortcuts and start-at-logon), click **Set up this PC** once.
+          Sign the PC in to Tailscale with your account.
 
-          **Mac (Apple Silicon)**: either
+          **Mac (Apple Silicon)**: with the GitHub CLI signed in,
 
           ```bash
           curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
@@ -117,28 +131,28 @@ jobs:
           open BroLink.app
           ```
 
-          The `xattr` step is needed for a browser download because the app
-          is ad-hoc signed, not Developer-ID signed. The app installs
-          Moonlight for you and lists the PCs on your Tailscale account.
-
-          ## What is verified
+          ## Verified
 
           - Unit tests, clippy and fmt on Windows and macOS in CI
-          - The host service on a real Windows 11 PC with Tailscale: status on
-            loopback and on the tailnet address, 403 for a LAN address,
-            request validation, `tailscale whois` identity check
-          - The elevated setup script's text (a test pins its quoting); the
-            Wake-on-LAN probe against a real adapter
+          - On a Windows 11 PC with Sunshine v2026.516: pairing through the
+            built-in client (all five phases, pinned certificate), app list,
+            launch and resume, an encrypted RTSP session with decoded video,
+            a clean stop, and the live picture rendered in the BroLink
+            window
+          - The host service on the same PC: status, the wake-packet
+            listener receiving a real magic packet, the Mac-side wake test
+            against it
           - Every screen of both apps rendered to PNG and reviewed
 
-          ## What is not
+          ## Not verified
 
-          - A full Mac-to-PC session through this build (wake, auto-pair,
-            Moonlight launch) has not been watched end to end on a Mac
-          - The silent Sunshine install and `--creds` step ran only as far as
-            the UAC prompt on the maintainer's machine (the build machine is
-            not elevated); the script is straightforward but treat the first
-            run as a test and read the setup log if the card stays orange
+          - The app on an actual Mac: macOS CI builds it, and the
+            VideoToolbox decoder is written against Apple's documented API,
+            but nobody has run this build on Apple hardware yet
+          - The elevated setup script end to end: the development PC already
+            had Sunshine, the firewall rules and Wake-on-LAN in place
+          - Wake from a full shutdown depends on the board's firmware
+            allowing it; the Test wake result covers the network path only
           EOF
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
