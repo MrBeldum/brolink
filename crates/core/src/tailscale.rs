@@ -155,6 +155,12 @@ fn run(cmd: &mut Command) -> Result<String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    // The binary inside Tailscale.app is the GUI and the CLI in one. It
+    // takes the CLI path only when SHLVL is set, its sign of "run from a
+    // shell"; an app launched from Finder or the Dock has no SHLVL, and
+    // then it tries to start the (already running) GUI, prints "The
+    // Tailscale GUI failed to start" on stdout and exits 0.
+    cmd.env("SHLVL", "1");
     let out = cmd.output().context("run tailscale")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -163,7 +169,15 @@ fn run(cmd: &mut Command) -> Result<String> {
             err.trim().lines().next().unwrap_or("tailscale failed")
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // The same wrapper reports some failures on stdout with exit code 0.
+    if stdout.trim_start().starts_with("The Tailscale GUI") {
+        bail!(
+            "{}",
+            stdout.trim().lines().next().unwrap_or("tailscale failed")
+        );
+    }
+    Ok(stdout)
 }
 
 #[cfg(test)]
