@@ -16,6 +16,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/BroLink"
 chmod +x "$APP/Contents/MacOS/BroLink"
+# The Finder/Dock icon: the same procedural icon the window uses
+# (brolink_core::icon::render), rendered once and checked in as .icns.
+cp "$ROOT/crates/client/BroLink.icns" "$APP/Contents/Resources/BroLink.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -27,6 +30,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleExecutable</key><string>BroLink</string>
+  <key>CFBundleIconFile</key><string>BroLink</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key>
