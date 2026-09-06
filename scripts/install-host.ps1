@@ -10,8 +10,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $Exe) {
-    $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+    # Beside this script in the release zip; in the repo, under target\release.
+    $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $Root = Split-Path -Parent $Here
     foreach ($c in @(
+            (Join-Path $Here "brolink-host.exe"),
             (Join-Path $Root "brolink-host.exe"),
             (Join-Path $Root "target\release\brolink-host.exe")
         )) {
@@ -26,11 +29,13 @@ $DestDir = Join-Path $env:LOCALAPPDATA "BroLink"
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
 $DestExe = Join-Path $DestDir "brolink-host.exe"
 
-# A running service holds the old exe open; ask it to stop first.
+# A running service or panel holds the old exe open; stop them first.
 try {
     Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47850/v1/quit" -TimeoutSec 2 | Out-Null
     Start-Sleep -Milliseconds 800
 } catch {}
+Get-Process brolink-host -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 300
 Copy-Item $Exe $DestExe -Force
 Write-Host "Installed: $DestExe"
 $Msi = Join-Path (Split-Path -Parent $Exe) "Sunshine-Windows-AMD64-installer.msi"
