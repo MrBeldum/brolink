@@ -143,3 +143,33 @@ a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
   go out.
 - Nothing else. BroLink captures no screen and reads the keyboard and
   mouse only in its own window.
+
+## Updates
+
+The app checks GitHub for a new release about every six hours and twenty
+seconds after it starts. A newer version is downloaded to
+`~/Library/Application Support/BroLink/updates/<tag>/`, checked against the
+SHA-256 GitHub publishes for the asset and against its own code signature,
+and moved over `/Applications/BroLink.app` once no stream is running; the
+app then relaunches. The Mac also sends the new `brolink-host.exe` to each
+PC whose BroLink Host is older (see [WINDOWS.md](WINDOWS.md)).
+
+The download needs a GitHub login because the repository is private. The
+app uses, in order: `github_token` in `client.toml`, `BROLINK_GITHUB_TOKEN`
+in the environment, and the token git has stored for github.com (which is
+there after `install-macos-release.sh` or any `git` use with the osxkeychain
+helper). Settings has the switch and a **Check now** button; the line under
+it says what happened last. A copy that is not running from an app bundle
+(a development build) reports the new version but does not replace itself.
+
+## Staying reachable
+
+- Every PC in the list, and this Mac, shows a warning while its Tailscale
+  node key expires. Open the machine in the
+  [admin console](https://login.tailscale.com/admin/machines) and choose
+  **Disable key expiry**; the warning goes away at the next scan.
+- PCs are remembered in `client.toml` with their Tailscale address, MAC and
+  the certificate from pairing. While Tailscale on this Mac is off they stay
+  listed with when they were last seen, and **Wake** still works over the
+  LAN or the public address.
+

@@ -4,6 +4,7 @@
 use crate::config::{ClientConfig, Codec, Resolution};
 use crate::session::{self, Connect, Discovery, Live, Pc, Progress, Step, Target};
 use crate::stream::{self, Action};
+use crate::update;
 use brolink_core::api::PowerAction;
 use brolink_core::tailscale;
 use brolink_stream::Event;
@@ -37,13 +38,21 @@ pub struct ClientApp {
     offer_sleep: Option<Pc>,
     ended_seen: bool,
     pending_notice: Option<Notice>,
+    updates: Arc<Mutex<update::State>>,
 }
 
 impl ClientApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let discovery = Arc::new(Mutex::new(Discovery::default()));
         session::spawn_discovery(discovery.clone(), cc.egui_ctx.clone());
-        Self::with_shared(cc, discovery, Arc::default(), true)
+        let app = Self::with_shared(cc, discovery.clone(), Arc::default(), true);
+        update::spawn(
+            app.updates.clone(),
+            discovery,
+            app.live.clone(),
+            cc.egui_ctx.clone(),
+        );
+        app
     }
 
     fn with_shared(
@@ -73,6 +82,7 @@ impl ClientApp {
             offer_sleep: None,
             ended_seen: true,
             pending_notice: None,
+            updates: Arc::default(),
         }
     }
 
@@ -337,12 +347,16 @@ impl eframe::App for ClientApp {
                         if let Some((tone, text, _)) = &self.notice {
                             ui::notice(ui, *tone, text);
                         }
+                        if let Some((tone, text)) = self.updates.lock().notice.clone() {
+                            ui::notice(ui, tone, &text);
+                        }
                         if prog.active() {
                             self.session_card(ui, &prog);
                         } else if let Step::Ended { error } = &prog.step {
                             self.ended_card(ui, &prog, error.as_deref());
                         }
                         self.pcs_card(ui, ctx, &disc, &prog);
+                        self.key_expiry_notices(ui, &disc);
                         if self.settings_open {
                             self.settings_card(ui, ctx, &prog);
                         }
@@ -407,7 +421,11 @@ impl ClientApp {
                     let detail = describe(pc);
                     ui::list_row(ui, &pc.name, &detail, |ui| {
                         let busy = prog.active();
-                        if pc.can_stream() && !busy && ui::primary_button(ui, "Connect").clicked() {
+                        if pc.can_stream()
+                            && !pc.remembered
+                            && !busy
+                            && ui::primary_button(ui, "Connect").clicked()
+                        {
                             self.connect(ctx, pc);
                         }
                         if !pc.online
@@ -454,6 +472,15 @@ impl ClientApp {
                 }
             },
         );
+    }
+
+    /// A Tailscale node key that expires is the one thing that can take a
+    /// far-away PC off the tailnet with nobody there to sign it back in.
+    fn key_expiry_notices(&self, ui: &mut egui::Ui, disc: &Discovery) {
+        for text in key_expiry_warnings(disc) {
+            let urgent = text.contains("expired") || text.contains(" days") && days_in(&text) <= 30;
+            ui::notice(ui, if urgent { Tone::Danger } else { Tone::Info }, &text);
+        }
     }
 
     fn power_menu(&mut self, ui: &mut egui::Ui, pc: &Pc) {
@@ -673,14 +700,90 @@ impl ClientApp {
                 ) {
                     self.dirty = true;
                 }
+                ui::row_separator(ui);
+                if ui::toggle_row(
+                    ui,
+                    &mut self.cfg.auto_update,
+                    "Keep BroLink and your PCs up to date",
+                    Some("Checks GitHub every few hours, installs new versions of this app, and sends BroLink Host updates to your PCs over Tailscale."),
+                ) {
+                    self.dirty = true;
+                }
+                let (message, checked) = {
+                    let st = self.updates.lock();
+                    (st.message.clone(), st.checked)
+                };
+                let hint = format!(
+                    "{} · {}",
+                    if message.is_empty() {
+                        "Waiting for the first check."
+                    } else {
+                        &message
+                    },
+                    update::ago(checked)
+                );
+                ui::setting_row(ui, "Updates", Some(&hint), |ui| {
+                    if ui::ghost_button(ui, "Check now").clicked() {
+                        self.updates.lock().check_now = true;
+                    }
+                });
             },
         );
     }
 }
 
+/// One line per machine whose Tailscale key expires, this Mac included.
+fn key_expiry_warnings(disc: &Discovery) -> Vec<String> {
+    let mut out = Vec::new();
+    for pc in &disc.pcs {
+        if let Some(d) = pc.key_expiry_days {
+            out.push(if d <= 0 {
+                format!(
+                    "{}'s Tailscale key has expired: it is off the tailnet until someone signs Tailscale in at the PC.",
+                    pc.name
+                )
+            } else {
+                format!(
+                    "{}'s Tailscale key expires in {d} days. In the Tailscale admin console (login.tailscale.com/admin/machines), open {} and choose Disable key expiry; otherwise it drops off the tailnet and needs a sign-in at the PC.",
+                    pc.name, pc.name
+                )
+            });
+        }
+    }
+    if let Some(d) = disc.self_key_days {
+        out.push(if d <= 0 {
+            "This Mac's Tailscale key has expired; sign in to Tailscale again.".to_string()
+        } else {
+            format!(
+                "This Mac's Tailscale key expires in {d} days; disable key expiry for it in the admin console as well."
+            )
+        });
+    }
+    out
+}
+
+/// The day count inside a warning line, for its tone.
+fn days_in(text: &str) -> i64 {
+    text.split(" in ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(i64::MAX)
+}
+
 /// The second line under a PC's name. Kept short: it is cut, not wrapped.
 fn describe(pc: &Pc) -> String {
     let ip = pc.ip.map(|ip| ip.to_string()).unwrap_or_default();
+    if pc.remembered {
+        let seen = pc.known.as_ref().and_then(|k| k.last_seen_unix);
+        return match seen {
+            Some(t) => format!(
+                "Last seen {} · Tailscale is off on this Mac",
+                brolink_core::dates::ymd(t)
+            ),
+            None => "Tailscale is off on this Mac".into(),
+        };
+    }
     if !pc.online {
         return if pc.can_wake() {
             "Asleep or off · Connect wakes it".into()
@@ -701,6 +804,51 @@ fn describe(pc: &Pc) -> String {
 mod tests {
     use super::*;
     use crate::config::KnownPc;
+
+    #[test]
+    fn remembered_pcs_say_when_they_were_seen_and_keys_get_warnings() {
+        let pc = Pc {
+            name: "Gaming-PC".into(),
+            remembered: true,
+            known: Some(KnownPc {
+                last_seen_unix: Some(1_788_739_200),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            describe(&pc),
+            "Last seen 2026-09-07 · Tailscale is off on this Mac"
+        );
+        let disc = Discovery {
+            pcs: vec![
+                Pc {
+                    name: "Gaming-PC".into(),
+                    key_expiry_days: Some(176),
+                    ..Default::default()
+                },
+                Pc {
+                    name: "Den".into(),
+                    key_expiry_days: None,
+                    ..Default::default()
+                },
+                Pc {
+                    name: "Office".into(),
+                    key_expiry_days: Some(-2),
+                    ..Default::default()
+                },
+            ],
+            self_key_days: Some(12),
+            ..Default::default()
+        };
+        let w = key_expiry_warnings(&disc);
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("Gaming-PC") && w[0].contains("176 days"));
+        assert_eq!(days_in(&w[0]), 176);
+        assert!(w[1].contains("Office") && w[1].contains("expired"));
+        assert!(w[2].starts_with("This Mac") && days_in(&w[2]) == 12);
+        assert!(key_expiry_warnings(&Discovery::default()).is_empty());
+    }
 
     #[test]
     fn descriptions_cover_every_state() {
@@ -764,6 +912,8 @@ mod snapshots {
                 lan_ip: Some("192.168.1.10".into()),
                 ..Default::default()
             }),
+            key_expiry_days: Some(176),
+            ..Default::default()
         };
         let asleep = Pc {
             node_id: "n2".into(),
@@ -788,6 +938,7 @@ mod snapshots {
             login: "user@example.com".into(),
             pcs: vec![ready, asleep, bare],
             refreshed: Some(Instant::now()),
+            ..Default::default()
         }
     }
 

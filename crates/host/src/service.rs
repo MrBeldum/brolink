@@ -7,9 +7,10 @@
 
 use crate::config::HostConfig;
 use crate::streamer::{self, Api, Install};
+use crate::update;
 use crate::wake::{self, WakeInfo};
-use anyhow::Result;
-use brolink_core::api::{Ack, PinRequest, PowerRequest, Status, Streamer};
+use anyhow::{Context, Result};
+use brolink_core::api::{Ack, PinRequest, PowerRequest, Status, Streamer, UPDATE_PATH};
 use brolink_core::http::{self, Request, Response};
 use brolink_core::{tailscale, CONTROL_PORT};
 use parking_lot::Mutex;
@@ -59,13 +60,37 @@ impl Service {
     }
 
     /// Bind, then serve forever. Fails only when the port is taken, which
-    /// means another copy is already running.
-    pub fn run(self: Arc<Self>) -> Result<()> {
-        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, CONTROL_PORT)))?;
+    /// means another copy is already running. `replacing` is the service an
+    /// update just started: the old one is still answering its last request,
+    /// so wait for the port rather than give up.
+    pub fn run(self: Arc<Self>, replacing: bool) -> Result<()> {
+        let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, CONTROL_PORT));
+        let listener = if replacing {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                match TcpListener::bind(addr) {
+                    Ok(l) => break l,
+                    Err(e) if Instant::now() < deadline => {
+                        tracing::info!("waiting for the old service to stop: {e}");
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                    Err(e) => return Err(e).context("bind after an update"),
+                }
+            }
+        } else {
+            TcpListener::bind(addr)?
+        };
         self.log(format!(
             "BroLink Host {} listening on TCP {CONTROL_PORT}",
             env!("CARGO_PKG_VERSION")
         ));
+        if let Ok(exe) = std::env::current_exe() {
+            if replacing {
+                self.log("updated: the previous version has been replaced");
+                update::tidy(&exe);
+            }
+            self.ensure_autostart(&exe);
+        }
         let refresher = self.clone();
         std::thread::spawn(move || refresher.refresh_loop());
         let svc = self.clone();
@@ -75,6 +100,18 @@ impl Service {
         let handler = self.clone();
         http::serve(listener, move |peer, req| handler.handle(peer, req));
         Ok(())
+    }
+
+    /// A PC nobody can reach in person has to come back by itself after a
+    /// restart, so the logon entry is kept unless the owner turned it off.
+    fn ensure_autostart(&self, exe: &std::path::Path) {
+        if !self.cfg.lock().start_with_windows || crate::setup::starts_with_windows() {
+            return;
+        }
+        match crate::setup::set_start_with_windows(true, exe) {
+            Ok(()) => self.log("registered the background service to start at logon"),
+            Err(e) => self.log(format!("could not register start at logon: {e:#}")),
+        }
     }
 
     fn refresh_loop(&self) {
@@ -296,6 +333,7 @@ impl Service {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("POST", "/v1/pin") => self.pin(req),
             ("POST", "/v1/power") => self.power(req),
+            ("POST", p) if p == UPDATE_PATH => self.update(req),
             ("POST", "/v1/quit") if local => {
                 self.log("control panel asked the service to stop");
                 std::thread::spawn(|| {
@@ -308,8 +346,39 @@ impl Service {
         }
     }
 
+    /// A newer `brolink-host.exe` from the Mac: stage it, answer, then swap
+    /// it in and hand over. See [`crate::update`].
+    fn update(&self, req: &Request) -> Response {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => return Response::json(500, &Ack::err(format!("own path unknown: {e}"))),
+        };
+        match update::stage(req, &exe) {
+            Ok(version) => {
+                self.log(format!(
+                    "updating to {version}: the Mac sent the new BroLink Host"
+                ));
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(500));
+                    match update::apply(&exe) {
+                        Ok(()) => {
+                            tracing::info!("handing over to {version}");
+                            std::process::exit(0);
+                        }
+                        Err(e) => tracing::error!("update to {version} failed: {e:#}"),
+                    }
+                });
+                Response::json(200, &Ack::ok())
+            }
+            Err(r) => {
+                self.log(format!("update refused: {}", r.message()));
+                Response::json(r.status(), &Ack::err(r.message()))
+            }
+        }
+    }
+
     fn pin(&self, req: &Request) -> Response {
-        let Ok(p) = serde_json::from_str::<PinRequest>(&req.body) else {
+        let Ok(p) = req.json::<PinRequest>() else {
             return Response::json(400, &Ack::err("expected {\"pin\",\"name\"}"));
         };
         if p.pin.len() != 4 || !p.pin.chars().all(|c| c.is_ascii_digit()) {
@@ -339,7 +408,7 @@ impl Service {
     }
 
     fn power(&self, req: &Request) -> Response {
-        let Ok(p) = serde_json::from_str::<PowerRequest>(&req.body) else {
+        let Ok(p) = req.json::<PowerRequest>() else {
             return Response::json(
                 400,
                 &Ack::err("expected {\"action\": sleep|restart|shutdown}"),
@@ -406,7 +475,7 @@ mod tests {
         let req = Request {
             method: "GET".into(),
             path: "/v1/status".into(),
-            body: String::new(),
+            ..Default::default()
         };
         let r = svc.handle("192.168.1.11:5".parse().unwrap(), &req);
         assert_eq!(r.status, 403);
@@ -428,6 +497,7 @@ mod tests {
             method: "POST".into(),
             path: path.into(),
             body: body.into(),
+            ..Default::default()
         };
         assert_eq!(svc.handle(local, &post("/v1/pin", "{}")).status, 400);
         assert_eq!(
@@ -447,6 +517,19 @@ mod tests {
             400
         );
         assert_eq!(svc.handle(local, &post("/v1/nope", "")).status, 404);
+        // An update without its headers is refused before anything is written.
+        let r = svc.handle(local, &post(UPDATE_PATH, "MZ"));
+        assert_eq!(r.status, 400, "{}", r.body);
+        let r = svc.handle(
+            local,
+            &Request {
+                method: "POST".into(),
+                path: UPDATE_PATH.into(),
+                headers: vec![("x-brolink-version".into(), "0.0.1".into())],
+                body: b"MZ".to_vec(),
+            },
+        );
+        assert_eq!(r.status, 409, "{}", r.body);
     }
 
     #[test]
@@ -459,6 +542,7 @@ mod tests {
                 method: "POST".into(),
                 path: "/v1/power".into(),
                 body: r#"{"action":"sleep"}"#.into(),
+                ..Default::default()
             },
         );
         assert_eq!(r.status, 403);

@@ -72,6 +72,38 @@ The `xattr` step is needed for a browser download because the app is
 ad-hoc signed rather than Developer-ID signed. Details, including the
 toolbar and keyboard behaviour, in [docs/MACOS.md](docs/MACOS.md).
 
+## Updates
+
+BroLink keeps itself current. Every few hours the Mac app asks GitHub for
+the latest release. A newer app is downloaded, checked against the digest
+GitHub publishes and its own code signature, swapped into `/Applications`
+once no stream is running, and relaunched. A newer BroLink Host is sent
+from the Mac to every PC whose host reports an older version, over the same
+Tailscale-authenticated control API that can put the PC to sleep; the host
+verifies the digest, replaces its executable and restarts. A PC that is
+asleep gets the update the next time the Mac sees it. Nothing is downloaded
+on the PC, and no GitHub login is needed there.
+
+The Mac uses the GitHub token git has stored for github.com (the install
+script leaves one), `BROLINK_GITHUB_TOKEN`, or `github_token` in
+`client.toml`. Settings has the switch and a **Check now** button. Hosts
+installed before 3.1 do not have the update route: install that release on
+the PC once (through the stream works), after which updates are automatic.
+
+## Staying reachable
+
+A PC nobody can get to in person stays reachable when three things hold.
+BroLink Host starts with Windows by default and turns this back on at every
+start unless the owner switches it off in the host window. Sunshine runs as
+a Windows service, so streaming works even before anyone logs in. And the
+PC's Tailscale node key must not expire: Tailscale keys expire after 180
+days unless key expiry is disabled for that machine in the
+[admin console](https://login.tailscale.com/admin/machines), and an expired
+key needs a sign-in at the PC. BroLink shows the expiry of every machine it
+lists, this Mac included, until expiry is disabled. Pairing and the PC's
+addresses are saved on the Mac, so PCs stay listed even while Tailscale on
+the Mac is off.
+
 ## Waking the PC
 
 A wake packet has to reach the PC's network card on the PC's own network.
@@ -129,8 +161,8 @@ that run against a real Sunshine.
 ```
 crates/core     control API types, small HTTP, Tailscale CLI, wake packets, config
 crates/stream   the GameStream client: pairing, launch, moonlight-common-c, decode, audio
-crates/host     Windows: background control service, control panel, setup script
-crates/client   macOS: PC list, wake, pair, stream window and toolbar
+crates/host     Windows: background control service, control panel, setup script, self-update
+crates/client   macOS: PC list, wake, pair, stream window and toolbar, updater
 crates/ui       theme and widgets shared by both windows
 third_party/    moonlight-common-c (GPL-3.0), vendored
 docs/           platform notes

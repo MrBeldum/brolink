@@ -70,6 +70,11 @@ pub struct KnownPc {
     pub public_ip: Option<String>,
     /// Sunshine's certificate (hex DER) from pairing; absent until paired.
     pub server_cert: Option<String>,
+    /// The PC's Tailscale address, so it can still be listed and reached
+    /// when this Mac's Tailscale cannot say.
+    pub tailscale_ip: Option<String>,
+    /// When the PC was last seen online (Unix seconds).
+    pub last_seen_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +85,10 @@ pub struct ClientConfig {
     pub sleep_prompt: bool,
     /// The Mac's Command key acts as Ctrl on the PC (else as the Windows key).
     pub cmd_is_ctrl: bool,
+    /// Install new releases of this app and send them to the PCs.
+    pub auto_update: bool,
+    /// A GitHub token for the release downloads, when git has none stored.
+    pub github_token: Option<String>,
     /// Keyed by Tailscale node id.
     pub pcs: BTreeMap<String, KnownPc>,
 }
@@ -90,6 +99,8 @@ impl Default for ClientConfig {
             stream: StreamSettings::default(),
             sleep_prompt: true,
             cmd_is_ctrl: true,
+            auto_update: true,
+            github_token: None,
             pcs: BTreeMap::new(),
         }
     }
@@ -122,7 +133,7 @@ mod tests {
         assert_eq!(Resolution::Native.pixels((3024, 1964)), (3024, 1964));
         let c: ClientConfig = toml::from_str("").unwrap();
         assert_eq!(c.stream, s);
-        assert!(c.sleep_prompt && c.cmd_is_ctrl);
+        assert!(c.sleep_prompt && c.cmd_is_ctrl && c.auto_update);
         let mut c = ClientConfig::default();
         c.pcs.insert(
             "n".into(),
@@ -132,6 +143,8 @@ mod tests {
                 lan_ip: Some("192.168.1.10".into()),
                 public_ip: None,
                 server_cert: Some("3082".into()),
+                tailscale_ip: Some("100.64.0.10".into()),
+                last_seen_unix: Some(1_788_739_200),
             },
         );
         let back: ClientConfig = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();

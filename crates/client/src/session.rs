@@ -26,6 +26,11 @@ pub struct Pc {
     /// Sunshine's port answered.
     pub sunshine: bool,
     pub known: Option<KnownPc>,
+    /// Listed from what was saved, because Tailscale on this Mac could not
+    /// say; nothing has been probed.
+    pub remembered: bool,
+    /// Days until the PC's Tailscale key expires; `None` when it never does.
+    pub key_expiry_days: Option<i64>,
 }
 
 impl Pc {
@@ -42,11 +47,14 @@ impl Pc {
 
 #[derive(Debug, Clone, Default)]
 pub struct Discovery {
-    /// Why nothing can be listed, when Tailscale is down.
+    /// Why nothing can be probed, when Tailscale is down. The list then
+    /// holds what was remembered.
     pub error: Option<String>,
     pub login: String,
     pub pcs: Vec<Pc>,
     pub refreshed: Option<Instant>,
+    /// Days until this Mac's own Tailscale key expires.
+    pub self_key_days: Option<i64>,
 }
 
 /// Rescan the tailnet every few seconds and remember what each PC needs to
@@ -57,8 +65,21 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
         let scan = scan(&cfg);
         let mut learned = cfg.clone();
         for pc in &scan.pcs {
+            if pc.remembered {
+                continue;
+            }
             let entry = learned.pcs.entry(pc.node_id.clone()).or_default();
             entry.name = pc.name.clone();
+            if let Some(ip) = pc.ip {
+                entry.tailscale_ip = Some(ip.to_string());
+            }
+            if pc.online {
+                // Coarse on purpose: the file is rewritten only when this moves.
+                let now = brolink_core::dates::now_unix();
+                if entry.last_seen_unix.is_none_or(|t| now - t > 600) {
+                    entry.last_seen_unix = Some(now);
+                }
+            }
             if let Some(h) = &pc.host {
                 if h.mac.is_some() {
                     entry.mac = h.mac.clone();
@@ -90,6 +111,7 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         Err(e) => {
             return Discovery {
                 error: Some(e.to_string()),
+                pcs: remembered(cfg),
                 refreshed: Some(Instant::now()),
                 ..Default::default()
             }
@@ -131,6 +153,8 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
                 host,
                 sunshine,
                 known,
+                remembered: false,
+                key_expiry_days: n.key_expiry_days(),
             }
         })
         .collect();
@@ -139,7 +163,28 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         login: st.self_login().unwrap_or("").to_string(),
         pcs,
         refreshed: Some(Instant::now()),
+        self_key_days: st.self_node.key_expiry_days(),
     }
+}
+
+/// The PCs as last saved, for when Tailscale cannot list them. Sorted by
+/// name like the live list.
+pub fn remembered(cfg: &ClientConfig) -> Vec<Pc> {
+    let mut pcs: Vec<Pc> = cfg
+        .pcs
+        .iter()
+        .filter(|(_, k)| !k.name.is_empty())
+        .map(|(id, k)| Pc {
+            node_id: id.clone(),
+            name: k.name.clone(),
+            ip: k.tailscale_ip.as_deref().and_then(|s| s.parse().ok()),
+            known: Some(k.clone()),
+            remembered: true,
+            ..Default::default()
+        })
+        .collect();
+    pcs.sort_by(|a, b| a.name.cmp(&b.name));
+    pcs
 }
 
 fn host_status(ip: Ipv4Addr, timeout: Duration) -> Option<Status> {
@@ -590,6 +635,7 @@ mod tests {
                 lan_ip: Some("192.168.1.10".into()),
                 public_ip: Some("203.0.113.5".into()),
                 server_cert: Some("3082".into()),
+                ..Default::default()
             }),
             ..Default::default()
         };

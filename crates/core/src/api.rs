@@ -10,8 +10,20 @@
 //! | POST   | /v1/pin     | [`PinRequest`]  | [`Ack`]      |
 //! | POST   | /v1/power   | [`PowerRequest`]| [`Ack`]      |
 //! | POST   | /v1/quit    |                 | [`Ack`] (loopback only) |
+//! | POST   | /v1/update  | `brolink-host.exe` bytes | [`Ack`]     |
+//!
+//! `/v1/update` carries the new executable itself, with its version in
+//! [`UPDATE_VERSION_HEADER`] and its SHA-256 in [`UPDATE_SHA256_HEADER`]. A
+//! tailnet peer that may sleep the PC may also update it; the host verifies
+//! the digest, swaps the file in and restarts. See [`crate::update`].
 
 use serde::{Deserialize, Serialize};
+
+pub const UPDATE_PATH: &str = "/v1/update";
+pub const UPDATE_VERSION_HEADER: &str = "x-brolink-version";
+pub const UPDATE_SHA256_HEADER: &str = "x-brolink-sha256";
+/// The largest host executable accepted; the real one is a tenth of this.
+pub const UPDATE_MAX_BYTES: usize = 128 * 1024 * 1024;
 
 /// Everything the Mac needs to know about the PC, and everything the host's
 /// own control panel shows.

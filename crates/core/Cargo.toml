@@ -14,3 +14,8 @@ toml.workspace = true
 tracing.workspace = true
 directories.workspace = true
 if-addrs = "0.15"
+# Release lookup and download from GitHub over HTTPS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+semver = "1"
+sha2 = "0.10"

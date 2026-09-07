@@ -23,6 +23,7 @@ rand.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
+semver = "1"
 
 [dev-dependencies]
 toml.workspace = true

@@ -121,3 +121,30 @@ itself. The **This PC** card shows whether it is present and offers
   and Windows is the problem. Check the This PC card for "off" or "Fast
   Startup on" and run setup again; for wake from power off, look for the
   firmware setting named above.
+
+## Updates
+
+BroLink Host does not download anything. The Mac fetches each release and
+POSTs the new `brolink-host.exe` to `/v1/update` on the control port with
+its version and SHA-256, from a machine on the PC's own Tailscale account,
+the same check that guards remote power actions. The service verifies the
+digest, that the bytes are a Windows executable and a newer version, writes
+`brolink-host.exe.new` beside itself, renames the running file to
+`brolink-host.exe.old`, moves the new one in and starts it with
+`--replaces <pid>`; the new service waits for the old one to release the
+port, then removes the `.old` file. Both events appear in the host log and
+the Sunshine session, if any, is not interrupted.
+
+Hosts older than 3.1 have no update route; install 3.1 on the PC once.
+
+## Staying reachable
+
+The background service starts with Windows by default and sets that again
+at every start, so a PC nobody can reach in person comes back after a
+restart; the toggle in Settings is the only thing that turns it off.
+Sunshine runs as a Windows service and streams the sign-in screen, so a
+Mac can still connect after a reboot before anyone logs in. Keep the PC's
+Tailscale key from expiring by disabling key expiry for it in the
+[admin console](https://login.tailscale.com/admin/machines); the Mac warns
+about this for every PC it lists.
+

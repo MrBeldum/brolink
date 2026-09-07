@@ -1,21 +1,48 @@
 //! Just enough HTTP/1.1 for two programs that trust each other: one request
-//! per connection, small JSON bodies, `Connection: close`. No framework, no
-//! TLS (Tailscale is the transport), no keep-alive.
+//! per connection, small JSON bodies (and one large upload, the host update),
+//! `Connection: close`. No framework, no TLS (Tailscale is the transport),
+//! no keep-alive.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// Larger bodies are refused; nothing BroLink sends comes close.
+/// Larger bodies are refused; nothing BroLink sends comes close, except the
+/// host executable on [`crate::api::UPDATE_PATH`], which has its own limit.
 const MAX_BODY: usize = 64 * 1024;
 const MAX_HEADER: usize = 16 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Request {
     pub method: String,
     pub path: String,
-    pub body: String,
+    /// Header names lowercased.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Request {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The body decoded as JSON.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
+        serde_json::from_slice(&self.body).context("body is not the expected JSON")
+    }
+}
+
+/// How large a body `path` may carry.
+fn max_body(path: &str) -> usize {
+    if path == crate::api::UPDATE_PATH {
+        crate::api::UPDATE_MAX_BYTES
+    } else {
+        MAX_BODY
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +81,7 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     }
     let mut content_length = 0usize;
     let mut header_bytes = line.len();
+    let mut headers = Vec::new();
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -68,12 +96,14 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
             break;
         }
         if let Some((k, v)) = l.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().context("content-length")?;
+            let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
+            if k == "content-length" {
+                content_length = v.parse().context("content-length")?;
             }
+            headers.push((k, v));
         }
     }
-    if content_length > MAX_BODY {
+    if content_length > max_body(&path) {
         bail!("body too large ({content_length} bytes)");
     }
     let mut body = vec![0u8; content_length];
@@ -81,7 +111,8 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     Ok(Some(Request {
         method,
         path,
-        body: String::from_utf8(body).context("body is not UTF-8")?,
+        headers,
+        body,
     }))
 }
 
@@ -91,6 +122,8 @@ pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         _ => "Status",
@@ -161,8 +194,28 @@ pub fn request(
     )
 }
 
-/// One HTTP/1.1 request and its reply over any stream (TCP, or TLS on top of
-/// it). The body is read to `Content-Length`, or to the end of the stream.
+/// Like [`request`], with the caller's own headers and a binary body.
+pub fn request_with(
+    addr: impl ToSocketAddrs,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    timeout: Duration,
+) -> Result<Response> {
+    let addr = addr
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow!("no address"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    exchange_with(&mut stream, method, path, &addr.to_string(), headers, body)
+}
+
+/// One HTTP/1.1 request with a JSON body and its reply over any stream (TCP,
+/// or TLS on top of it). The body is read to `Content-Length`, or to the end
+/// of the stream.
 pub fn exchange<S: Read + Write>(
     stream: &mut S,
     method: &str,
@@ -170,12 +223,34 @@ pub fn exchange<S: Read + Write>(
     host: &str,
     body: &str,
 ) -> Result<Response> {
-    let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    exchange_with(
+        stream,
+        method,
+        path,
+        host,
+        &[("Content-Type", "application/json")],
+        body.as_bytes(),
+    )
+}
+
+pub fn exchange_with<S: Read + Write>(
+    stream: &mut S,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<Response> {
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
-    );
+    ));
     stream.write_all(head.as_bytes())?;
-    stream.write_all(body.as_bytes())?;
+    stream.write_all(body)?;
     stream.flush()?;
 
     let mut reader = BufReader::new(stream);
@@ -266,7 +341,7 @@ mod tests {
                     }
                     ("POST", "/v1/echo") => Response {
                         status: 200,
-                        body: req.body.clone(),
+                        body: String::from_utf8_lossy(&req.body).into_owned(),
                     },
                     _ => Response::json(404, &serde_json::json!({ "ok": false })),
                 }
@@ -280,6 +355,42 @@ mod tests {
         assert_eq!(echoed["pin"], "1234");
         let err = get_json::<serde_json::Value>(addr, "/nope", t).unwrap_err();
         assert!(err.to_string().contains("404"), "{err}");
+    }
+
+    #[test]
+    fn headers_and_binary_bodies_reach_the_handler_and_big_ones_only_on_update() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            serve(listener, |_, req| {
+                Response::json(
+                    200,
+                    &serde_json::json!({
+                        "len": req.body.len(),
+                        "ver": req.header("X-BroLink-Version"),
+                        "first": req.body.first(),
+                    }),
+                )
+            });
+        });
+        let t = Duration::from_secs(5);
+        let body = vec![0x4du8; 100 * 1024];
+        let r = request_with(
+            addr,
+            "POST",
+            crate::api::UPDATE_PATH,
+            &[("X-BroLink-Version", "3.1.0")],
+            &body,
+            t,
+        )
+        .unwrap();
+        let v: serde_json::Value = r.parse().unwrap();
+        assert_eq!(v["len"], 100 * 1024);
+        assert_eq!(v["ver"], "3.1.0");
+        assert_eq!(v["first"], 0x4d);
+        // The same body on an ordinary route is over the limit.
+        let r = request_with(addr, "POST", "/v1/pin", &[], &body, t).unwrap();
+        assert_eq!(r.status, 400, "{}", r.body);
     }
 
     #[test]

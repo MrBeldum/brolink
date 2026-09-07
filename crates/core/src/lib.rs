@@ -4,13 +4,15 @@
 //! The picture never passes through here. `brolink-stream` speaks the
 //! GameStream protocol to Sunshine on the PC and Tailscale carries it; this
 //! crate holds the rest: finding the PC, waking it, pairing without touching
-//! it, and turning it off again.
+//! it, turning it off again, and fetching new releases.
 
 pub mod api;
 pub mod config;
+pub mod dates;
 pub mod http;
 pub mod icon;
 pub mod tailscale;
+pub mod update;
 pub mod wake;
 
 pub const APP_NAME: &str = "BroLink";

@@ -63,11 +63,22 @@ pub struct Node {
     /// The public `ip:port` of the peer's last direct path, if any.
     #[serde(rename = "CurAddr")]
     pub cur_addr: String,
+    /// When this machine's node key stops working (RFC 3339), unless key
+    /// expiry is disabled for it in the admin console; a zero time then.
+    pub key_expiry: String,
+    pub expired: bool,
 }
 
 impl Node {
     pub fn ipv4(&self) -> Option<Ipv4Addr> {
         self.tailscale_ips.iter().find_map(|s| s.parse().ok())
+    }
+    /// Days until the node key expires; `None` when it never does.
+    pub fn key_expiry_days(&self) -> Option<i64> {
+        if self.expired {
+            return Some(0);
+        }
+        crate::dates::days_until(&self.key_expiry)
     }
     pub fn is_windows(&self) -> bool {
         self.os.eq_ignore_ascii_case("windows")
@@ -192,7 +203,8 @@ mod tests {
         "nodekey:a": {"ID": "nMAC", "HostName": "Example Mac", "DNSName": "mac.example.ts.net.", "OS": "macOS",
                       "UserID": 42, "TailscaleIPs": ["100.64.0.20"], "Online": false},
         "nodekey:b": {"ID": "nPC2", "HostName": "Office", "DNSName": "office.example.ts.net.", "OS": "windows",
-                      "UserID": 42, "TailscaleIPs": ["fd7a::2", "100.64.0.30"], "Online": true, "CurAddr": "203.0.113.5:41641"},
+                      "UserID": 42, "TailscaleIPs": ["fd7a::2", "100.64.0.30"], "Online": true, "CurAddr": "203.0.113.5:41641",
+                      "KeyExpiry": "2999-03-02T23:03:00Z"},
         "nodekey:c": {"ID": "nPC1", "HostName": "Den", "DNSName": "den.example.ts.net.", "OS": "windows",
                       "UserID": 43, "TailscaleIPs": ["100.64.0.31"], "Online": false}
       },
@@ -218,6 +230,9 @@ mod tests {
         assert!(pcs[1].online);
         assert_eq!(pcs[1].public_ipv4(), Some("203.0.113.5".parse().unwrap()));
         assert_eq!(pcs[0].public_ipv4(), None);
+        // Office's key expires far off; Den has no expiry (a zero time).
+        assert!(pcs[1].key_expiry_days().unwrap() > 300_000);
+        assert_eq!(pcs[0].key_expiry_days(), None);
     }
 
     #[test]

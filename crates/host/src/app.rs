@@ -451,15 +451,28 @@ impl HostApp {
                 ui,
                 &mut auto,
                 "Start the background service with Windows",
-                Some("Otherwise the Mac cannot pair with or sleep this PC until this window is opened."),
+                Some("On by default, so the Mac can reach this PC after every restart without anyone at the keyboard."),
             ) {
                 if let Ok(exe) = std::env::current_exe() {
                     match setup::set_start_with_windows(auto, &exe) {
-                        Ok(()) => self.autostart = auto,
+                        Ok(()) => {
+                            self.autostart = auto;
+                            self.cfg.start_with_windows = auto;
+                            self.dirty = true;
+                        }
                         Err(e) => tracing::warn!("autostart: {e:#}"),
                     }
                 }
             }
+            ui::row_separator(ui);
+            ui::setting_row(
+                ui,
+                "Updates",
+                Some("New versions of BroLink Host arrive from your Mac over Tailscale and install by themselves; nothing to do here."),
+                |ui| {
+                    ui::muted(ui, format!("v{}", env!("CARGO_PKG_VERSION")));
+                },
+            );
             ui::row_separator(ui);
             ui.horizontal(|ui| {
                 if ui::danger_button(ui, "Stop the background service").clicked() {

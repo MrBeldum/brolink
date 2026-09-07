@@ -5,6 +5,7 @@ mod config;
 mod input;
 mod session;
 mod stream;
+mod update;
 mod video;
 
 fn main() -> anyhow::Result<()> {
