@@ -126,6 +126,11 @@ impl Service {
     /// Cheap checks every tick; the slower probes on a longer cadence.
     fn refresh(&self, tick: u64) {
         *self.cfg.lock() = HostConfig::load();
+        let stay_awake = self.cfg.lock().stay_awake;
+        crate::power::keep_awake(stay_awake);
+        if tick == 0 && stay_awake {
+            self.log("keeping this PC awake so Tailscale stays reachable");
+        }
 
         let ts = tailscale::status().map_err(|e| e.to_string());
         {

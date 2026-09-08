@@ -696,7 +696,7 @@ impl ClientApp {
                     ui,
                     &mut self.cfg.sleep_prompt,
                     "Offer to sleep the PC after each session",
-                    Some("Asleep, the PC wakes from this Mac in seconds."),
+                    Some("Asleep, Tailscale is off. This Mac can only wake the PC from that PC's own network, not from elsewhere."),
                 ) {
                     self.dirty = true;
                 }

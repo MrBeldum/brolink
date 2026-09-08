@@ -24,6 +24,10 @@ pub const UPDATE_VERSION_HEADER: &str = "x-brolink-version";
 pub const UPDATE_SHA256_HEADER: &str = "x-brolink-sha256";
 /// The largest host executable accepted; the real one is a tenth of this.
 pub const UPDATE_MAX_BYTES: usize = 128 * 1024 * 1024;
+/// Oldest BroLink Host that serves [`UPDATE_PATH`]. Older hosts cap the
+/// body at 64 KiB and close; a Mac that POSTs the executable anyway sees
+/// a broken pipe (and on macOS, a socket timeout as EAGAIN).
+pub const FIRST_UPDATE_VERSION: &str = "3.1.0";
 
 /// Everything the Mac needs to know about the PC, and everything the host's
 /// own control panel shows.
@@ -156,5 +160,11 @@ mod tests {
         let r: PowerRequest = serde_json::from_str(r#"{"action":"sleep"}"#).unwrap();
         assert_eq!(r.action, PowerAction::Sleep);
         assert!(serde_json::from_str::<PowerRequest>(r#"{"action":"Sleep"}"#).is_err());
+    }
+
+    #[test]
+    fn first_update_version_is_3_1() {
+        assert_eq!(FIRST_UPDATE_VERSION, "3.1.0");
+        assert!(semver::Version::parse(FIRST_UPDATE_VERSION).is_ok());
     }
 }

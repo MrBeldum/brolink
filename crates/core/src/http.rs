@@ -4,7 +4,7 @@
 //! no keep-alive.
 
 use anyhow::{anyhow, bail, Context, Result};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -12,6 +12,39 @@ use std::time::Duration;
 /// host executable on [`crate::api::UPDATE_PATH`], which has its own limit.
 const MAX_BODY: usize = 64 * 1024;
 const MAX_HEADER: usize = 16 * 1024;
+/// Time to read headers and a small JSON body, and to write the reply.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Time to read `brolink-host.exe` after the headers. Tailscale plus a
+/// 10–30 MB body does not fit in [`IDLE_TIMEOUT`].
+const UPDATE_BODY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// macOS reports `SO_RCVTIMEO` / `SO_SNDTIMEO` as EAGAIN (os error 35,
+/// `ErrorKind::WouldBlock`) rather than `TimedOut`. Users then see
+/// "Resource temporarily unavailable". Treat that as a timeout, and a
+/// broken pipe as the peer going away.
+pub(crate) fn io_err(e: std::io::Error) -> anyhow::Error {
+    if is_timeout(&e) {
+        anyhow!("timed out")
+    } else if is_closed(&e) {
+        anyhow!("connection closed")
+    } else {
+        e.into()
+    }
+}
+
+fn is_timeout(e: &std::io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
+        // EAGAIN: Linux 11, macOS 35. ETIMEDOUT: macOS 60, Linux 110.
+        // WSAEWOULDBLOCK 10035, WSAETIMEDOUT 10060.
+        || matches!(e.raw_os_error(), Some(11 | 35 | 60 | 110 | 10035 | 10060))
+}
+
+fn is_closed(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+    ) || matches!(e.raw_os_error(), Some(32 | 54 | 104 | 10053 | 10054))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Request {
@@ -70,7 +103,7 @@ impl Response {
 pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    if reader.read_line(&mut line).map_err(io_err)? == 0 {
         return Ok(None);
     }
     let mut parts = line.split_whitespace();
@@ -84,7 +117,7 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     let mut headers = Vec::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        if reader.read_line(&mut line).map_err(io_err)? == 0 {
             bail!("connection closed inside headers");
         }
         header_bytes += line.len();
@@ -106,8 +139,14 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     if content_length > max_body(&path) {
         bail!("body too large ({content_length} bytes)");
     }
+    if content_length > MAX_BODY {
+        reader
+            .get_mut()
+            .set_read_timeout(Some(UPDATE_BODY_TIMEOUT))
+            .map_err(io_err)?;
+    }
     let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body)?;
+    reader.read_exact(&mut body).map_err(io_err)?;
     Ok(Some(Request {
         method,
         path,
@@ -134,9 +173,9 @@ pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
         reason,
         resp.body.len()
     );
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(resp.body.as_bytes())?;
-    stream.flush()?;
+    stream.write_all(head.as_bytes()).map_err(io_err)?;
+    stream.write_all(resp.body.as_bytes()).map_err(io_err)?;
+    stream.flush().map_err(io_err)?;
     Ok(())
 }
 
@@ -151,8 +190,8 @@ where
         let Ok(mut stream) = conn else { continue };
         let handler = handler.clone();
         std::thread::spawn(move || {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(IDLE_TIMEOUT));
             let peer = match stream.peer_addr() {
                 Ok(p) => p,
                 Err(_) => return,
@@ -182,9 +221,9 @@ pub fn request(
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow!("no address"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
+    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
+    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
     exchange(
         &mut stream,
         method,
@@ -207,9 +246,9 @@ pub fn request_with(
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow!("no address"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
+    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
+    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
     exchange_with(&mut stream, method, path, &addr.to_string(), headers, body)
 }
 
@@ -249,13 +288,13 @@ pub fn exchange_with<S: Read + Write>(
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     ));
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(body)?;
-    stream.flush()?;
+    stream.write_all(head.as_bytes()).map_err(io_err)?;
+    stream.write_all(body).map_err(io_err)?;
+    stream.flush().map_err(io_err)?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    reader.read_line(&mut line).map_err(io_err)?;
     let status: u16 = line
         .split_whitespace()
         .nth(1)
@@ -264,7 +303,7 @@ pub fn exchange_with<S: Read + Write>(
     let mut content_length: Option<usize> = None;
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        if reader.read_line(&mut line).map_err(io_err)? == 0 {
             break;
         }
         let l = line.trim_end();
@@ -281,7 +320,7 @@ pub fn exchange_with<S: Read + Write>(
     match content_length {
         Some(n) if n <= MAX_BODY => {
             body.resize(n, 0);
-            reader.read_exact(&mut body)?;
+            reader.read_exact(&mut body).map_err(io_err)?;
         }
         Some(n) => bail!("reply too large ({n} bytes)"),
         None => {
@@ -327,6 +366,7 @@ pub fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
 
     #[test]
     fn client_and_server_agree_over_loopback() {
@@ -388,9 +428,19 @@ mod tests {
         assert_eq!(v["len"], 100 * 1024);
         assert_eq!(v["ver"], "3.1.0");
         assert_eq!(v["first"], 0x4d);
-        // The same body on an ordinary route is over the limit.
-        let r = request_with(addr, "POST", "/v1/pin", &[], &body, t).unwrap();
-        assert_eq!(r.status, 400, "{}", r.body);
+        // The same body on an ordinary route is over the limit. The server
+        // closes without reading it, so the client may see HTTP 400 or a
+        // closed connection.
+        match request_with(addr, "POST", "/v1/pin", &[], &body, t) {
+            Ok(r) => assert_eq!(r.status, 400, "{}", r.body),
+            Err(e) => {
+                let s = e.to_string();
+                assert!(
+                    s.contains("connection closed") || s.contains("timed out") || s.contains("400"),
+                    "{e:#}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -406,4 +456,28 @@ mod tests {
     }
 
     use crate::api::Ack;
+
+    #[test]
+    fn mac_socket_timeouts_and_broken_pipes_read_as_english() {
+        let e = io_err(std::io::Error::new(
+            ErrorKind::WouldBlock,
+            "Resource temporarily unavailable",
+        ));
+        assert_eq!(e.to_string(), "timed out");
+        let e = io_err(std::io::Error::from_raw_os_error(35));
+        assert_eq!(e.to_string(), "timed out", "{e:#}");
+        let e = io_err(std::io::Error::new(ErrorKind::TimedOut, "timed out"));
+        assert_eq!(e.to_string(), "timed out");
+        let e = io_err(std::io::Error::new(ErrorKind::BrokenPipe, "Broken pipe"));
+        assert_eq!(e.to_string(), "connection closed");
+        let e = io_err(std::io::Error::from_raw_os_error(32));
+        assert_eq!(e.to_string(), "connection closed", "{e:#}");
+        let e = io_err(std::io::Error::new(
+            ErrorKind::ConnectionReset,
+            "Connection reset by peer",
+        ));
+        assert_eq!(e.to_string(), "connection closed");
+        let e = io_err(std::io::Error::other("disk full"));
+        assert!(e.to_string().contains("disk full"), "{e}");
+    }
 }

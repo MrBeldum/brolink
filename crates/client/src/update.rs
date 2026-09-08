@@ -6,9 +6,11 @@
 //! GitHub's digest and its own code signature, and swapped into place once no
 //! stream is running; the app then relaunches itself. A newer host is
 //! downloaded once, and `brolink-host.exe` is sent to each PC whose host
-//! reports an older version, over the same Tailscale-authenticated control
-//! API that can put the PC to sleep. A PC that is asleep gets it the next
-//! time it is seen.
+//! already speaks `/v1/update` (3.1+) and reports an older version, over
+//! the same Tailscale-authenticated control API that can put the PC to
+//! sleep. A 3.0 host is told to install 3.1 once; POSTing the executable
+//! at it would close the connection (broken pipe) because that host caps
+//! the body at 64 KiB. A PC that is asleep gets it the next time it is seen.
 
 use crate::config::ClientConfig;
 use crate::session::{Discovery, Live};
@@ -19,7 +21,7 @@ use brolink_core::{http, CONTROL_PORT};
 use brolink_ui::Tone;
 use parking_lot::Mutex;
 use semver::Version;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +50,8 @@ pub struct State {
     pub notice: Option<(Tone, String)>,
     /// Hosts sent an update recently: node id to (version, when).
     pub pushed: BTreeMap<String, (Version, Instant)>,
+    /// Hosts too old to receive `/v1/update`; told the user once.
+    pub told_old: BTreeSet<String>,
 }
 
 pub fn spawn(
@@ -89,7 +93,7 @@ pub fn spawn(
                         next = Instant::now() + RETRY_AFTER;
                         let mut st = state.lock();
                         st.checked = Some(Instant::now());
-                        st.message = format!("Could not check for updates: {e:#}.");
+                        st.message = format!("Could not check for updates: {e}.");
                         tracing::warn!("update check: {e:#}");
                     }
                 }
@@ -119,7 +123,7 @@ pub fn spawn(
                     }
                     Err(e) => {
                         state.lock().message =
-                            format!("Could not download BroLink {}: {e:#}.", rel.version);
+                            format!("Could not download BroLink {}: {e}.", rel.version);
                         tracing::warn!("self-update: {e:#}");
                         // Try again at the next check rather than every tick.
                         release = None;
@@ -139,7 +143,7 @@ pub fn spawn(
                             let mut st = state.lock();
                             st.ready = None;
                             st.notice = None;
-                            st.message = format!("Could not install BroLink {v}: {e:#}.");
+                            st.message = format!("Could not install BroLink {v}: {e}.");
                             tracing::error!("self-update: {e:#}");
                             release = None;
                             next = Instant::now() + RETRY_AFTER;
@@ -159,7 +163,16 @@ pub fn spawn(
                 let Ok(v) = Version::parse(&h.version) else {
                     continue;
                 };
-                if !rel.is_newer_than(&v) || streaming_to == Some(ip) {
+                if !update::host_can_receive_update(&v) {
+                    let mut st = state.lock();
+                    if st.told_old.insert(pc.node_id.clone()) {
+                        st.message = old_host_message(&pc.name, &v);
+                        st.notice = Some((Tone::Info, st.message.clone()));
+                        ctx.request_repaint();
+                    }
+                    continue;
+                }
+                if !should_push(&v, rel) || streaming_to == Some(ip) {
                     continue;
                 }
                 let recently = state
@@ -170,12 +183,10 @@ pub fn spawn(
                 if recently {
                     continue;
                 }
-                state
-                    .lock()
-                    .pushed
-                    .insert(pc.node_id.clone(), (rel.version.clone(), Instant::now()));
                 let outcome = push_host(rel, token.as_deref(), ip);
                 let mut st = state.lock();
+                st.pushed
+                    .insert(pc.node_id.clone(), (rel.version.clone(), Instant::now()));
                 match outcome {
                     Ok(()) => {
                         st.message = format!(
@@ -186,7 +197,7 @@ pub fn spawn(
                         tracing::info!("sent host {} to {} ({ip})", rel.version, pc.name);
                     }
                     Err(e) => {
-                        st.message = format!("Could not update {}: {e:#}.", pc.name);
+                        st.message = format!("Could not update {}: {e}.", pc.name);
                         st.notice = Some((Tone::Danger, st.message.clone()));
                         tracing::warn!("host update for {}: {e:#}", pc.name);
                     }
@@ -361,23 +372,60 @@ fn host_exe(rel: &Release, token: Option<&str>) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// A host that already speaks `/v1/update`, and a release newer than it.
+fn should_push(running: &Version, rel: &Release) -> bool {
+    update::host_can_receive_update(running) && rel.is_newer_than(running)
+}
+
+fn old_host_message(name: &str, version: &Version) -> String {
+    format!(
+        "{name} runs BroLink Host {version}, which cannot take an update from this Mac. Install 3.1 on the PC once; after that, updates are automatic."
+    )
+}
+
+fn is_transient(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains("timed out")
+        || s.contains("connection closed")
+        || s.contains("Broken pipe")
+        || s.contains("Connection reset")
+        || s.contains("os error 32")
+        || s.contains("os error 35")
+}
+
 /// Send the new host to the PC at `ip`. The host checks the digest, swaps
 /// the file in and restarts.
 fn push_host(rel: &Release, token: Option<&str>, ip: Ipv4Addr) -> Result<()> {
     let exe = host_exe(rel, token)?;
     let sha = update::sha256_hex(&exe);
     let version = rel.version.to_string();
+    let mut last = None;
+    for attempt in 1..=3 {
+        match send_host(ip, &version, &sha, &exe) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < 3 && is_transient(&e) => {
+                tracing::warn!("host update attempt {attempt}/3: {e:#}");
+                std::thread::sleep(Duration::from_secs(2 * attempt as u64));
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("update failed")))
+}
+
+fn send_host(ip: Ipv4Addr, version: &str, sha: &str, exe: &[u8]) -> Result<()> {
     let r = http::request_with(
         (ip, CONTROL_PORT),
         "POST",
         UPDATE_PATH,
         &[
-            (UPDATE_VERSION_HEADER, &version),
-            (UPDATE_SHA256_HEADER, &sha),
+            (UPDATE_VERSION_HEADER, version),
+            (UPDATE_SHA256_HEADER, sha),
             ("Content-Type", "application/octet-stream"),
         ],
-        &exe,
-        Duration::from_secs(90),
+        exe,
+        Duration::from_secs(120),
     )?;
     if r.status != 200 {
         let why = r
@@ -425,5 +473,51 @@ mod tests {
         assert_eq!(ago(Some(earlier)), "checked 20 min ago");
         let earlier = Instant::now() - Duration::from_secs(3 * 3600);
         assert_eq!(ago(Some(earlier)), "checked 3 h ago");
+    }
+
+    fn rel(v: &str) -> Release {
+        Release {
+            version: Version::parse(v).unwrap(),
+            tag: format!("v{v}"),
+            prerelease: false,
+            assets: vec![],
+        }
+    }
+
+    #[test]
+    fn a_host_older_than_3_1_is_not_posted_the_executable() {
+        // Gaming-PC today: 3.0.0. GitHub latest: 3.0.1. POSTing 10 MB at that
+        // host is a broken pipe; the Mac must skip it.
+        assert!(!should_push(&Version::new(3, 0, 0), &rel("3.0.1")));
+        assert!(!should_push(&Version::new(3, 0, 0), &rel("3.1.0")));
+        assert!(!should_push(&Version::new(3, 0, 1), &rel("3.1.0")));
+        assert!(!should_push(&Version::new(3, 1, 0), &rel("3.1.0")));
+        assert!(should_push(&Version::new(3, 1, 0), &rel("3.2.0")));
+        assert!(should_push(
+            &Version::parse("3.1.1").unwrap(),
+            &rel("3.2.0")
+        ));
+        let msg = old_host_message("Gaming-PC", &Version::new(3, 0, 0));
+        assert!(msg.contains("Gaming-PC"), "{msg}");
+        assert!(msg.contains("3.0.0"), "{msg}");
+        assert!(msg.contains("3.1"), "{msg}");
+        assert!(!msg.contains("Broken pipe"), "{msg}");
+        assert!(!msg.contains("os error"), "{msg}");
+    }
+
+    #[test]
+    fn pipe_and_eagain_are_retried() {
+        assert!(is_transient(&anyhow!("connection closed")));
+        assert!(is_transient(&anyhow!("timed out")));
+        assert!(is_transient(&anyhow!("Broken pipe (os error 32)")));
+        assert!(is_transient(&anyhow!(
+            "Resource temporarily unavailable (os error 35)"
+        )));
+        assert!(!is_transient(&anyhow!(
+            "GitHub refused the token (HTTP 401)"
+        )));
+        assert!(!is_transient(&anyhow!(
+            "the upload is not a Windows executable"
+        )));
     }
 }

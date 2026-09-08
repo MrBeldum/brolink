@@ -449,6 +449,15 @@ impl HostApp {
             let mut auto = self.autostart;
             if ui::toggle_row(
                 ui,
+                &mut self.cfg.stay_awake,
+                "Keep this PC awake while plugged in",
+                Some("Tailscale only works while the PC is on. Asleep, a Mac on another network cannot wake it. Sleep from the Mac or the Start menu still works."),
+            ) {
+                self.dirty = true;
+            }
+            ui::row_separator(ui);
+            if ui::toggle_row(
+                ui,
                 &mut auto,
                 "Start the background service with Windows",
                 Some("On by default, so the Mac can reach this PC after every restart without anyone at the keyboard."),

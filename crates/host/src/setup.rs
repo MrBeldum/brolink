@@ -135,6 +135,9 @@ if ($dir) {{
 }}
 Step "Turning Fast Startup off: a PC shut down with it on cannot be woken"
 Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord
+Step "Never idle-sleep when plugged in, so Tailscale stays up from anywhere"
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
 {adapter}Step "BroLink setup finished"
 "#,
         install = install,
@@ -272,6 +275,8 @@ mod tests {
         assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
         assert!(s.contains("'S5WakeOnLan'"));
         assert!(s.contains("HiberbootEnabled -Value 0"));
+        assert!(s.contains("powercfg /change standby-timeout-ac 0"));
+        assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
         assert!(s.contains("protocol=UDP localport=9 program=\"C:\\x\\brolink-host.exe\""));
         assert!(s.contains("localport=47984-48010 remoteip=100.64.0.0/10"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));

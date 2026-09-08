@@ -81,7 +81,9 @@ pub struct KnownPc {
 #[serde(default)]
 pub struct ClientConfig {
     pub stream: StreamSettings,
-    /// Offer to put the PC to sleep when a session ends.
+    /// Offer to put the PC to sleep when a session ends. Off by default:
+    /// asleep, Tailscale is asleep too, and the Mac can only wake the PC
+    /// from that PC's own network.
     pub sleep_prompt: bool,
     /// The Mac's Command key acts as Ctrl on the PC (else as the Windows key).
     pub cmd_is_ctrl: bool,
@@ -97,7 +99,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             stream: StreamSettings::default(),
-            sleep_prompt: true,
+            sleep_prompt: false,
             cmd_is_ctrl: true,
             auto_update: true,
             github_token: None,
@@ -133,7 +135,7 @@ mod tests {
         assert_eq!(Resolution::Native.pixels((3024, 1964)), (3024, 1964));
         let c: ClientConfig = toml::from_str("").unwrap();
         assert_eq!(c.stream, s);
-        assert!(c.sleep_prompt && c.cmd_is_ctrl && c.auto_update);
+        assert!(!c.sleep_prompt && c.cmd_is_ctrl && c.auto_update);
         let mut c = ClientConfig::default();
         c.pcs.insert(
             "n".into(),

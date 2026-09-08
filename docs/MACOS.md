@@ -122,13 +122,17 @@ details BroLink has learned; it sends the packet without connecting.
 | Full screen | How a session starts |
 | App | The Sunshine app to launch; "Desktop" is the whole PC. The list fills in after the first connection |
 | Command key acts as Ctrl | Off makes ⌘ the Windows key |
-| Offer to sleep the PC after each session | The prompt when a session ends |
+| Offer to sleep the PC after each session | Off by default. Asleep, Tailscale is off; this Mac can only wake the PC from that PC's own network |
 
 Settings are saved in `~/Library/Application Support/BroLink/client.toml`,
 along with the MAC, LAN address and Sunshine certificate of each PC BroLink
 has paired with.
 
 ## Waking a PC from another network
+
+Asleep, the PC's Tailscale is off, so BroLink cannot reach it over the
+tailnet. Leave the PC on (BroLink Host keeps it awake while plugged in)
+if you want **Connect** from anywhere.
 
 The wake packet is sent to the LAN broadcast, to the PC's LAN address and
 to the PC's public address. Over the internet only the last can arrive,
@@ -152,7 +156,9 @@ seconds after it starts. A newer version is downloaded to
 SHA-256 GitHub publishes for the asset and against its own code signature,
 and moved over `/Applications/BroLink.app` once no stream is running; the
 app then relaunches. The Mac also sends the new `brolink-host.exe` to each
-PC whose BroLink Host is older (see [WINDOWS.md](WINDOWS.md)).
+PC whose BroLink Host is older and already speaks `/v1/update` (3.1+). A
+PC still on 3.0 is left alone and the lobby says to install 3.1 there once
+(see [WINDOWS.md](WINDOWS.md)).
 
 The download needs a GitHub login because the repository is private. The
 app uses, in order: `github_token` in `client.toml`, `BROLINK_GITHUB_TOKEN`

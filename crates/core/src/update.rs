@@ -65,6 +65,16 @@ pub fn current() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("the crate version is semver")
 }
 
+/// Oldest host that will accept a POST to [`crate::api::UPDATE_PATH`].
+pub fn first_update() -> Version {
+    Version::parse(crate::api::FIRST_UPDATE_VERSION).expect("FIRST_UPDATE_VERSION is semver")
+}
+
+/// Whether a running host can take `brolink-host.exe` from the Mac.
+pub fn host_can_receive_update(running: &Version) -> bool {
+    *running >= first_update()
+}
+
 /// The GitHub token to use: the configured one, the environment, then what
 /// git has stored for github.com.
 pub fn token(configured: Option<&str>) -> Option<String> {
@@ -266,8 +276,9 @@ pub fn fetch(url: &str, token: Option<&str>, accept: &str, sink: &mut dyn Write)
             head.push_str(&format!("Authorization: Bearer {t}\r\n"));
         }
         head.push_str("\r\n");
-        tls.write_all(head.as_bytes())?;
-        tls.flush()?;
+        tls.write_all(head.as_bytes())
+            .map_err(crate::http::io_err)?;
+        tls.flush().map_err(crate::http::io_err)?;
         let mut reader = BufReader::new(tls);
         let (status, headers) = read_head(&mut reader)?;
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
@@ -313,7 +324,7 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 /// Status line and headers; header names come back lowercase.
 fn read_head<R: BufRead>(r: &mut R) -> Result<(u16, Vec<(String, String)>)> {
     let mut line = String::new();
-    r.read_line(&mut line)?;
+    r.read_line(&mut line).map_err(crate::http::io_err)?;
     let status: u16 = line
         .split_whitespace()
         .nth(1)
@@ -322,7 +333,7 @@ fn read_head<R: BufRead>(r: &mut R) -> Result<(u16, Vec<(String, String)>)> {
     let mut headers = Vec::new();
     loop {
         line.clear();
-        if r.read_line(&mut line)? == 0 {
+        if r.read_line(&mut line).map_err(crate::http::io_err)? == 0 {
             bail!("connection closed inside headers");
         }
         let l = line.trim_end();
@@ -348,7 +359,7 @@ fn read_body<R: BufRead>(
         let mut line = String::new();
         loop {
             line.clear();
-            if r.read_line(&mut line)? == 0 {
+            if r.read_line(&mut line).map_err(crate::http::io_err)? == 0 {
                 bail!("connection closed inside a chunked body");
             }
             let size_hex = line.trim().split(';').next().unwrap_or("").trim();
@@ -358,7 +369,9 @@ fn read_body<R: BufRead>(
                 // Trailers, then the blank line.
                 loop {
                     line.clear();
-                    if r.read_line(&mut line)? == 0 || line.trim_end().is_empty() {
+                    if r.read_line(&mut line).map_err(crate::http::io_err)? == 0
+                        || line.trim_end().is_empty()
+                    {
                         break;
                     }
                 }
@@ -367,21 +380,21 @@ fn read_body<R: BufRead>(
             if size > MAX_DOWNLOAD {
                 bail!("chunk of {size} bytes is too large");
             }
-            std::io::copy(&mut r.take(size), sink)?;
+            std::io::copy(&mut r.take(size), sink).map_err(crate::http::io_err)?;
             line.clear();
-            r.read_line(&mut line)?; // the CRLF after the chunk
+            r.read_line(&mut line).map_err(crate::http::io_err)?; // the CRLF after the chunk
         }
     }
     match header(headers, "content-length").and_then(|v| v.parse::<u64>().ok()) {
         Some(n) if n > MAX_DOWNLOAD => bail!("reply of {n} bytes is too large"),
         Some(n) => {
-            let copied = std::io::copy(&mut r.take(n), sink)?;
+            let copied = std::io::copy(&mut r.take(n), sink).map_err(crate::http::io_err)?;
             if copied != n {
                 bail!("connection closed after {copied} of {n} bytes");
             }
         }
         None => {
-            std::io::copy(&mut r.take(MAX_DOWNLOAD), sink)?;
+            std::io::copy(&mut r.take(MAX_DOWNLOAD), sink).map_err(crate::http::io_err)?;
         }
     }
     Ok(())
@@ -393,10 +406,13 @@ fn connect(host: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, T
         .with_context(|| format!("resolve {host}"))?
         .next()
         .ok_or_else(|| anyhow!("{host} has no address"))?;
-    let tcp =
-        TcpStream::connect_timeout(&addr, TIMEOUT).with_context(|| format!("connect to {host}"))?;
-    tcp.set_read_timeout(Some(TIMEOUT))?;
-    tcp.set_write_timeout(Some(TIMEOUT))?;
+    let tcp = TcpStream::connect_timeout(&addr, TIMEOUT)
+        .map_err(crate::http::io_err)
+        .with_context(|| format!("connect to {host}"))?;
+    tcp.set_read_timeout(Some(TIMEOUT))
+        .map_err(crate::http::io_err)?;
+    tcp.set_write_timeout(Some(TIMEOUT))
+        .map_err(crate::http::io_err)?;
     let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
     let conn = rustls::ClientConnection::new(tls_config()?, name)?;
     Ok(rustls::StreamOwned::new(conn, tcp))
@@ -513,6 +529,11 @@ mod tests {
             current(),
             Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
         );
+        assert_eq!(first_update(), Version::new(3, 1, 0));
+        assert!(!host_can_receive_update(&Version::new(3, 0, 0)));
+        assert!(!host_can_receive_update(&Version::new(3, 0, 1)));
+        assert!(host_can_receive_update(&Version::new(3, 1, 0)));
+        assert!(host_can_receive_update(&Version::new(3, 2, 0)));
     }
 
     #[test]

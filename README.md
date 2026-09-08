@@ -1,7 +1,8 @@
 # BroLink
 
-Your Windows PC, on your Mac, from anywhere: wake it, stream it full
-screen with hardware decode, put it back to sleep.
+Your Windows PC, on your Mac, from anywhere: stream it full screen with
+hardware decode. Leave the PC on (or asleep on its own network) and
+Tailscale is the path.
 
 BroLink is two programs. **BroLink Host** runs on the Windows PC. **BroLink**
 runs on the Mac and contains the whole streaming client: Moonlight's
@@ -26,8 +27,10 @@ signed in to the same Tailscale account as the PC.
    has the stream details, mouse capture, what the Command key does, a
    **Keys** menu for Ctrl+Alt+Del and friends, stats, full screen, the PC's
    power menu and **Disconnect**.
-4. When you disconnect, BroLink offers to put the PC to sleep. Asleep is
-   the state to leave it in: it wakes in seconds and draws almost nothing.
+4. Leave the PC on if you want to connect from anywhere. Asleep, Tailscale
+   is asleep too: this Mac can wake it only from that PC's own network
+   (or if the router forwards UDP 9). Settings can offer sleep after a
+   session; that is off by default.
 
 ## Install
 

@@ -14,6 +14,9 @@ APP="$ROOT/dist/BroLink.app"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# dist/ is a staging copy. Keep Spotlight from listing it next to
+# /Applications/BroLink.app.
+touch "$ROOT/dist/.metadata_never_index"
 cp "$BIN" "$APP/Contents/MacOS/BroLink"
 chmod +x "$APP/Contents/MacOS/BroLink"
 # The Finder/Dock icon: the same procedural icon the window uses

@@ -77,10 +77,13 @@ wakes it.
 | Shut down, Fast Startup off | if the firmware allows wake from power off (often called "Power on by PCI-E" or "Wake on LAN from S5"; ErP must be off) | same, plus the router condition |
 | Shut down with Fast Startup on | no; setup turns it off | no |
 
-Leave the PC **asleep**, not shut down. Untick **Let a paired Mac sleep,
-restart, or shut down this PC** in Settings if you would rather it could
-not. Remote power actions force-close programs, because nobody is there to
-answer a save prompt.
+Leave the PC **on** if you want Tailscale from another network. Asleep,
+Tailscale is off; a Mac that is not on this LAN cannot wake it unless the
+router forwards UDP 9. **Keep this PC awake while plugged in** (on by
+default) stops idle sleep; Sleep from the Mac or the Start menu still
+works. Untick **Let a paired Mac sleep, restart, or shut down this PC**
+if you would rather the Mac could not. Remote power actions force-close
+programs, because nobody is there to answer a save prompt.
 
 After a **restart**, Sunshine is back before anyone logs in (it is a
 service), so the Mac can stream the login screen and sign in. BroLink's
@@ -135,13 +138,18 @@ digest, that the bytes are a Windows executable and a newer version, writes
 port, then removes the `.old` file. Both events appear in the host log and
 the Sunshine session, if any, is not interrupted.
 
-Hosts older than 3.1 have no update route; install 3.1 on the PC once.
+Hosts older than 3.1 have no update route. The Mac does not POST the
+executable at them (that used to show as a broken pipe); it asks for 3.1
+to be installed on the PC once, and updates from there are automatic.
 
 ## Staying reachable
 
 The background service starts with Windows by default and sets that again
 at every start, so a PC nobody can reach in person comes back after a
 restart; the toggle in Settings is the only thing that turns it off.
+It also holds Windows awake while plugged in (same Settings card), because
+a sleeping PC's Tailscale is asleep and a Mac on another network cannot
+wake it.
 Sunshine runs as a Windows service and streams the sign-in screen, so a
 Mac can still connect after a reboot before anyone logs in. Keep the PC's
 Tailscale key from expiring by disabling key expiry for it in the

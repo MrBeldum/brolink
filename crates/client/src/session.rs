@@ -328,7 +328,7 @@ pub fn connect(c: Connect) {
             }
             Err(e) => p.set(
                 Step::Ended {
-                    error: Some(format!("{e:#}")),
+                    error: Some(format!("{e}")),
                 },
                 "",
             ),
