@@ -4,7 +4,7 @@ use brolink_stream::ffi::{
     BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_X1, BUTTON_X2, MODIFIER_ALT, MODIFIER_CTRL,
     MODIFIER_META, MODIFIER_SHIFT,
 };
-use brolink_stream::Session;
+use brolink_stream::Input;
 use egui::{Key, Modifiers, PointerButton};
 use std::collections::BTreeSet;
 
@@ -15,8 +15,10 @@ pub const VK_LWIN: i16 = 0x5B;
 pub const VK_DELETE: i16 = 0x2E;
 pub const VK_ESCAPE: i16 = 0x1B;
 pub const VK_TAB: i16 = 0x09;
+pub const VK_RETURN: i16 = 0x0D;
 pub const VK_SNAPSHOT: i16 = 0x2C;
 pub const VK_C: i16 = 0x43;
+pub const VK_R: i16 = 0x52;
 pub const VK_V: i16 = 0x56;
 pub const VK_X: i16 = 0x58;
 
@@ -125,6 +127,38 @@ pub fn button(b: PointerButton) -> Option<i32> {
     })
 }
 
+/// Press `keys` in order and release them in reverse, with `mask` for the
+/// modifiers already held. Usable from any thread, which is what a paste
+/// that first has to reach the PC's clipboard needs.
+pub fn press_chord(input: &Input, keys: &[i16], mask: i8) {
+    let mut held = Vec::new();
+    for &k in keys {
+        held.push(k);
+        input.key(k, true, mask | mask_of(&held));
+    }
+    for &k in keys.iter().rev() {
+        held.retain(|&h| h != k);
+        input.key(k, false, mask | mask_of(&held));
+    }
+}
+
+fn mask_of(keys: &[i16]) -> i8 {
+    let mut m = 0;
+    if keys.contains(&VK_SHIFT) {
+        m |= MODIFIER_SHIFT;
+    }
+    if keys.contains(&VK_CONTROL) {
+        m |= MODIFIER_CTRL;
+    }
+    if keys.contains(&VK_MENU) {
+        m |= MODIFIER_ALT;
+    }
+    if keys.contains(&VK_LWIN) {
+        m |= MODIFIER_META;
+    }
+    m
+}
+
 /// Which keys and buttons the PC currently believes are down, so they can all
 /// be released when focus or capture is lost.
 #[derive(Default)]
@@ -135,27 +169,27 @@ pub struct Held {
 }
 
 impl Held {
-    pub fn key(&mut self, session: &Session, vk: i16, down: bool) {
+    pub fn key(&mut self, input: &Input, vk: i16, down: bool) {
         if down {
             self.keys.insert(vk);
         } else {
             self.keys.remove(&vk);
         }
-        session.key(vk, down, self.mask());
+        input.key(vk, down, self.mask());
     }
 
-    pub fn button(&mut self, session: &Session, b: i32, down: bool) {
+    pub fn button(&mut self, input: &Input, b: i32, down: bool) {
         if down {
             self.buttons.insert(b);
         } else {
             self.buttons.remove(&b);
         }
-        session.mouse_button(b, down);
+        input.mouse_button(b, down);
     }
 
     /// Turn modifier changes into key presses. Cmd maps to Ctrl or the
     /// Windows key.
-    pub fn modifiers(&mut self, session: &Session, now: Modifiers, cmd_is_ctrl: bool) {
+    pub fn modifiers(&mut self, input: &Input, now: Modifiers, cmd_is_ctrl: bool) {
         let was = self.modifiers;
         self.modifiers = now;
         let cmd_vk = if cmd_is_ctrl { VK_CONTROL } else { VK_LWIN };
@@ -166,51 +200,50 @@ impl Held {
             (was.mac_cmd, now.mac_cmd, cmd_vk),
         ] {
             if before != after {
-                self.key(session, vk, after);
+                self.key(input, vk, after);
             }
         }
     }
 
     /// The modifier byte Moonlight wants alongside every key event.
-    fn mask(&self) -> i8 {
-        let mut m = 0;
-        if self.keys.contains(&VK_SHIFT) {
-            m |= MODIFIER_SHIFT;
-        }
-        if self.keys.contains(&VK_CONTROL) {
-            m |= MODIFIER_CTRL;
-        }
-        if self.keys.contains(&VK_MENU) {
-            m |= MODIFIER_ALT;
-        }
-        if self.keys.contains(&VK_LWIN) {
-            m |= MODIFIER_META;
-        }
-        m
+    pub fn mask(&self) -> i8 {
+        let keys: Vec<i16> = self.keys.iter().copied().collect();
+        mask_of(&keys)
     }
 
-    pub fn release_all(&mut self, session: &Session) {
+    pub fn release_all(&mut self, input: &Input) {
         for k in std::mem::take(&mut self.keys) {
-            session.key(k, false, 0);
+            input.key(k, false, 0);
         }
         for b in std::mem::take(&mut self.buttons) {
-            session.mouse_button(b, false);
+            input.mouse_button(b, false);
         }
         self.modifiers = Modifiers::NONE;
     }
 
-    /// Press a chord and release it, e.g. Ctrl+Alt+Del.
-    pub fn chord(&mut self, session: &Session, keys: &[i16]) {
-        for &k in keys {
-            self.key(session, k, true);
-        }
-        for &k in keys.iter().rev() {
-            self.key(session, k, false);
-        }
+    /// Press a chord and release it, e.g. Ctrl+Alt+Del. A key that is
+    /// already down (⌘ held while ⌘C, ⌘V follow each other) is left down:
+    /// releasing it here would make the next shortcut in the same hold
+    /// arrive without its modifier.
+    pub fn chord(&mut self, input: &Input, keys: &[i16]) {
+        let fresh = self.chord_plan(keys);
+        press_chord(input, &fresh, self.mask());
+    }
+
+    /// The keys of `keys` a chord would have to press: those not held.
+    pub fn chord_plan(&self, keys: &[i16]) -> Vec<i16> {
+        keys.iter()
+            .copied()
+            .filter(|k| !self.keys.contains(k))
+            .collect()
     }
 
     pub fn any_down(&self) -> bool {
         !self.keys.is_empty() || !self.buttons.is_empty()
+    }
+
+    pub fn is_down(&self, vk: i16) -> bool {
+        self.keys.contains(&vk)
     }
 
     pub fn modifiers_now(&self) -> Modifiers {
@@ -221,6 +254,28 @@ impl Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chord_leaves_held_modifiers_alone() {
+        let mut held = Held::default();
+        // ⌘ is down (as Ctrl); ⌘C then ⌘V arrive without ⌘ being released.
+        held.keys.insert(VK_CONTROL);
+        assert_eq!(held.chord_plan(&[VK_CONTROL, VK_C]), vec![VK_C]);
+        assert_eq!(held.chord_plan(&[VK_CONTROL, VK_V]), vec![VK_V]);
+        assert_eq!(held.mask(), MODIFIER_CTRL);
+        // Nothing held: the whole chord is pressed.
+        let none = Held::default();
+        assert_eq!(
+            none.chord_plan(&[VK_CONTROL, VK_MENU, VK_DELETE]),
+            vec![VK_CONTROL, VK_MENU, VK_DELETE]
+        );
+        assert_eq!(
+            mask_of(&[VK_CONTROL, VK_MENU]),
+            MODIFIER_CTRL | MODIFIER_ALT
+        );
+        assert_eq!(mask_of(&[VK_LWIN]), MODIFIER_META);
+        assert_eq!(mask_of(&[VK_C]), 0);
+    }
 
     #[test]
     fn letters_digits_and_symbols_map_to_us_layout_codes() {

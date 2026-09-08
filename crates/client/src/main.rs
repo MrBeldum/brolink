@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod clipboard;
 mod config;
+mod handover;
 mod input;
+mod path;
 mod session;
 mod stream;
 mod update;

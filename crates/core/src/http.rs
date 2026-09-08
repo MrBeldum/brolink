@@ -155,8 +155,27 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     }))
 }
 
-pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
-    let reason = match resp.status {
+/// A reply with an arbitrary body: a file, a script.
+pub fn write_bytes(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
+    let head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status,
+        reason(status),
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).map_err(io_err)?;
+    stream.write_all(body).map_err(io_err)?;
+    stream.flush().map_err(io_err)?;
+    Ok(())
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
@@ -166,17 +185,16 @@ pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         _ => "Status",
-    };
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    }
+}
+
+pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
+    write_bytes(
+        stream,
         resp.status,
-        reason,
-        resp.body.len()
-    );
-    stream.write_all(head.as_bytes()).map_err(io_err)?;
-    stream.write_all(resp.body.as_bytes()).map_err(io_err)?;
-    stream.flush().map_err(io_err)?;
-    Ok(())
+        "application/json",
+        resp.body.as_bytes(),
+    )
 }
 
 /// Accept forever, one thread per connection. `handler` sees the peer

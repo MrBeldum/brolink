@@ -63,11 +63,17 @@ pub struct Stats {
     pub fps: f32,
     pub mbps: f32,
     pub rtt_ms: u32,
+    pub rtt_var_ms: u32,
     pub decode_ms: f32,
     pub host_ms: f32,
     pub width: u32,
     pub height: u32,
     pub decoder: &'static str,
+    /// Share of video packets in the last second that arrived too late or
+    /// not at all and could not be rebuilt from FEC.
+    pub loss_pct: f32,
+    /// Packets FEC did rebuild in the last second.
+    pub fec_recovered: u32,
 }
 
 #[derive(Default)]
@@ -77,6 +83,8 @@ struct Window {
     bytes: u64,
     decode_us: u64,
     host_tenths: u64,
+    /// RTP totals at the start of the window, to difference against.
+    rtp: Option<ffi::RtpVideoStats>,
 }
 
 struct Inner {
@@ -108,6 +116,102 @@ impl Inner {
 
 pub struct Session {
     inner: Arc<Inner>,
+}
+
+/// The keyboard-and-mouse side of a session, cheap to clone and safe to
+/// use from any thread: a worker that has to type on the PC after a
+/// network round trip holds one of these instead of the session.
+#[derive(Clone)]
+pub struct Input {
+    inner: Arc<Inner>,
+}
+
+/// One UTF-8 text event is kept this small: the control stream's packet
+/// buffer is 128 bytes on hosts without the newer encryption.
+const TEXT_CHUNK: usize = 32;
+
+impl Input {
+    pub fn connected(&self) -> bool {
+        self.inner.connected.load(Ordering::Acquire)
+    }
+
+    pub fn mouse_move(&self, dx: i16, dy: i16) {
+        if self.connected() {
+            unsafe { ffi::LiSendMouseMoveEvent(dx, dy) };
+        }
+    }
+
+    pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
+        if self.connected() {
+            unsafe { ffi::LiSendMousePositionEvent(x, y, width, height) };
+        }
+    }
+
+    /// `button` is one of `ffi::BUTTON_*`.
+    pub fn mouse_button(&self, button: c_int, down: bool) {
+        if self.connected() {
+            let action = if down {
+                ffi::BUTTON_ACTION_PRESS
+            } else {
+                ffi::BUTTON_ACTION_RELEASE
+            };
+            unsafe { ffi::LiSendMouseButtonEvent(action, button) };
+        }
+    }
+
+    /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
+    pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
+        if self.connected() {
+            let action = if down {
+                ffi::KEY_ACTION_DOWN
+            } else {
+                ffi::KEY_ACTION_UP
+            };
+            unsafe { ffi::LiSendKeyboardEvent(vk, action, modifiers) };
+        }
+    }
+
+    /// Type `text` on the PC as it is, whatever the keyboard layouts.
+    pub fn text(&self, text: &str) {
+        if !self.connected() {
+            return;
+        }
+        for chunk in text_chunks(text) {
+            unsafe {
+                ffi::LiSendUtf8TextEvent(chunk.as_ptr() as *const c_char, chunk.len() as u32)
+            };
+        }
+    }
+
+    /// Vertical and horizontal scroll in 1/120ths of a wheel click.
+    pub fn scroll(&self, vertical: i16, horizontal: i16) {
+        if self.connected() {
+            if vertical != 0 {
+                unsafe { ffi::LiSendHighResScrollEvent(vertical) };
+            }
+            if horizontal != 0 {
+                unsafe { ffi::LiSendHighResHScrollEvent(horizontal) };
+            }
+        }
+    }
+}
+
+/// `text` in pieces of at most [`TEXT_CHUNK`] bytes, cut between characters.
+fn text_chunks(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + TEXT_CHUNK).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            break;
+        }
+        out.push(&text[start..end]);
+        start = end;
+    }
+    out
 }
 
 impl Session {
@@ -165,58 +269,38 @@ impl Session {
         self.inner.stats.lock().clone()
     }
 
-    pub fn mouse_move(&self, dx: i16, dy: i16) {
-        if self.connected() {
-            unsafe { ffi::LiSendMouseMoveEvent(dx, dy) };
+    /// A handle for sending input from other threads.
+    pub fn input(&self) -> Input {
+        Input {
+            inner: self.inner.clone(),
         }
     }
 
+    pub fn mouse_move(&self, dx: i16, dy: i16) {
+        self.input().mouse_move(dx, dy);
+    }
+
     pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
-        if self.connected() {
-            unsafe { ffi::LiSendMousePositionEvent(x, y, width, height) };
-        }
+        self.input().mouse_position(x, y, width, height);
     }
 
     /// `button` is one of `ffi::BUTTON_*`.
     pub fn mouse_button(&self, button: c_int, down: bool) {
-        if self.connected() {
-            let action = if down {
-                ffi::BUTTON_ACTION_PRESS
-            } else {
-                ffi::BUTTON_ACTION_RELEASE
-            };
-            unsafe { ffi::LiSendMouseButtonEvent(action, button) };
-        }
+        self.input().mouse_button(button, down);
     }
 
     /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
     pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
-        if self.connected() {
-            let action = if down {
-                ffi::KEY_ACTION_DOWN
-            } else {
-                ffi::KEY_ACTION_UP
-            };
-            unsafe { ffi::LiSendKeyboardEvent(vk, action, modifiers) };
-        }
+        self.input().key(vk, down, modifiers);
     }
 
     pub fn text(&self, text: &str) {
-        if self.connected() && !text.is_empty() {
-            unsafe { ffi::LiSendUtf8TextEvent(text.as_ptr() as *const c_char, text.len() as u32) };
-        }
+        self.input().text(text);
     }
 
     /// Vertical and horizontal scroll in 1/120ths of a wheel click.
     pub fn scroll(&self, vertical: i16, horizontal: i16) {
-        if self.connected() {
-            if vertical != 0 {
-                unsafe { ffi::LiSendHighResScrollEvent(vertical) };
-            }
-            if horizontal != 0 {
-                unsafe { ffi::LiSendHighResHScrollEvent(horizontal) };
-            }
-        }
+        self.input().scroll(vertical, horizontal);
     }
 }
 
@@ -262,7 +346,7 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         color_space: ffi::COLORSPACE_REC_709,
         color_range: ffi::COLOR_RANGE_LIMITED,
         encryption_flags: ffi::ENCFLG_ALL,
-        video_capabilities: 0,
+        video_capabilities: video::capabilities(),
         audio_capabilities: ffi::CAPABILITY_DIRECT_SUBMIT
             | ffi::CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION,
         ri_key: ri_key.as_ptr(),
@@ -377,6 +461,10 @@ fn account(inner: &Inner, bytes: u64, decode_us: u64, host_tenths: u16) {
     w.bytes += bytes;
     w.decode_us += decode_us;
     w.host_tenths += host_tenths as u64;
+    let connected = inner.connected.load(Ordering::Relaxed);
+    if w.rtp.is_none() && connected {
+        w.rtp = rtp_stats();
+    }
     let elapsed = since.elapsed().as_secs_f32();
     if elapsed >= 1.0 {
         let mut st = inner.stats.lock();
@@ -386,16 +474,52 @@ fn account(inner: &Inner, bytes: u64, decode_us: u64, host_tenths: u16) {
         st.host_ms = w.host_tenths as f32 / w.frames.max(1) as f32 / 10.0;
         let mut rtt = 0u32;
         let mut var = 0u32;
-        if inner.connected.load(Ordering::Relaxed)
-            && unsafe { ffi::LiGetEstimatedRttInfo(&mut rtt, &mut var) }
-        {
+        if connected && unsafe { ffi::LiGetEstimatedRttInfo(&mut rtt, &mut var) } {
             st.rtt_ms = rtt;
+            st.rtt_var_ms = var;
+        }
+        let now = if connected { rtp_stats() } else { None };
+        if let (Some(before), Some(after)) = (w.rtp, now) {
+            let (loss, recovered) = loss_in_window(&before, &after);
+            st.loss_pct = loss;
+            st.fec_recovered = recovered;
         }
         *w = Window {
             since: Some(Instant::now()),
+            rtp: now,
             ..Default::default()
         };
     }
+}
+
+fn rtp_stats() -> Option<ffi::RtpVideoStats> {
+    let p = unsafe { ffi::LiGetRTPVideoStats() };
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { *p })
+    }
+}
+
+/// Loss as a percentage of the video packets seen between two readings of
+/// the RTP counters, and how many packets FEC saved in that time.
+fn loss_in_window(before: &ffi::RtpVideoStats, after: &ffi::RtpVideoStats) -> (f32, u32) {
+    let video = after
+        .packet_count_video
+        .saturating_sub(before.packet_count_video);
+    let failed = after
+        .packet_count_fec_failed
+        .saturating_sub(before.packet_count_fec_failed);
+    let recovered = after
+        .packet_count_fec_recovered
+        .saturating_sub(before.packet_count_fec_recovered);
+    let seen = video + failed;
+    let loss = if seen == 0 {
+        0.0
+    } else {
+        failed as f32 * 100.0 / seen as f32
+    };
+    (loss, recovered)
 }
 
 unsafe extern "C" fn audio_setup(
@@ -510,6 +634,40 @@ pub fn termination_message(code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_is_typed_in_small_pieces_between_characters() {
+        let short = "powershell";
+        assert_eq!(text_chunks(short), vec![short]);
+        let long = "é".repeat(40); // 80 bytes
+        let chunks = text_chunks(&long);
+        assert!(chunks.iter().all(|c| c.len() <= TEXT_CHUNK), "{chunks:?}");
+        assert!(chunks.iter().all(|c| c.chars().all(|ch| ch == 'é')));
+        assert_eq!(chunks.concat(), long);
+        assert!(text_chunks("").is_empty());
+    }
+
+    #[test]
+    fn loss_is_the_share_of_packets_fec_could_not_save() {
+        let before = ffi::RtpVideoStats {
+            packet_count_video: 1000,
+            packet_count_fec_failed: 10,
+            packet_count_fec_recovered: 5,
+            ..Default::default()
+        };
+        let after = ffi::RtpVideoStats {
+            packet_count_video: 1900,
+            packet_count_fec_failed: 110,
+            packet_count_fec_recovered: 25,
+            ..Default::default()
+        };
+        let (loss, recovered) = loss_in_window(&before, &after);
+        assert!((loss - 10.0).abs() < 0.01, "{loss}");
+        assert_eq!(recovered, 20);
+        assert_eq!(loss_in_window(&after, &after), (0.0, 0));
+        // Counters reset (a new session): never negative, never a panic.
+        assert_eq!(loss_in_window(&after, &before), (0.0, 0));
+    }
 
     #[test]
     fn stage_names_and_messages_are_readable() {

@@ -63,6 +63,10 @@ pub const VIDEO_FORMAT_MASK_H264: c_int = 0x000F;
 pub const VIDEO_FORMAT_MASK_H265: c_int = 0x0F00;
 
 pub const CAPABILITY_DIRECT_SUBMIT: c_int = 0x1;
+/// The decoder copes with a frame that references one older than the last
+/// (the host then repairs a lost frame without a whole new keyframe).
+pub const CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC: c_int = 0x2;
+pub const CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC: c_int = 0x4;
 pub const CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION: c_int = 0x10;
 
 pub const FRAME_TYPE_IDR: c_int = 1;

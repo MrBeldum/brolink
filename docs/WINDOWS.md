@@ -42,16 +42,34 @@ The window shows the Sunshine login it generated. Use it at
 `https://localhost:47990` for Sunshine's own settings (encoder, which
 display to stream, HDR, audio device, apps).
 
+## Slow streams: the network, or the encoder
+
+The **This PC** card has a **Network** line from `tailscale netcheck`. "Hard
+NAT with no UPnP" means a Mac on another network can only reach this PC
+through a Tailscale relay, which adds a detour and holds the stream to a
+few megabits; the Mac shows the same thing as **Relayed via …** next to
+the PC. Turn UPnP (or NAT-PMP) on in the router, or forward a UDP port to
+this PC, and Tailscale connects directly; IPv6 on both ends works too. The
+service logs the finding each time it changes.
+
+The **Streaming** line names the encoder Sunshine settled on, read from
+its log. "software" means no GPU encoder worked (a missing or broken
+driver): frames are slow to make whatever the network does. Fix the GPU
+driver, then restart the Sunshine service.
+
 ## What the service does
 
-`brolink-host.exe --background` listens on TCP 47850 and answers three
+`brolink-host.exe --background` listens on TCP 47850 and answers these
 requests, all JSON:
 
 | Request | Effect |
 |---------|--------|
-| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, Sunshine state |
+| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, Sunshine state and the encoder it uses, this PC's NAT report |
 | `POST /v1/pin {"pin","name"}` | Passes the PIN to Sunshine's `/api/pin`, so pairing never needs the PC's screen |
 | `POST /v1/power {"action"}` | `sleep`, `restart`, or `shutdown` (closes the running Sunshine app first) |
+| `GET /v1/clipboard` | The clipboard as text, with Windows' clipboard sequence number |
+| `POST /v1/clipboard {"text"}` | Replaces the clipboard, so a ⌘V on the Mac pastes the Mac's text |
+| `POST /v1/update` | A new `brolink-host.exe`; see Updates |
 
 A request is answered only if it comes from loopback or from a Tailscale
 address that `tailscale whois` attributes to the account this PC is signed
@@ -138,9 +156,16 @@ digest, that the bytes are a Windows executable and a newer version, writes
 port, then removes the `.old` file. Both events appear in the host log and
 the Sunshine session, if any, is not interrupted.
 
-Hosts older than 3.1 have no update route. The Mac does not POST the
-executable at them (that used to show as a broken pipe); it asks for 3.1
-to be installed on the PC once, and updates from there are automatic.
+Hosts older than 3.1 have no update route, and the Mac does not POST the
+executable at them (that used to show as a broken pipe). Instead the Mac
+installs 3.1 through the stream: from the stream's **PC → Update BroLink
+Host…**, the Mac serves the new executable on its Tailscale address,
+presses Win+R here, types `powershell -ep bypass -c "irm
+http://<mac>:47851/u.ps1|iex"` and presses Enter. The script fetches the
+executable from the Mac, checks its SHA-256, asks the running service to
+quit, replaces the file where it is, registers it under the Run key and
+starts it. The desktop has to be unlocked. After that, updates are
+automatic.
 
 ## Staying reachable
 

@@ -31,6 +31,52 @@ impl Install {
     }
 }
 
+/// The encoder family Sunshine settled on at its last start, from its log:
+/// "nvenc", "amf", "quicksync", "software", or `None` when the log cannot
+/// be read or says nothing. Software means no GPU encoder worked, which
+/// makes every stream slow whatever the network does.
+pub fn encoder(install: &Install) -> Option<String> {
+    let path = install.dir.join("config").join("sunshine.log");
+    let text = read_tail(&path, 512 * 1024)?;
+    encoder_in(&text)
+}
+
+/// The last `Found H.264 encoder: <name> [<family>]` line, or the HEVC
+/// one when there is no H.264 line.
+pub fn encoder_in(log: &str) -> Option<String> {
+    let family = |line: &str| -> Option<String> {
+        let start = line.rfind('[')? + 1;
+        let end = line[start..].find(']')? + start;
+        let f = line[start..end].trim();
+        (!f.is_empty()).then(|| f.to_string())
+    };
+    for key in ["Found H.264 encoder:", "Found HEVC encoder:"] {
+        if let Some(line) = log.lines().rev().find(|l| l.contains(key)) {
+            if let Some(f) = family(line) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// The last `max` bytes of a file as text, from a line boundary.
+fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > max {
+        f.seek(SeekFrom::Start(len - max)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Some(match text.find('\n') {
+        Some(i) if len > max => text[i + 1..].to_string(),
+        _ => text,
+    })
+}
+
 pub fn find() -> Option<Install> {
     INSTALL_DIRS
         .iter()
@@ -195,6 +241,28 @@ fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_encoder_family_is_read_from_the_log() {
+        let log = "[2026-09-07 10:00:00.001]: Info: // Testing for available encoders //\n\
+                   [2026-09-07 10:00:01.002]: Info: Found H.264 encoder: h264_nvenc [nvenc]\n\
+                   [2026-09-07 10:00:01.003]: Info: Found HEVC encoder: hevc_nvenc [nvenc]\n\
+                   [2026-09-07 10:00:01.004]: Info: Found AV1 encoder: av1_nvenc [nvenc]\n";
+        assert_eq!(encoder_in(log).as_deref(), Some("nvenc"));
+        let sw = "Info: Found H.264 encoder: libx264 [software]\nInfo: Found HEVC encoder: libx265 [software]\n";
+        assert_eq!(encoder_in(sw).as_deref(), Some("software"));
+        // Two starts: the later one counts.
+        let two = format!("{log}{sw}");
+        assert_eq!(encoder_in(&two).as_deref(), Some("software"));
+        let hevc_only = "Info: Found HEVC encoder: hevc_amf [amf]\n";
+        assert_eq!(encoder_in(hevc_only).as_deref(), Some("amf"));
+        assert_eq!(encoder_in("Info: nothing about encoders\n"), None);
+        assert_eq!(encoder_in("Found H.264 encoder: x []"), None);
+        assert_eq!(
+            read_tail(std::path::Path::new("/nonexistent/sunshine.log"), 10),
+            None
+        );
+    }
 
     #[test]
     fn replies_are_parsed_and_errors_surfaced() {

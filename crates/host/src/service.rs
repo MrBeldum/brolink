@@ -5,23 +5,31 @@
 //! `tailscale whois` attributes to the same account this PC is signed in
 //! as. Everyone else gets a 403 and nothing more.
 
+use crate::clipboard;
 use crate::config::HostConfig;
 use crate::streamer::{self, Api, Install};
 use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
-use brolink_core::api::{Ack, PinRequest, PowerRequest, Status, Streamer, UPDATE_PATH};
+use brolink_core::api::{
+    Ack, Clipboard, NatReport, PinRequest, PowerRequest, Status, Streamer, CLIPBOARD_PATH,
+    UPDATE_PATH,
+};
 use brolink_core::http::{self, Request, Response};
 use brolink_core::{tailscale, CONTROL_PORT};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const LOG_LINES: usize = 80;
 /// How long a `whois` answer is trusted before asking again.
 const AUTH_TTL: Duration = Duration::from_secs(60);
+/// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
+/// and the network does not move often.
+const NETCHECK_TICKS: u64 = 120;
 
 pub struct Service {
     cfg: Mutex<HostConfig>,
@@ -33,6 +41,9 @@ pub struct Service {
     streamer: Mutex<Streamer>,
     log: Mutex<VecDeque<String>>,
     auth: Mutex<HashMap<IpAddr, (Instant, Option<u64>)>>,
+    /// This PC's side of the NAT story, from `tailscale netcheck`.
+    nat: Mutex<Option<NatReport>>,
+    nat_running: AtomicBool,
 }
 
 impl Service {
@@ -46,6 +57,8 @@ impl Service {
             streamer: Mutex::new(Streamer::default()),
             log: Mutex::new(VecDeque::new()),
             auth: Mutex::new(HashMap::new()),
+            nat: Mutex::new(None),
+            nat_running: AtomicBool::new(false),
         }
     }
 
@@ -93,6 +106,7 @@ impl Service {
         }
         let refresher = self.clone();
         std::thread::spawn(move || refresher.refresh_loop());
+        // (refresh_loop takes the Arc so netcheck can run on its own thread.)
         let svc = self.clone();
         if let Err(e) = wake::listen(move |mac, from| svc.wake_packet(mac, from)) {
             self.log(format!("not listening for wake packets: {e:#}"));
@@ -114,7 +128,7 @@ impl Service {
         }
     }
 
-    fn refresh_loop(&self) {
+    fn refresh_loop(self: Arc<Self>) {
         let mut tick: u64 = 0;
         loop {
             self.refresh(tick);
@@ -124,7 +138,7 @@ impl Service {
     }
 
     /// Cheap checks every tick; the slower probes on a longer cadence.
-    fn refresh(&self, tick: u64) {
+    fn refresh(self: &Arc<Self>, tick: u64) {
         *self.cfg.lock() = HostConfig::load();
         let stay_awake = self.cfg.lock().stay_awake;
         crate::power::keep_awake(stay_awake);
@@ -133,8 +147,10 @@ impl Service {
         }
 
         let ts = tailscale::status().map_err(|e| e.to_string());
+        let came_up;
         {
             let mut cur = self.tailscale.lock();
+            came_up = matches!((&*cur, &ts), (Err(_), Ok(_)));
             match (&*cur, &ts) {
                 (Ok(_), Err(e)) => self.log(format!("Tailscale: {e}")),
                 (Err(_), Ok(s)) => self.log(format!(
@@ -148,6 +164,9 @@ impl Service {
                 _ => {}
             }
             *cur = ts;
+        }
+        if self.tailscale.lock().is_ok() && (came_up || tick % NETCHECK_TICKS == 1) {
+            self.spawn_netcheck();
         }
 
         let install = streamer::find();
@@ -165,6 +184,16 @@ impl Service {
         } else {
             running && self.streamer.lock().api_ok
         };
+        // The encoder Sunshine picked, from its log; re-read now and then
+        // since Sunshine restarts on its own after setup.
+        let encoder = if tick.is_multiple_of(12) || self.streamer.lock().encoder.is_empty() {
+            install
+                .as_ref()
+                .and_then(streamer::encoder)
+                .unwrap_or_default()
+        } else {
+            self.streamer.lock().encoder.clone()
+        };
         let st = Streamer {
             kind: install
                 .as_ref()
@@ -173,10 +202,11 @@ impl Service {
             installed: install.is_some(),
             running,
             api_ok,
+            encoder,
         };
         {
             let mut cur = self.streamer.lock();
-            if *cur != st {
+            if (cur.installed, cur.running, cur.api_ok) != (st.installed, st.running, st.api_ok) {
                 self.log(match (&st.installed, &st.running, &st.api_ok) {
                     (false, _, _) => "Sunshine is not installed".to_string(),
                     (true, false, _) => format!("{} is installed but not running", st.kind),
@@ -187,8 +217,18 @@ impl Service {
                         format!("{} is running and BroLink is logged in", st.kind)
                     }
                 });
-                *cur = st;
             }
+            if cur.encoder != st.encoder && !st.encoder.is_empty() {
+                self.log(if st.encoder == "software" {
+                    format!(
+                        "{} encodes in software: no GPU encoder worked, so streams will be slow",
+                        st.kind
+                    )
+                } else {
+                    format!("{} encodes with {}", st.kind, st.encoder)
+                });
+            }
+            *cur = st;
         }
         *self.install.lock() = install;
 
@@ -205,6 +245,28 @@ impl Service {
                 *cur = w;
             }
         }
+    }
+
+    /// `tailscale netcheck` on its own thread, once at a time.
+    fn spawn_netcheck(self: &Arc<Self>) {
+        if self.nat_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let svc = self.clone();
+        std::thread::spawn(move || {
+            match tailscale::netcheck() {
+                Ok(n) => {
+                    let report = n.report();
+                    let mut cur = svc.nat.lock();
+                    if cur.as_ref() != Some(&report) {
+                        svc.log(describe_nat(&report));
+                    }
+                    *cur = Some(report);
+                }
+                Err(e) => tracing::info!("netcheck: {e}"),
+            }
+            svc.nat_running.store(false, Ordering::Release);
+        });
     }
 
     /// A magic packet arrived while awake: remember when, for the status.
@@ -267,6 +329,7 @@ impl Service {
             fast_startup: wake.fast_startup,
             streamer,
             power_allowed: cfg.power_allowed,
+            nat: self.nat.lock().clone(),
             setup,
             log: if with_log {
                 self.log.lock().iter().cloned().collect()
@@ -339,6 +402,17 @@ impl Service {
             ("POST", "/v1/pin") => self.pin(req),
             ("POST", "/v1/power") => self.power(req),
             ("POST", p) if p == UPDATE_PATH => self.update(req),
+            ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
+                Ok(c) => Response::json(200, &c),
+                Err(e) => Response::json(500, &Ack::err(format!("clipboard: {e}"))),
+            },
+            ("POST", p) if p == CLIPBOARD_PATH => match req.json::<Clipboard>() {
+                Ok(c) => match clipboard::write(&c.text) {
+                    Ok(()) => Response::json(200, &Ack::ok()),
+                    Err(e) => Response::json(500, &Ack::err(format!("clipboard: {e}"))),
+                },
+                Err(_) => Response::json(400, &Ack::err("expected {\"text\"}")),
+            },
             ("POST", "/v1/quit") if local => {
                 self.log("control panel asked the service to stop");
                 std::thread::spawn(|| {
@@ -455,6 +529,25 @@ impl Default for Service {
     }
 }
 
+/// One log line about what `tailscale netcheck` found.
+pub fn describe_nat(n: &NatReport) -> String {
+    let city = tailscale::derp_city(&n.derp);
+    if !n.udp {
+        "network: UDP is blocked here, so a Mac can only reach this PC through a Tailscale relay"
+            .into()
+    } else if n.hard == Some(true) && !n.portmap {
+        format!(
+            "network: hard NAT with no UPnP; a Mac on another network reaches this PC through the {city} relay unless the router gets UPnP or a forwarded UDP port"
+        )
+    } else if n.hard == Some(true) {
+        "network: hard NAT, but the router maps ports; direct connections should work".into()
+    } else if n.hard == Some(false) {
+        format!("network: easy NAT; direct connections should work (nearest relay {city})")
+    } else {
+        format!("network: NAT type unknown (nearest relay {city})")
+    }
+}
+
 /// Tailscale hands out addresses from 100.64.0.0/10.
 fn is_tailnet(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
@@ -535,6 +628,58 @@ mod tests {
             },
         );
         assert_eq!(r.status, 409, "{}", r.body);
+    }
+
+    #[test]
+    fn the_nat_line_names_the_problem() {
+        let hard = NatReport {
+            udp: true,
+            hard: Some(true),
+            portmap: false,
+            derp: "tok".into(),
+            ..Default::default()
+        };
+        let t = describe_nat(&hard);
+        assert!(
+            t.contains("hard NAT with no UPnP") && t.contains("Tokyo"),
+            "{t}"
+        );
+        let mapped = NatReport {
+            portmap: true,
+            ..hard.clone()
+        };
+        assert!(describe_nat(&mapped).contains("maps ports"));
+        let easy = NatReport {
+            udp: true,
+            hard: Some(false),
+            ..Default::default()
+        };
+        assert!(describe_nat(&easy).contains("easy NAT"));
+        let blocked = NatReport::default();
+        assert!(describe_nat(&blocked).contains("UDP is blocked"));
+        // The clipboard routes exist and answer JSON, whatever the platform
+        // says about the clipboard itself.
+        let svc = Service::new();
+        let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let r = svc.handle(
+            local,
+            &Request {
+                method: "POST".into(),
+                path: CLIPBOARD_PATH.into(),
+                body: b"not json".to_vec(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, 400, "{}", r.body);
+        let r = svc.handle(
+            local,
+            &Request {
+                method: "GET".into(),
+                path: CLIPBOARD_PATH.into(),
+                ..Default::default()
+            },
+        );
+        assert!(r.status == 200 || r.status == 500, "{}", r.body);
     }
 
     #[test]

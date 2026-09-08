@@ -15,5 +15,5 @@ pub mod video;
 
 pub use identity::Identity;
 pub use nvhttp::{App, Client, ServerInfo};
-pub use session::{Event, Session, Settings, Stats};
+pub use session::{Event, Input, Session, Settings, Stats};
 pub use video::{Frame, FrameSlot};

@@ -325,7 +325,7 @@ impl HostApp {
                 "not installed".to_string()
             } else {
                 format!(
-                    "{} · {}{}",
+                    "{} · {}{}{}",
                     s.streamer.kind,
                     if s.streamer.running {
                         "running"
@@ -336,8 +336,21 @@ impl HostApp {
                         " · BroLink logged in"
                     } else {
                         ""
+                    },
+                    match s.streamer.encoder.as_str() {
+                        "" => String::new(),
+                        "software" =>
+                            " · software encoder (no GPU encoder worked: streams will be slow)"
+                                .into(),
+                        e => format!(" · {e} encoder"),
                     }
                 )
+            };
+            let network = match &s.nat {
+                Some(n) => crate::service::describe_nat(n)
+                    .trim_start_matches("network: ")
+                    .to_string(),
+                None => "checking…".into(),
             };
             let mut wake = match (&s.mac, s.wake_ready) {
                 (Some(mac), Some(true)) => format!("ready · {} · {mac}", s.wake_adapter),
@@ -362,6 +375,7 @@ impl HostApp {
                 &[
                     ("Name", s.name.clone()),
                     ("Tailscale", tailscale),
+                    ("Network", network),
                     ("Streaming", streamer),
                     ("Wake-on-LAN", wake),
                     (
@@ -699,8 +713,17 @@ mod snapshots {
                 installed: true,
                 running: true,
                 api_ok: true,
+                encoder: "nvenc".into(),
             },
             power_allowed: true,
+            nat: Some(brolink_core::api::NatReport {
+                udp: true,
+                ipv4: true,
+                ipv6: false,
+                hard: Some(true),
+                portmap: false,
+                derp: "tok".into(),
+            }),
             setup: vec![],
             log: vec![
                 "BroLink Host 3.0.1 listening on TCP 47850".into(),

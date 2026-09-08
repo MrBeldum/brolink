@@ -8,9 +8,10 @@
 //! downloaded once, and `brolink-host.exe` is sent to each PC whose host
 //! already speaks `/v1/update` (3.1+) and reports an older version, over
 //! the same Tailscale-authenticated control API that can put the PC to
-//! sleep. A 3.0 host is told to install 3.1 once; POSTing the executable
-//! at it would close the connection (broken pipe) because that host caps
-//! the body at 64 KiB. A PC that is asleep gets it the next time it is seen.
+//! sleep. A 3.0 host cannot take that (it caps request bodies at 64 KiB
+//! and closes, which showed as a broken pipe); for it, the stream's PC
+//! menu offers to install the new host through the stream instead (see
+//! `handover.rs`). A PC that is asleep gets it the next time it is seen.
 
 use crate::config::ClientConfig;
 use crate::session::{Discovery, Live};
@@ -42,6 +43,8 @@ pub struct State {
     pub message: String,
     pub checked: Option<Instant>,
     pub latest: Option<Version>,
+    /// The latest release as fetched, for whoever needs its assets.
+    pub release: Option<Release>,
     /// Set by the UI to check right away.
     pub check_now: bool,
     /// A new app is downloaded and verified; it goes in once no stream runs.
@@ -82,6 +85,7 @@ pub fn spawn(
                         let mut st = state.lock();
                         st.checked = Some(Instant::now());
                         st.latest = Some(r.version.clone());
+                        st.release = Some(r.clone());
                         st.message = if r.is_newer_than(&update::current()) {
                             format!("BroLink {} is available.", r.version)
                         } else {
@@ -164,10 +168,10 @@ pub fn spawn(
                     continue;
                 };
                 if !update::host_can_receive_update(&v) {
+                    // The lobby shows this PC what to do; here, just note it.
                     let mut st = state.lock();
                     if st.told_old.insert(pc.node_id.clone()) {
                         st.message = old_host_message(&pc.name, &v);
-                        st.notice = Some((Tone::Info, st.message.clone()));
                         ctx.request_repaint();
                     }
                     continue;
@@ -352,7 +356,7 @@ fn relaunch() {
 }
 
 /// `brolink-host.exe` out of the Windows zip, kept beside it.
-fn host_exe(rel: &Release, token: Option<&str>) -> Result<Vec<u8>> {
+pub(crate) fn host_exe(rel: &Release, token: Option<&str>) -> Result<Vec<u8>> {
     let dir = updates_dir(rel)?;
     let exe = dir.join(HOST_EXE);
     if let Ok(bytes) = std::fs::read(&exe) {
@@ -377,9 +381,9 @@ fn should_push(running: &Version, rel: &Release) -> bool {
     update::host_can_receive_update(running) && rel.is_newer_than(running)
 }
 
-fn old_host_message(name: &str, version: &Version) -> String {
+pub fn old_host_message(name: &str, version: &Version) -> String {
     format!(
-        "{name} runs BroLink Host {version}, which cannot take an update from this Mac. Install 3.1 on the PC once; after that, updates are automatic."
+        "{name} runs BroLink Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update BroLink Host in the toolbar: this Mac installs the new version through the stream. After that, updates are automatic."
     )
 }
 
@@ -500,7 +504,7 @@ mod tests {
         let msg = old_host_message("Gaming-PC", &Version::new(3, 0, 0));
         assert!(msg.contains("Gaming-PC"), "{msg}");
         assert!(msg.contains("3.0.0"), "{msg}");
-        assert!(msg.contains("3.1"), "{msg}");
+        assert!(msg.contains("Update BroLink Host"), "{msg}");
         assert!(!msg.contains("Broken pipe"), "{msg}");
         assert!(!msg.contains("os error"), "{msg}");
     }
