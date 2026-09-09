@@ -168,8 +168,12 @@ impl<'a> Client<'a> {
         device_name: &str,
         pending: impl FnOnce(),
     ) -> Result<Vec<u8>> {
+        let previous_tls = self.tls.clone();
+        let previous_cert = self.server_cert.clone();
         let result = self.pair_inner(pin, device_name, pending);
         if result.is_err() {
+            self.tls = previous_tls;
+            self.server_cert = previous_cert;
             let _ = self.get_http("unpair", "", TIMEOUT);
         }
         result
@@ -200,6 +204,7 @@ impl<'a> Client<'a> {
             let handle = std::thread::spawn(move || -> Result<String> {
                 let mut s = TcpStream::connect_timeout(&SocketAddr::new(ip, HTTP_PORT), TIMEOUT)?;
                 s.set_read_timeout(Some(PIN_WAIT))?;
+                s.set_write_timeout(Some(TIMEOUT))?;
                 let r = http::exchange(&mut s, "GET", &target, &ip.to_string(), "")?;
                 check(&r.body)?;
                 Ok(r.body)
@@ -233,6 +238,7 @@ impl<'a> Client<'a> {
         }
         let response = tag(&xml, "challengeresponse")
             .and_then(unhex)
+            .filter(|c| c.len() == 48)
             .map(|c| ecb(&cipher, &c, false))
             .ok_or_else(|| anyhow!("bad challenge response"))?;
         if response.len() < 48 {
@@ -432,13 +438,22 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn unhex(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
+    let s = s.trim().as_bytes();
     if !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    fn digit(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    s.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
         .collect()
 }
 
@@ -494,6 +509,14 @@ fn parse_apps(xml: &str) -> Vec<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_hex_from_the_host_is_rejected_without_panicking() {
+        for invalid in ["0", "GG", "éé", "a€", "😀", "00\0a"] {
+            assert_eq!(unhex(invalid), None, "{invalid:?}");
+        }
+        assert_eq!(unhex(" 00aF\n"), Some(vec![0, 175]));
+    }
 
     const INFO: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <root status_code="200"><hostname>Gaming-PC</hostname><appversion>7.1.431.-1</appversion><GfeVersion>3.23.0.74</GfeVersion><HttpsPort>47984</HttpsPort><ServerCodecModeSupport>769</ServerCodecModeSupport><PairStatus>1</PairStatus><currentgame>881448767</currentgame><state>SUNSHINE_SERVER_BUSY</state></root>"#;

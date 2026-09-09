@@ -67,6 +67,29 @@ impl Player {
         if channels == 0 || channels > MAX_CHANNELS || mapping.len() < channels {
             bail!("audio with {channels} channels is not something BroLink plays");
         }
+        // Validate before any integer casts, allocation, or call into Opus.
+        if !matches!(sample_rate, 8_000 | 12_000 | 16_000 | 24_000 | 48_000) {
+            bail!("unsupported Opus sample rate {sample_rate}");
+        }
+        let max_frame = sample_rate as usize * 120 / 1000;
+        let frame_step = sample_rate as usize / 400; // Opus uses 2.5 ms units.
+        if samples_per_frame == 0
+            || samples_per_frame > max_frame
+            || !samples_per_frame.is_multiple_of(frame_step)
+        {
+            bail!("invalid Opus frame size {samples_per_frame}");
+        }
+        if streams <= 0
+            || streams > 255
+            || coupled < 0
+            || coupled > streams
+            || streams + coupled > 255
+            || mapping[..channels]
+                .iter()
+                .any(|&c| c != 255 && i32::from(c) >= streams + coupled)
+        {
+            bail!("invalid Opus channel mapping");
+        }
         let mut err = 0;
         let decoder = unsafe {
             audiopus_sys::opus_multistream_decoder_create(
@@ -102,7 +125,7 @@ impl Player {
             samples_per_frame,
             // Opus can emit up to 120 ms; a buffer sized only for the
             // negotiated frame would refuse a longer packet outright.
-            pcm: vec![0.0; (sample_rate as usize * 120 / 1000).max(samples_per_frame) * channels],
+            pcm: vec![0.0; max_frame * channels],
             queue,
             stop,
             output,
@@ -452,6 +475,24 @@ impl Mixer {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn invalid_audio_configuration_is_rejected_before_allocating() {
+        for rate in [0, 44_100, u32::MAX] {
+            assert!(Player::new(rate, 2, 1, 1, 480, &[0, 1]).is_err());
+        }
+        for frame in [0, 1, 5_761, usize::MAX] {
+            assert!(Player::new(48_000, 2, 1, 1, frame, &[0, 1]).is_err());
+        }
+        for (streams, coupled, mapping) in [
+            (0, 0, [0, 1]),
+            (1, 2, [0, 1]),
+            (1, 0, [0, 1]),
+            (i32::MAX, 1, [0, 1]),
+        ] {
+            assert!(Player::new(48_000, 2, streams, coupled, 480, &mapping).is_err());
+        }
+    }
 
     /// A stereo Opus packet of `frames` samples of a tone, from libopus's
     /// own encoder: what Sunshine sends, minus the network.

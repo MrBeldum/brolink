@@ -10,36 +10,23 @@ use brolink_core::api::PowerAction;
 pub fn keep_awake(on: bool) {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use windows::Win32::System::Power::{
-            SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+            GetSystemPowerStatus, SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+            SYSTEM_POWER_STATUS,
         };
-        static PLAN_ZEROED: AtomicBool = AtomicBool::new(false);
+        // An execution-state request is reversible and belongs to this
+        // thread; it never rewrites the owner's power plan (setup does that
+        // once, on purpose), so turning the setting off truly turns it off.
+        // The setting promises "while plugged in": a laptop on battery is
+        // left to sleep. Desktops report AC power.
         unsafe {
-            if on {
+            let mut power = SYSTEM_POWER_STATUS::default();
+            let plugged_in = GetSystemPowerStatus(&mut power).is_ok() && power.ACLineStatus == 1;
+            if on && plugged_in {
                 SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
             } else {
                 SetThreadExecutionState(ES_CONTINUOUS);
             }
-        }
-        // The plan is written once when the setting turns on (setup also
-        // does this). Running powercfg every five seconds rewrote HKLM
-        // ~35,000 times a day and made the toggle irreversible, because
-        // turning it off never restored the timers.
-        if on && !PLAN_ZEROED.swap(true, Ordering::Relaxed) {
-            for args in [
-                ["/change", "standby-timeout-ac", "0"],
-                ["/change", "hibernate-timeout-ac", "0"],
-            ] {
-                let _ = std::process::Command::new("powercfg")
-                    .args(args)
-                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                    .status();
-            }
-        }
-        if !on {
-            PLAN_ZEROED.store(false, Ordering::Relaxed);
         }
     }
     #[cfg(not(windows))]
