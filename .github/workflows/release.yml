@@ -75,13 +75,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+      # Checkout first: it empties the workspace, so artifacts downloaded
+      # before it would be deleted.
       - uses: actions/checkout@v4
         with:
           sparse-checkout: CHANGELOG.md
           sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
       - name: release notes
         # The CHANGELOG.md section whose heading is this version, up to
         # the next heading. A tag without one gets GitHub's generated notes.
