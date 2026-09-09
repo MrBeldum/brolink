@@ -55,10 +55,9 @@ Details in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Mac (Apple Silicon)
 
-Install [Tailscale](https://tailscale.com/download/mac) and sign in. With
-the [GitHub CLI](https://cli.github.com) signed in (the repository is
-private), one command downloads the app, clears the quarantine flag and
-copies it to `/Applications`:
+Install [Tailscale](https://tailscale.com/download/mac) and sign in. One
+command downloads the app, clears the quarantine flag and copies it to
+`/Applications`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
@@ -89,11 +88,12 @@ verifies the digest, replaces its executable and restarts. A PC that is
 asleep gets the update the next time the Mac sees it. Nothing is downloaded
 on the PC, and no GitHub login is needed there.
 
-The Mac uses the GitHub token git has stored for github.com (the install
-script leaves one), `BROLINK_GITHUB_TOKEN`, or `github_token` in
-`client.toml`. Settings has the switch and a **Check now** button. Hosts
-installed before 3.1 do not have the update route: install that release on
-the PC once (through the stream works), after which updates are automatic.
+Public releases need no GitHub login. If the repository is private, the Mac
+uses the GitHub token git has stored for github.com,
+`BROLINK_GITHUB_TOKEN`, or `github_token` in `client.toml`. Settings has the
+switch and a **Check now** button. Hosts installed before 3.1 do not have the
+update route: install that release on the PC once (through the stream works),
+after which updates are automatic.
 
 ## Staying reachable
 

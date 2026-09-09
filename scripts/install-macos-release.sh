@@ -11,15 +11,17 @@ REPO="${BROLINK_REPO:-MrBeldum/brolink}"
 URL="https://github.com/$REPO/releases/latest/download/brolink-macos-arm64.tar.gz"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-# The repository is private, so anonymous downloads 404: use the GitHub CLI
-# when it is installed and signed in (brew install gh; gh auth login), and
-# fall back to the public URL otherwise.
-if command -v gh >/dev/null 2>&1; then
-  echo "downloading with gh"
-  gh release download --repo "$REPO" --pattern brolink-macos-arm64.tar.gz --dir "$TMP" --clobber
-else
-  echo "downloading $URL"
-  curl -fsSL -o "$TMP/brolink-macos-arm64.tar.gz" "$URL"
+# Public releases download anonymously. Keep the authenticated fallback so
+# this script still works if the repository is made private again.
+echo "downloading $URL"
+if ! curl -fsSL -o "$TMP/brolink-macos-arm64.tar.gz" "$URL"; then
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    echo "anonymous download failed; downloading with gh"
+    gh release download --repo "$REPO" --pattern brolink-macos-arm64.tar.gz --dir "$TMP" --clobber
+  else
+    echo "download failed; a private repository requires gh auth login" >&2
+    exit 1
+  fi
 fi
 tar xzf "$TMP/brolink-macos-arm64.tar.gz" -C "$TMP"
 xattr -dr com.apple.quarantine "$TMP/BroLink.app" 2>/dev/null || true
