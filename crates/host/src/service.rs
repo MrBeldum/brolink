@@ -642,7 +642,6 @@ mod tests {
             path: path.into(),
             headers: json_header(),
             body: body.into(),
-            ..Default::default()
         };
         assert_eq!(svc.handle(local, &post("/v1/pin", "{}")).status, 400);
         assert_eq!(
@@ -778,7 +777,6 @@ mod tests {
                 path: CLIPBOARD_PATH.into(),
                 headers: json_header(),
                 body: b"not json".to_vec(),
-                ..Default::default()
             },
         );
         assert_eq!(r.status, 400, "{}", r.body);
@@ -804,7 +802,6 @@ mod tests {
                 path: "/v1/power".into(),
                 headers: json_header(),
                 body: r#"{"action":"sleep"}"#.into(),
-                ..Default::default()
             },
         );
         assert_eq!(r.status, 403);
