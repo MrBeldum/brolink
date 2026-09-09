@@ -1,17 +1,24 @@
 //! Finding PCs on the tailnet, and the path from "asleep in another room" to
 //! a live stream: wake, wait, pair if needed, launch, connect.
 
+use crate::clipboard;
 use crate::config::{ClientConfig, Codec, KnownPc, StreamSettings};
+use crate::path::{self, Path};
 use anyhow::{anyhow, bail, Result};
-use brolink_core::api::{Ack, PinRequest, PowerAction, PowerRequest, Status};
+use brolink_core::api::{Ack, NatReport, PinRequest, PowerAction, PowerRequest, Status};
 use brolink_core::{http, tailscale, wake, CONTROL_PORT, SUNSHINE_PORT};
 use brolink_stream::session::Server;
-use brolink_stream::{Client, Event, FrameSlot, Identity, Session, Settings};
+use brolink_stream::{Client, Event, FrameSlot, Identity, Input, Session, Settings};
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// How often this Mac's own NAT is re-examined. `tailscale netcheck` takes
+/// seconds and networks change when the Mac moves, not more often.
+const NETCHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 
 /// A Windows machine on the tailnet, as far as the client can tell.
 #[derive(Debug, Clone, Default)]
@@ -26,6 +33,13 @@ pub struct Pc {
     /// Sunshine's port answered.
     pub sunshine: bool,
     pub known: Option<KnownPc>,
+    /// Listed from what was saved, because Tailscale on this Mac could not
+    /// say; nothing has been probed.
+    pub remembered: bool,
+    /// Days until the PC's Tailscale key expires; `None` when it never does.
+    pub key_expiry_days: Option<i64>,
+    /// Direct or relayed, and how far away.
+    pub path: Path,
 }
 
 impl Pc {
@@ -42,23 +56,87 @@ impl Pc {
 
 #[derive(Debug, Clone, Default)]
 pub struct Discovery {
-    /// Why nothing can be listed, when Tailscale is down.
+    /// Why nothing can be probed, when Tailscale is down. The list then
+    /// holds what was remembered.
     pub error: Option<String>,
     pub login: String,
     pub pcs: Vec<Pc>,
     pub refreshed: Option<Instant>,
+    /// Days until this Mac's own Tailscale key expires.
+    pub self_key_days: Option<i64>,
+    /// This Mac's side of the NAT story, once `tailscale netcheck` has run.
+    pub self_nat: Option<NatReport>,
+    /// This Mac's own Tailscale address, the one a PC can reach.
+    pub self_ip: Option<Ipv4Addr>,
 }
 
 /// Rescan the tailnet every few seconds and remember what each PC needs to
 /// be woken.
 pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
+    let nat: Arc<Mutex<Option<NatReport>>> = Arc::default();
+    spawn_netcheck(nat.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        // Round trips per PC, newest last; the smallest of the last few is
+        // the path's real round trip (a first connect also pays for the
+        // WireGuard handshake).
+        let mut rtts: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+        loop {
+            let cfg = ClientConfig::load();
+            let mut scan = scan(&cfg);
+            for pc in &mut scan.pcs {
+                if let Some(ms) = pc.path.rtt_ms {
+                    let h = rtts.entry(pc.node_id.clone()).or_default();
+                    h.push(ms);
+                    if h.len() > 5 {
+                        h.remove(0);
+                    }
+                    pc.path.rtt_ms = h.iter().copied().min();
+                }
+            }
+            scan.self_nat = nat.lock().clone();
+            learn(&cfg, &scan);
+            *shared.lock() = scan;
+            ctx.request_repaint();
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    });
+}
+
+/// `tailscale netcheck` now and then, for [`Discovery::self_nat`].
+fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, ctx: egui::Context) {
     std::thread::spawn(move || loop {
-        let cfg = ClientConfig::load();
-        let scan = scan(&cfg);
+        match tailscale::netcheck() {
+            Ok(n) => {
+                *slot.lock() = Some(n.report());
+                ctx.request_repaint();
+            }
+            Err(e) => tracing::info!("netcheck: {e}"),
+        }
+        std::thread::sleep(NETCHECK_EVERY);
+    });
+}
+
+/// Save what a scan taught about each PC: address, wake details, when it
+/// was last seen.
+fn learn(cfg: &ClientConfig, scan: &Discovery) {
+    {
         let mut learned = cfg.clone();
         for pc in &scan.pcs {
+            if pc.remembered {
+                continue;
+            }
             let entry = learned.pcs.entry(pc.node_id.clone()).or_default();
             entry.name = pc.name.clone();
+            if let Some(ip) = pc.ip {
+                entry.tailscale_ip = Some(ip.to_string());
+            }
+            if pc.online {
+                // Coarse on purpose: the file is rewritten only when this moves.
+                let now = brolink_core::dates::now_unix();
+                if entry.last_seen_unix.is_none_or(|t| now - t > 600) {
+                    entry.last_seen_unix = Some(now);
+                }
+            }
             if let Some(h) = &pc.host {
                 if h.mac.is_some() {
                     entry.mac = h.mac.clone();
@@ -74,10 +152,7 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
                 tracing::warn!("could not save what was learned: {e:#}");
             }
         }
-        *shared.lock() = scan;
-        ctx.request_repaint();
-        std::thread::sleep(Duration::from_secs(3));
-    });
+    }
 }
 
 fn scan_public(pc: &Pc) -> Option<Ipv4Addr> {
@@ -90,6 +165,7 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         Err(e) => {
             return Discovery {
                 error: Some(e.to_string()),
+                pcs: remembered(cfg),
                 refreshed: Some(Instant::now()),
                 ..Default::default()
             }
@@ -112,12 +188,14 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         .into_iter()
         .map(|n| {
             let ip = n.ipv4();
-            let (host, sunshine) = match (n.online, ip) {
-                (true, Some(ip)) => (
-                    host_status(ip, Duration::from_millis(900)),
-                    port_open(ip, SUNSHINE_PORT, Duration::from_millis(500)),
-                ),
-                _ => (None, false),
+            let (host, sunshine, rtt_ms) = match (n.online, ip) {
+                (true, Some(ip)) => {
+                    let host = host_status(ip, Duration::from_millis(900));
+                    let (sunshine, rtt) =
+                        timed_port_open(ip, SUNSHINE_PORT, Duration::from_millis(900));
+                    (host, sunshine, rtt)
+                }
+                _ => (None, false, None),
             };
             let mut known = cfg.pcs.get(&n.id).cloned();
             if let Some(p) = n.public_ipv4() {
@@ -131,6 +209,13 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
                 host,
                 sunshine,
                 known,
+                remembered: false,
+                key_expiry_days: n.key_expiry_days(),
+                path: Path {
+                    direct: n.direct(),
+                    relay: n.relay.clone(),
+                    rtt_ms,
+                },
             }
         })
         .collect();
@@ -139,7 +224,30 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         login: st.self_login().unwrap_or("").to_string(),
         pcs,
         refreshed: Some(Instant::now()),
+        self_key_days: st.self_node.key_expiry_days(),
+        self_nat: None,
+        self_ip: st.self_node.ipv4(),
     }
+}
+
+/// The PCs as last saved, for when Tailscale cannot list them. Sorted by
+/// name like the live list.
+pub fn remembered(cfg: &ClientConfig) -> Vec<Pc> {
+    let mut pcs: Vec<Pc> = cfg
+        .pcs
+        .iter()
+        .filter(|(_, k)| !k.name.is_empty())
+        .map(|(id, k)| Pc {
+            node_id: id.clone(),
+            name: k.name.clone(),
+            ip: k.tailscale_ip.as_deref().and_then(|s| s.parse().ok()),
+            known: Some(k.clone()),
+            remembered: true,
+            ..Default::default()
+        })
+        .collect();
+    pcs.sort_by(|a, b| a.name.cmp(&b.name));
+    pcs
 }
 
 fn host_status(ip: Ipv4Addr, timeout: Duration) -> Option<Status> {
@@ -150,6 +258,37 @@ fn host_status(ip: Ipv4Addr, timeout: Duration) -> Option<Status> {
 
 fn port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> bool {
     TcpStream::connect_timeout(&SocketAddr::from((ip, port)), timeout).is_ok()
+}
+
+/// Whether the port answers, and how long the connect took: one round
+/// trip, which is the path's latency.
+fn timed_port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> (bool, Option<u32>) {
+    let t = Instant::now();
+    let open = port_open(ip, port, timeout);
+    (open, open.then(|| t.elapsed().as_millis() as u32))
+}
+
+/// A fresh look at the path to `ip` right before connecting: direct or
+/// relayed from Tailscale's own view of the peer, latency from the best of
+/// a few connects.
+fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
+    let mut p = prior.clone();
+    if let Ok(st) = tailscale::status() {
+        if let Some(n) = st.peer.values().find(|n| n.id == node_id) {
+            if let Some(d) = n.direct() {
+                p.direct = Some(d);
+                p.relay = n.relay.clone();
+            }
+        }
+    }
+    let mut best: Option<u32> = prior.rtt_ms;
+    for _ in 0..3 {
+        if let (true, Some(ms)) = timed_port_open(ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
+            best = Some(best.map_or(ms, |b| b.min(ms)));
+        }
+    }
+    p.rtt_ms = best;
+    p
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,13 +348,42 @@ impl Progress {
 /// A running stream and everything the window needs to show and drive it.
 pub struct Live {
     pub pc: String,
+    pub node_id: String,
     pub ip: Ipv4Addr,
     pub session: Session,
+    /// The session's input side, for the view and for workers.
+    pub input: Input,
     pub frames: Arc<FrameSlot>,
     pub events: Receiver<Event>,
     pub started: Instant,
     pub codec: &'static str,
     pub requested: (u32, u32, u32),
+    /// The settings the stream was started with, after Auto had its say.
+    pub settings: StreamSettings,
+    /// The path as measured right before connecting.
+    pub path: Path,
+    /// Clipboard both ways, through BroLink Host on the PC.
+    pub clipboard: clipboard::Sync,
+}
+
+impl Live {
+    /// "Auto · Smooth", "Custom · 1440p · 60 fps · 25 Mbps".
+    pub fn quality_label(&self) -> String {
+        let mode = match self.settings.quality {
+            crate::config::Quality::Auto => "Auto",
+            crate::config::Quality::Custom => "Custom",
+        };
+        match self.settings.preset() {
+            Some(p) => format!("{mode} · {}", p.label()),
+            None => format!("{mode} · {}", self.settings.describe()),
+        }
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.clipboard.stop();
+    }
 }
 
 /// Everything the worker needs about the PC, copied so the UI can move on.
@@ -229,6 +397,8 @@ pub struct Target {
     pub lan_ip: Option<Ipv4Addr>,
     pub public_ip: Option<Ipv4Addr>,
     pub server_cert: Option<Vec<u8>>,
+    /// What discovery last knew about the path; re-measured at connect.
+    pub path: Path,
 }
 
 impl Target {
@@ -248,6 +418,7 @@ impl Target {
             server_cert: k
                 .and_then(|k| k.server_cert.as_deref())
                 .and_then(brolink_stream::nvhttp::unhex),
+            path: pc.path.clone(),
         })
     }
 }
@@ -283,7 +454,7 @@ pub fn connect(c: Connect) {
             }
             Err(e) => p.set(
                 Step::Ended {
-                    error: Some(format!("{e:#}")),
+                    error: Some(format!("{e}")),
                 },
                 "",
             ),
@@ -361,8 +532,19 @@ fn run(c: &Connect) -> Result<()> {
     report(Step::Launching, "Checking pairing…".into());
     let identity = Identity::load_or_create(&brolink_core::config::data_dir()?.join("identity"))?;
     let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
-    let mut info = retry(8, || client.server_info())?;
-    if !info.paired {
+    let mut info = match client.server_info() {
+        Ok(i) => i,
+        Err(e) if e.to_string().contains("certificate changed") => {
+            // Sunshine was reinstalled; the saved cert is the old one.
+            // Forget it and pair again so the user does not have to edit
+            // client.toml.
+            tracing::warn!("{}: {e:#}; pairing again", t.name);
+            client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
+            retry(8, || client.server_info())?
+        }
+        Err(_) => retry(8, || client.server_info())?,
+    };
+    if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
         let der = client.pair(&pin, &brolink_core::config::machine_name(), || {
@@ -378,13 +560,23 @@ fn run(c: &Connect) -> Result<()> {
         bail!("cancelled");
     }
 
-    // 4. Pick the app and launch or resume it.
+    // 4. Pick the app and launch or resume it, at a quality the path can
+    //    carry.
+    report(Step::Launching, "Measuring the path…".into());
+    let path = measure_path(&t.node_id, t.ip, &t.path);
+    let settings = path::effective(&c.settings, &path);
+    tracing::info!(
+        "path to {}: {} · {}",
+        t.name,
+        path.label(),
+        settings.describe()
+    );
     report(Step::Launching, "Starting the stream…".into());
     let apps = client.app_list()?;
     c.progress.lock().apps = apps.iter().map(|a| a.title.clone()).collect();
     let app = apps
         .iter()
-        .find(|a| a.title.eq_ignore_ascii_case(&c.settings.app))
+        .find(|a| a.title.eq_ignore_ascii_case(&settings.app))
         .or_else(|| apps.iter().find(|a| a.title == "Desktop"))
         .or_else(|| apps.first())
         .ok_or_else(|| anyhow!("Sunshine on {} offers nothing to stream", t.name))?;
@@ -393,8 +585,8 @@ fn run(c: &Connect) -> Result<()> {
         std::thread::sleep(Duration::from_millis(500));
         info = client.server_info()?;
     }
-    let (w, h) = c.settings.resolution.pixels(c.native);
-    let fps = c.settings.fps;
+    let (w, h) = settings.resolution.pixels(c.native);
+    let fps = settings.fps;
     let ri_key: [u8; 16] = rand::random();
     let ri_id: u32 = rand::random();
     let mut ri_iv = [0u8; 16];
@@ -406,7 +598,7 @@ fn run(c: &Connect) -> Result<()> {
         let _ = client.quit();
         bail!("cancelled");
     }
-    let hevc = c.settings.codec == Codec::Auto && info.codec_mode_support & 0x0F00 != 0;
+    let hevc = settings.codec != Codec::H264 && info.codec_mode_support & 0x0F00 != 0;
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = c.ctx.clone();
@@ -422,7 +614,7 @@ fn run(c: &Connect) -> Result<()> {
             width: w,
             height: h,
             fps,
-            bitrate_kbps: c.settings.bitrate_kbps,
+            bitrate_kbps: settings.bitrate_kbps,
             hevc,
             remote: !t.ip.is_private(),
         },
@@ -432,15 +624,21 @@ fn run(c: &Connect) -> Result<()> {
         tx,
         move || ctx.request_repaint(),
     );
+    let input = session.input();
     *c.live.lock() = Some(Live {
         pc: t.name.clone(),
+        node_id: t.node_id.clone(),
         ip: t.ip,
         session,
+        input,
         frames,
         events: rx,
         started: Instant::now(),
         codec: if hevc { "HEVC" } else { "H.264" },
         requested: (w, h, fps),
+        settings,
+        path,
+        clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
     });
     report(Step::Connecting, "Connecting…".into());
     Ok(())
@@ -590,6 +788,7 @@ mod tests {
                 lan_ip: Some("192.168.1.10".into()),
                 public_ip: Some("203.0.113.5".into()),
                 server_cert: Some("3082".into()),
+                ..Default::default()
             }),
             ..Default::default()
         };

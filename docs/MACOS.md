@@ -85,18 +85,45 @@ the session clock and the stream stats when they are on, sits below.
 
 | Toolbar item | What it does |
 |--------------|--------------|
-| **● PC name · 1920×1080 · HEVC · 60 fps** | The stream as negotiated; the dot turns amber when the connection is poor |
-| **Mouse: free / captured** | Free: the Mac cursor moves 1:1 on the PC and leaves the window normally. Captured: the cursor is hidden and raw movement is sent, for games. **Ctrl+Alt** toggles; a click on the picture captures |
-| **⌘ = Ctrl / ⌘ = Win** | What the Command key does on the PC; click to switch |
-| **Keys** | Ctrl+Alt+Del, Windows key, Alt+Tab, Esc, Print Screen, for keys macOS keeps for itself |
-| **Stats** | fps, bitrate, round trip, decode time, decoder name in the status line |
+| **● PC name · 1920×1080 · 60 fps · HEVC** | The stream as negotiated; the dot turns red while the connection is poor |
+| **Direct · 38 ms / Relayed via Tokyo · 210 ms** | The path Tailscale found to the PC and its round trip. Red means every packet goes through a Tailscale relay; the lobby says why (see below) |
+| **Mouse: free / captured** | Free: the Mac cursor moves 1:1 on the PC and leaves the window normally. Captured: the cursor is hidden and raw movement is sent, for games. **Ctrl+Alt** toggles |
+| **Quality: Auto / Smooth / …** | Auto picks resolution, frame rate and bitrate from the path; Smooth, Balanced and Sharp are fixed points. Choosing one reconnects in a few seconds |
+| **Keys** | Ctrl+Alt+Del, Windows key, Alt+Tab, Esc, Print Screen; and the switch for what ⌘ does on the PC |
+| **Stats** | fps, bitrate, round trip, packet loss, decode time, decoder, path and quality in the status line |
 | **Full screen** | Toggle; the setting decides how a session starts |
-| **PC** | Sleep, Restart…, Shut down… (the latter two ask twice) |
-| **Disconnect** | End the session; BroLink then offers to sleep the PC |
+| **PC** | Sleep, Restart…, Shut down… (the latter two ask twice); **Update BroLink Host…** for a PC whose host is older than 3.1 |
+| **Disconnect** | End the session |
 
-Everything else on the keyboard goes to the PC as pressed. With **⌘ =
-Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and the rest do on Windows what they
-do on the Mac.
+Everything else on the keyboard goes to the PC as pressed. With **⌘ acts
+as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and the rest do on Windows what
+they do on the Mac, and ⌘ can stay held across several of them.
+
+### Clipboard
+
+With BroLink Host 3.1 or newer on the PC, the clipboard follows you both
+ways: text copied on the PC is in the Mac's clipboard a second later, and
+⌘V on the PC pastes the text the Mac has (BroLink sends it to the PC first,
+then presses Ctrl+V there). Text only, up to 32 KB; an image or a file on
+either clipboard is left alone. Short notices under the toolbar say when
+something crossed. With an older host, ⌘V pastes what the PC last copied.
+
+### Slow? Look at the path
+
+Tailscale connects the Mac and the PC directly when it can punch through
+both routers. When it cannot, every packet goes through one of its relays
+(DERP), which adds a detour of a few hundred milliseconds and holds the
+stream to a few megabits however fast the two networks are. That is the
+whole difference between "fluid" and "unusable", and no setting on either
+side changes it: only the routers do.
+
+BroLink shows which case you are in next to each PC (**Relayed via Tokyo ·
+210 ms**) and, when relayed, a line under the list says which router is in
+the way and what would fix it: UPnP or NAT-PMP turned on in the PC's router,
+a UDP port forwarded to the PC, or IPv6 on both networks. Both machines
+report their own side (`tailscale netcheck`); the PC's report needs BroLink
+Host 3.1. While relayed, **Auto** quality asks for 1080p at 30 fps and 4
+Mbps, which a relay can usually carry.
 
 ## The PC menu in the lobby
 
@@ -115,20 +142,25 @@ details BroLink has learned; it sends the packet without connecting.
 
 | Setting | What it changes |
 |---------|-----------------|
+| Quality | **Auto** (the default) picks the three rows below from the path to the PC at each connect: 1440p/60/30 Mbps on a LAN, 1440p/60/15 nearby, 1080p/60/8 across a long round trip, 1080p/30/4 through a relay. **Custom** uses the rows as set |
 | Resolution | 1080p, 1440p, 4K, or this screen's own pixel size. Exact only with a virtual display on the PC ([Apollo](https://github.com/ClassicOldSong/Apollo) provides one); otherwise the PC's monitor is scaled |
-| Frame rate | 60, 90, 120 |
-| Bitrate | 5 to 150 Mbps |
-| Codec | Auto (HEVC when the PC can encode it), HEVC, H.264 |
+| Frame rate | 30, 60, 90, 120 |
+| Bitrate | 2 to 150 Mbps |
+| Codec | Auto (HEVC when the PC can encode it), H.264 |
 | Full screen | How a session starts |
 | App | The Sunshine app to launch; "Desktop" is the whole PC. The list fills in after the first connection |
 | Command key acts as Ctrl | Off makes ⌘ the Windows key |
-| Offer to sleep the PC after each session | The prompt when a session ends |
+| Offer to sleep the PC after each session | Off by default. Asleep, Tailscale is off; this Mac can only wake the PC from that PC's own network |
 
 Settings are saved in `~/Library/Application Support/BroLink/client.toml`,
 along with the MAC, LAN address and Sunshine certificate of each PC BroLink
 has paired with.
 
 ## Waking a PC from another network
+
+Asleep, the PC's Tailscale is off, so BroLink cannot reach it over the
+tailnet. Leave the PC on (BroLink Host keeps it awake while plugged in)
+if you want **Connect** from anywhere.
 
 The wake packet is sent to the LAN broadcast, to the PC's LAN address and
 to the PC's public address. Over the internet only the last can arrive,
@@ -141,5 +173,52 @@ a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
 
 - **Local network**: macOS 15 may ask; allow it so the wake broadcast can
   go out.
+- **Incoming connections**: if the macOS firewall is on it may ask once,
+  the first time the Mac serves a BroLink Host install through the stream.
 - Nothing else. BroLink captures no screen and reads the keyboard and
   mouse only in its own window.
+
+## Updates
+
+The app checks GitHub for a new release about every six hours and twenty
+seconds after it starts. A newer version is downloaded to
+`~/Library/Application Support/BroLink/updates/<tag>/`, checked against the
+SHA-256 GitHub publishes for the asset and against its own code signature,
+and moved over `/Applications/BroLink.app` once no stream is running; the
+app then relaunches. The Mac also sends the new `brolink-host.exe` to each
+PC whose BroLink Host is older and already speaks `/v1/update` (3.1+).
+
+A PC still on 3.0 cannot take that, and nobody may be at the PC to install
+by hand. So the stream's **PC → Update BroLink Host…** does it through
+the stream: this Mac serves the new `brolink-host.exe` and a short
+PowerShell script on its own Tailscale address (TCP 47851, to that one PC
+only, for ten minutes), presses Win+R on the PC, types one line
+(`powershell -ep bypass -c "irm http://<mac>:47851/u.ps1|iex"`) and
+presses Enter. A PowerShell window on the PC fetches the executable, checks
+its SHA-256 against the one in the script, stops the old service, swaps
+the file where it stands (found from the running process, or
+`%LOCALAPPDATA%\BroLink`), registers it to start at logon and starts it.
+The stream is not interrupted; the toolbar reports each step and the lobby
+shows the new version a few seconds later. The PC's desktop has to be
+unlocked and in front, since the Run box needs it. From then on updates
+arrive by themselves.
+
+The download needs a GitHub login because the repository is private. The
+app uses, in order: `github_token` in `client.toml`, `BROLINK_GITHUB_TOKEN`
+in the environment, and the token git has stored for github.com (which is
+there after `install-macos-release.sh` or any `git` use with the osxkeychain
+helper). Settings has the switch and a **Check now** button; the line under
+it says what happened last. A copy that is not running from an app bundle
+(a development build) reports the new version but does not replace itself.
+
+## Staying reachable
+
+- Every PC in the list, and this Mac, shows a warning while its Tailscale
+  node key expires. Open the machine in the
+  [admin console](https://login.tailscale.com/admin/machines) and choose
+  **Disable key expiry**; the warning goes away at the next scan.
+- PCs are remembered in `client.toml` with their Tailscale address, MAC and
+  the certificate from pairing. While Tailscale on this Mac is off they stay
+  listed with when they were last seen, and **Wake** still works over the
+  LAN or the public address.
+

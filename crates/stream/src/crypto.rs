@@ -185,7 +185,11 @@ pub unsafe extern "C" fn PltEncryptMessage(
         input,
         in_len as c_int,
         output,
-        padded_len(in_len),
+        if algorithm == ALGORITHM_AES_CBC {
+            padded_len(in_len)
+        } else {
+            in_len
+        },
     ) else {
         return false;
     };
@@ -256,7 +260,11 @@ pub unsafe extern "C" fn PltDecryptMessage(
         input,
         input_len,
         output,
-        padded_len(in_len),
+        if algorithm == ALGORITHM_AES_CBC {
+            padded_len(in_len)
+        } else {
+            in_len
+        },
     ) else {
         return false;
     };

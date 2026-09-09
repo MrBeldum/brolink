@@ -31,6 +31,94 @@ impl Install {
     }
 }
 
+/// The end of Sunshine's log, which says which encoder it settled on and
+/// whether it could capture audio. `None` when it cannot be read.
+pub fn log_text(install: &Install) -> Option<String> {
+    let path = install.dir.join("config").join("sunshine.log");
+    read_tail(&path, 512 * 1024)
+}
+
+/// The encoder family Sunshine settled on at its last start, from its log:
+/// "nvenc", "amf", "quicksync", "software", or `None` when the log says
+/// nothing. Software means no GPU encoder worked, which makes every stream
+/// slow whatever the network does. The last `Found H.264 encoder: <name>
+/// [<family>]` line counts, or the HEVC one when there is no H.264 line.
+pub fn encoder_in(log: &str) -> Option<String> {
+    let family = |line: &str| -> Option<String> {
+        let start = line.rfind('[')? + 1;
+        let end = line[start..].find(']')? + start;
+        let f = line[start..end].trim();
+        (!f.is_empty()).then(|| f.to_string())
+    };
+    for key in ["Found H.264 encoder:", "Found HEVC encoder:"] {
+        if let Some(line) = log.lines().rev().find(|l| l.contains(key)) {
+            if let Some(f) = family(line) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// Why Sunshine's audio capture failed, in its own words, when the last
+/// thing its log says about audio is a failure rather than a working
+/// capture format. A PC with no monitor or speakers usually has no audio
+/// endpoint at all; Sunshine then streams silence and says so here.
+pub fn audio_problem_in(log: &str) -> Option<String> {
+    const FAILED: [&str; 8] = [
+        "Unable to initialize audio capture",
+        "There will be no audio",
+        "Couldn't get default audio endpoint",
+        "Couldn't find audio sink",
+        "Audio sink not found",
+        "Couldn't find supported format for audio",
+        "Couldn't initialize audio client",
+        "Couldn't initialize audio capture client",
+    ];
+    const WORKED: [&str; 2] = ["Audio capture format is", "Opus initialized"];
+    let mut problem = None;
+    for line in log.lines() {
+        if WORKED.iter().any(|k| line.contains(k)) {
+            problem = None;
+        } else if FAILED.iter().any(|k| line.contains(k)) {
+            problem = Some(log_message(line));
+        }
+    }
+    problem
+}
+
+/// `[2026-09-07 10:00:00.001]: Error: Couldn't …` without its prefix.
+fn log_message(line: &str) -> String {
+    let l = line.trim();
+    let l = match (l.starts_with('['), l.find("]: ")) {
+        (true, Some(i)) => &l[i + 3..],
+        _ => l,
+    };
+    ["Error: ", "Warning: ", "Info: ", "Fatal: "]
+        .iter()
+        .find_map(|p| l.strip_prefix(p))
+        .unwrap_or(l)
+        .trim()
+        .to_string()
+}
+
+/// The last `max` bytes of a file as text, from a line boundary.
+fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > max {
+        f.seek(SeekFrom::Start(len - max)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Some(match text.find('\n') {
+        Some(i) if len > max => text[i + 1..].to_string(),
+        _ => text,
+    })
+}
+
 pub fn find() -> Option<Install> {
     INSTALL_DIRS
         .iter()
@@ -195,6 +283,54 @@ fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_encoder_family_is_read_from_the_log() {
+        let log = "[2026-09-07 10:00:00.001]: Info: // Testing for available encoders //\n\
+                   [2026-09-07 10:00:01.002]: Info: Found H.264 encoder: h264_nvenc [nvenc]\n\
+                   [2026-09-07 10:00:01.003]: Info: Found HEVC encoder: hevc_nvenc [nvenc]\n\
+                   [2026-09-07 10:00:01.004]: Info: Found AV1 encoder: av1_nvenc [nvenc]\n";
+        assert_eq!(encoder_in(log).as_deref(), Some("nvenc"));
+        let sw = "Info: Found H.264 encoder: libx264 [software]\nInfo: Found HEVC encoder: libx265 [software]\n";
+        assert_eq!(encoder_in(sw).as_deref(), Some("software"));
+        // Two starts: the later one counts.
+        let two = format!("{log}{sw}");
+        assert_eq!(encoder_in(&two).as_deref(), Some("software"));
+        let hevc_only = "Info: Found HEVC encoder: hevc_amf [amf]\n";
+        assert_eq!(encoder_in(hevc_only).as_deref(), Some("amf"));
+        assert_eq!(encoder_in("Info: nothing about encoders\n"), None);
+        assert_eq!(encoder_in("Found H.264 encoder: x []"), None);
+        assert_eq!(
+            read_tail(std::path::Path::new("/nonexistent/sunshine.log"), 10),
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_audio_device_is_read_from_the_log() {
+        let bad = "[2026-09-08 20:00:00.000]: Info: Found H.264 encoder: h264_nvenc [nvenc]\n\
+                   [2026-09-08 20:00:05.000]: Error: Couldn't get default audio endpoint [0x80070490]\n\
+                   [2026-09-08 20:00:05.001]: Error: Unable to initialize audio capture. The stream will not have audio.\n";
+        assert_eq!(
+            audio_problem_in(bad).as_deref(),
+            Some("Unable to initialize audio capture. The stream will not have audio.")
+        );
+        // A later start that captured fine clears it.
+        let good = format!(
+            "{bad}[2026-09-08 21:00:00.000]: Info: Audio capture format is [48kHz, 32-bit float, 2 channels]\n"
+        );
+        assert_eq!(audio_problem_in(&good), None);
+        assert_eq!(audio_problem_in("Info: nothing about audio\n"), None);
+        let sink = "[x]: Warning: Audio sink not found: Steam Streaming Speakers\n";
+        assert_eq!(
+            audio_problem_in(sink).as_deref(),
+            Some("Audio sink not found: Steam Streaming Speakers")
+        );
+        assert_eq!(
+            log_message("  Couldn't capture audio [0x1]  "),
+            "Couldn't capture audio [0x1]"
+        );
+    }
 
     #[test]
     fn replies_are_parsed_and_errors_surfaced() {

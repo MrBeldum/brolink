@@ -1,3 +1,8 @@
 # audiopus_sys ships a libopus whose CMake files predate CMake 4.
 [env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+# The host is a standalone exe. Without this it needs vcruntime140.dll,
+# which is not inbox on a fresh Windows install.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

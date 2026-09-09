@@ -191,6 +191,12 @@ impl VideoToolbox {
     /// fresh set of parameter NALs.
     fn set_parameters(&mut self, sets: Vec<Vec<u8>>) -> Result<()> {
         if sets == self.params && !self.format.is_null() {
+            // A sleep/wake or GPU reset invalidates the session while the
+            // parameter sets stay the same. Recreate rather than decoding
+            // into a dead session until the user reconnects.
+            if self.session.is_null() {
+                self.create_session()?;
+            }
             return Ok(());
         }
         let ptrs: Vec<*const u8> = sets.iter().map(|s| s.as_ptr()).collect();
@@ -287,13 +293,22 @@ impl VideoToolbox {
     }
 }
 
-impl Drop for VideoToolbox {
-    fn drop(&mut self) {
+impl VideoToolbox {
+    fn drop_session(&mut self) {
         unsafe {
             if !self.session.is_null() {
                 VTDecompressionSessionInvalidate(self.session);
                 CFRelease(self.session);
+                self.session = ptr::null();
             }
+        }
+    }
+}
+
+impl Drop for VideoToolbox {
+    fn drop(&mut self) {
+        self.drop_session();
+        unsafe {
             if !self.format.is_null() {
                 CFRelease(self.format);
             }
@@ -418,6 +433,13 @@ impl Decoder for VideoToolbox {
             );
             CFRelease(sample);
             if status != 0 {
+                // -12903 kVTInvalidSessionErr, -12911 kVTVideoDecoderMalfunctionErr
+                if status == -12903 || status == -12911 {
+                    self.drop_session();
+                    if !self.format.is_null() {
+                        let _ = self.create_session();
+                    }
+                }
                 return Err(anyhow!("decode failed ({status})"));
             }
         }

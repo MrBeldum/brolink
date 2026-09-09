@@ -4,14 +4,19 @@
 //!   at logon with no window (see [`setup::set_start_with_windows`]).
 //! * `brolink-host`: the control panel. Starts the service if it is not
 //!   running, shows what it knows, and runs the one administrator setup.
+//!
+//! `--replaces <pid>` is how an update hands over: the new executable waits
+//! for the old service to release the port (see [`update`]).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod clipboard;
 mod config;
 mod power;
 mod service;
 mod setup;
 mod streamer;
+mod update;
 mod wake;
 
 use anyhow::Result;
@@ -32,6 +37,9 @@ struct Args {
     /// Run the control service with no window.
     #[arg(long)]
     background: bool,
+    /// Started by an update: wait for this process to give up the port.
+    #[arg(long, requires = "background")]
+    replaces: Option<u32>,
 }
 
 fn main() -> Result<()> {
@@ -42,7 +50,7 @@ fn main() -> Result<()> {
         "panel.log"
     });
     if args.background {
-        return service::Service::new().run_arc();
+        return service::Service::new().run_arc(args.replaces.is_some());
     }
     ensure_service_running();
     let native = eframe::NativeOptions {
@@ -67,8 +75,8 @@ fn main() -> Result<()> {
 }
 
 impl service::Service {
-    fn run_arc(self) -> Result<()> {
-        Arc::new(self).run()
+    fn run_arc(self, replacing: bool) -> Result<()> {
+        Arc::new(self).run(replacing)
     }
 }
 
@@ -76,11 +84,15 @@ impl service::Service {
 fn init_logging(file: &str) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let sink: Box<dyn std::io::Write + Send> =
-        match data_dir().and_then(|d| Ok(std::fs::File::create(d.join(file))?)) {
-            Ok(f) => Box::new(f),
-            Err(_) => Box::new(std::io::stderr()),
-        };
+    let sink: Box<dyn std::io::Write + Send> = match data_dir().and_then(|d| {
+        Ok(std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(d.join(file))?)
+    }) {
+        Ok(f) => Box::new(f),
+        Err(_) => Box::new(std::io::stderr()),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

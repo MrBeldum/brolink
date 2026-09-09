@@ -10,8 +10,82 @@
 //! | POST   | /v1/pin     | [`PinRequest`]  | [`Ack`]      |
 //! | POST   | /v1/power   | [`PowerRequest`]| [`Ack`]      |
 //! | POST   | /v1/quit    |                 | [`Ack`] (loopback only) |
+//! | POST   | /v1/update  | `brolink-host.exe` bytes | [`Ack`]     |
+//! | GET    | /v1/clipboard |               | [`Clipboard`] |
+//! | POST   | /v1/clipboard | [`Clipboard`] | [`Ack`]      |
+//!
+//! `/v1/update` carries the new executable itself, with its version in
+//! [`UPDATE_VERSION_HEADER`] and its SHA-256 in [`UPDATE_SHA256_HEADER`]. A
+//! tailnet peer that may sleep the PC may also update it; the host verifies
+//! the digest, swaps the file in and restarts. See [`crate::update`].
+//!
+//! `/v1/clipboard` is the PC's clipboard as text (3.1+). The Mac reads it
+//! while streaming so ⌘C on the PC lands in the Mac's clipboard, and writes
+//! it before a ⌘V so the Mac's text is what the PC pastes.
 
 use serde::{Deserialize, Serialize};
+
+pub const UPDATE_PATH: &str = "/v1/update";
+pub const UPDATE_VERSION_HEADER: &str = "x-brolink-version";
+pub const UPDATE_SHA256_HEADER: &str = "x-brolink-sha256";
+/// The largest host executable accepted; the real one is a tenth of this.
+pub const UPDATE_MAX_BYTES: usize = 128 * 1024 * 1024;
+/// Oldest BroLink Host that serves [`UPDATE_PATH`]. Older hosts cap the
+/// body at 64 KiB and close; a Mac that POSTs the executable anyway sees
+/// a broken pipe (and on macOS, a socket timeout as EAGAIN).
+pub const FIRST_UPDATE_VERSION: &str = "3.1.0";
+
+pub const CLIPBOARD_PATH: &str = "/v1/clipboard";
+/// Clipboard text longer than this is cut. It has to fit a 64 KiB request
+/// body once JSON-escaped, and nobody pastes a novel through a stream.
+pub const CLIPBOARD_MAX_BYTES: usize = 32 * 1024;
+
+/// The PC's clipboard, as far as it is text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Clipboard {
+    pub text: String,
+    /// Windows' clipboard sequence number: changes on every copy, so a
+    /// reader can tell "new" from "same" without comparing text.
+    pub seq: u64,
+    /// The text was cut to [`CLIPBOARD_MAX_BYTES`].
+    pub truncated: bool,
+}
+
+impl Clipboard {
+    /// `text` cut to the size limit on a character boundary.
+    pub fn fit(text: &str, seq: u64) -> Self {
+        let mut end = text.len().min(CLIPBOARD_MAX_BYTES);
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            text: text[..end].to_string(),
+            seq,
+            truncated: end < text.len(),
+        }
+    }
+}
+
+/// What `tailscale netcheck` says about one machine's network, in the
+/// terms that decide whether two machines can connect directly. Both apps
+/// report their own; the Mac combines the two to explain a relayed path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NatReport {
+    /// UDP gets out at all. Without it every packet goes through a relay.
+    pub udp: bool,
+    pub ipv4: bool,
+    pub ipv6: bool,
+    /// A "hard" NAT maps each destination to a different port; two hard NATs
+    /// cannot reach each other without a port mapping. `None` when unknown.
+    pub hard: Option<bool>,
+    /// The router will map a port on request (UPnP, NAT-PMP or PCP), which
+    /// makes a hard NAT reachable.
+    pub portmap: bool,
+    /// Nearest DERP region code ("tok"); see `tailscale::derp_city`.
+    pub derp: String,
+}
 
 /// Everything the Mac needs to know about the PC, and everything the host's
 /// own control panel shows.
@@ -45,6 +119,8 @@ pub struct Status {
     pub streamer: Streamer,
     /// Whether the owner lets a Mac sleep, restart, or shut this PC down.
     pub power_allowed: bool,
+    /// This PC's side of the NAT story (3.1+); absent from older hosts.
+    pub nat: Option<NatReport>,
     /// What the host thinks still needs doing, for the setup card.
     pub setup: Vec<String>,
     /// Recent log lines, newest last.
@@ -63,6 +139,15 @@ pub struct Streamer {
     /// The host can log in to its web API with the saved credentials, which
     /// is what auto-pairing needs.
     pub api_ok: bool,
+    /// The encoder family Sunshine settled on ("nvenc", "amf", "quicksync",
+    /// "software"), read from its log; empty when unknown. Software
+    /// encoding is why a stream can be slow on a fast network.
+    pub encoder: String,
+    /// Why Sunshine has no sound to send, in its own words from its log
+    /// (3.1+); empty when audio capture works or nothing is known. A PC
+    /// with no monitor or speakers has no audio device, and Sunshine then
+    /// streams silence.
+    pub audio_problem: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,5 +229,31 @@ mod tests {
         let r: PowerRequest = serde_json::from_str(r#"{"action":"sleep"}"#).unwrap();
         assert_eq!(r.action, PowerAction::Sleep);
         assert!(serde_json::from_str::<PowerRequest>(r#"{"action":"Sleep"}"#).is_err());
+    }
+
+    #[test]
+    fn clipboard_is_cut_on_a_character_boundary() {
+        let c = Clipboard::fit("héllo", 3);
+        assert_eq!(c.text, "héllo");
+        assert!(!c.truncated);
+        assert_eq!(c.seq, 3);
+        let long = "é".repeat(CLIPBOARD_MAX_BYTES); // 2 bytes each
+        let c = Clipboard::fit(&long, 1);
+        assert!(c.truncated);
+        assert!(c.text.len() <= CLIPBOARD_MAX_BYTES);
+        assert!(c.text.chars().all(|ch| ch == 'é'));
+        // Fits a request body once serialised.
+        assert!(serde_json::to_string(&c).unwrap().len() < 64 * 1024);
+        // Old hosts have neither `nat` nor `encoder`.
+        let s: Status = serde_json::from_str(r#"{"streamer":{"kind":"Sunshine"}}"#).unwrap();
+        assert_eq!(s.nat, None);
+        assert_eq!(s.streamer.encoder, "");
+        assert_eq!(s.streamer.audio_problem, "");
+    }
+
+    #[test]
+    fn first_update_version_is_3_1() {
+        assert_eq!(FIRST_UPDATE_VERSION, "3.1.0");
+        assert!(semver::Version::parse(FIRST_UPDATE_VERSION).is_ok());
     }
 }

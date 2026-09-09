@@ -1,0 +1,554 @@
+//! Finding and fetching BroLink releases on GitHub, for both apps' updaters.
+//!
+//! The repository is private, so the calls need a token: the caller's
+//! setting, `BROLINK_GITHUB_TOKEN`, or on macOS whatever git has stored for
+//! github.com, which is the login the install script uses too. Without one
+//! the requests still go out, so a public repository works unchanged.
+//!
+//! Only the Mac talks to GitHub. It replaces its own bundle and sends each
+//! PC the new `brolink-host.exe` over the control API; see
+//! [`crate::api::UPDATE_PATH`].
+
+use anyhow::{anyhow, bail, Context, Result};
+use semver::Version;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub const REPO: &str = "MrBeldum/brolink";
+pub const MAC_ASSET: &str = "brolink-macos-arm64.tar.gz";
+pub const WINDOWS_ASSET: &str = "brolink-windows-x64.zip";
+/// The host executable inside [`WINDOWS_ASSET`].
+pub const HOST_EXE: &str = "brolink-host.exe";
+
+const TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HOPS: usize = 5;
+/// Nothing BroLink ships comes near this.
+const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub version: Version,
+    pub tag: String,
+    pub prerelease: bool,
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asset {
+    pub name: String,
+    /// The API URL; downloading needs `Accept: application/octet-stream`.
+    pub url: String,
+    pub size: u64,
+    /// GitHub's SHA-256 of the file, lowercase hex, when it published one.
+    pub sha256: Option<String>,
+}
+
+impl Release {
+    pub fn asset(&self, name: &str) -> Option<&Asset> {
+        self.assets.iter().find(|a| a.name == name)
+    }
+
+    /// Worth installing over `current`? A pre-release is offered only to a
+    /// machine already on a pre-release.
+    pub fn is_newer_than(&self, current: &Version) -> bool {
+        self.version > *current && (!self.prerelease || !current.pre.is_empty())
+    }
+}
+
+/// The version this binary was built as; every crate shares the workspace's.
+pub fn current() -> Version {
+    Version::parse(env!("CARGO_PKG_VERSION")).expect("the crate version is semver")
+}
+
+/// Oldest host that will accept a POST to [`crate::api::UPDATE_PATH`].
+pub fn first_update() -> Version {
+    Version::parse(crate::api::FIRST_UPDATE_VERSION).expect("FIRST_UPDATE_VERSION is semver")
+}
+
+/// Whether a running host can take `brolink-host.exe` from the Mac.
+pub fn host_can_receive_update(running: &Version) -> bool {
+    *running >= first_update()
+}
+
+/// The GitHub token to use: the configured one, the environment, then what
+/// git has stored for github.com.
+pub fn token(configured: Option<&str>) -> Option<String> {
+    configured
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("BROLINK_GITHUB_TOKEN")
+                .ok()
+                .filter(|t| !t.trim().is_empty())
+        })
+        .or_else(git_token)
+}
+
+#[cfg(target_os = "macos")]
+fn git_token() -> Option<String> {
+    // Without the command line tools, /usr/bin/git is a stub that opens an
+    // installer dialog; look before calling.
+    let have_git = Path::new("/Library/Developer/CommandLineTools/usr/bin/git").exists()
+        || Path::new("/Applications/Xcode.app").exists();
+    if !have_git {
+        return None;
+    }
+    let mut child = std::process::Command::new("/usr/bin/git")
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child
+        .stdin
+        .take()?
+        .write_all(b"protocol=https\nhost=github.com\n\n")
+        .ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("password=").map(str::to_string))
+        .filter(|t| !t.is_empty())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn git_token() -> Option<String> {
+    None
+}
+
+/// The newest release, as GitHub ranks them (pre-releases excluded).
+pub fn latest(token: Option<&str>) -> Result<Release> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let mut body = Vec::new();
+    let status = fetch(&url, token, "application/vnd.github+json", &mut body)?;
+    match status {
+        200 => parse_release(&body),
+        404 if token.is_none() => {
+            bail!("no release found; a private repository needs a GitHub token")
+        }
+        404 => bail!("no release found"),
+        401 | 403 => bail!("GitHub refused the token (HTTP {status})"),
+        _ => bail!("GitHub answered HTTP {status}"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReleaseJson {
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<AssetJson>,
+}
+
+#[derive(Deserialize)]
+struct AssetJson {
+    name: String,
+    url: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+pub fn parse_release(json: &[u8]) -> Result<Release> {
+    let r: ReleaseJson = serde_json::from_slice(json).context("parse the release")?;
+    let version = Version::parse(r.tag_name.trim_start_matches('v'))
+        .with_context(|| format!("tag {:?} is not a version", r.tag_name))?;
+    Ok(Release {
+        version,
+        tag: r.tag_name,
+        prerelease: r.prerelease,
+        assets: r
+            .assets
+            .into_iter()
+            .map(|a| Asset {
+                name: a.name,
+                url: a.url,
+                size: a.size,
+                sha256: a
+                    .digest
+                    .as_deref()
+                    .and_then(|d| d.strip_prefix("sha256:"))
+                    .map(|h| h.to_ascii_lowercase()),
+            })
+            .collect(),
+    })
+}
+
+/// Download `asset` to `dest`, checking GitHub's digest and size. The file
+/// is written under a temporary name and renamed only when it checks out, so
+/// an existing `dest` is always a complete, verified copy.
+pub fn download(asset: &Asset, token: Option<&str>, dest: &Path) -> Result<()> {
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = dest.with_extension("part");
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        let mut sink = Hashing {
+            inner: &mut file,
+            sha: Sha256::new(),
+            written: 0,
+        };
+        let status = fetch(&asset.url, token, "application/octet-stream", &mut sink)?;
+        if status != 200 {
+            bail!("GitHub answered HTTP {status} for {}", asset.name);
+        }
+        let got = hex(&sink.sha.finalize());
+        let written = sink.written;
+        if let Some(want) = &asset.sha256 {
+            if !got.eq_ignore_ascii_case(want) {
+                bail!("{} does not match its published SHA-256", asset.name);
+            }
+        }
+        if asset.size > 0 && written != asset.size {
+            bail!(
+                "{} is {written} bytes, the release says {}",
+                asset.name,
+                asset.size
+            );
+        }
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, dest).with_context(|| dest.display().to_string())
+}
+
+struct Hashing<'a, W: Write> {
+    inner: &'a mut W,
+    sha: Sha256,
+    written: u64,
+}
+
+impl<W: Write> Write for Hashing<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.sha.update(&buf[..n]);
+        self.written += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// GET `url` over HTTPS, following redirects, streaming the body into
+/// `sink`. Returns the final status; the body is written whatever it is,
+/// so callers can read GitHub's error message.
+pub fn fetch(url: &str, token: Option<&str>, accept: &str, sink: &mut dyn Write) -> Result<u16> {
+    let (first_host, _) = split_url(url)?;
+    let mut url = url.to_string();
+    for _ in 0..MAX_HOPS {
+        let (host, path) = split_url(&url)?;
+        // The token is for GitHub's API. A redirect lands on a storage host
+        // whose URL carries its own signed grant and refuses a second one.
+        let auth = token.filter(|_| host == first_host);
+        let mut tls = connect(&host)?;
+        let mut head = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: brolink/{}\r\nAccept: {accept}\r\nConnection: close\r\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Some(t) = auth {
+            head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        head.push_str("\r\n");
+        tls.write_all(head.as_bytes())
+            .map_err(crate::http::io_err)?;
+        tls.flush().map_err(crate::http::io_err)?;
+        let mut reader = BufReader::new(tls);
+        let (status, headers) = read_head(&mut reader)?;
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let loc = header(&headers, "location")
+                .ok_or_else(|| anyhow!("redirect without a location"))?;
+            url = if loc.starts_with("https://") {
+                loc.to_string()
+            } else if loc.starts_with('/') {
+                format!("https://{host}{loc}")
+            } else {
+                bail!("redirect to {loc:?} is not https");
+            };
+            continue;
+        }
+        read_body(&mut reader, &headers, sink)?;
+        return Ok(status);
+    }
+    bail!("too many redirects")
+}
+
+/// `https://host/path?query` into `(host, path-with-query)`.
+fn split_url(url: &str) -> Result<(String, String)> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| anyhow!("{url:?} is not an https URL"))?;
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if host.is_empty() {
+        bail!("{url:?} has no host");
+    }
+    Ok((host.to_string(), path.to_string()))
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// Status line and headers; header names come back lowercase.
+fn read_head<R: BufRead>(r: &mut R) -> Result<(u16, Vec<(String, String)>)> {
+    let mut line = String::new();
+    r.read_line(&mut line).map_err(crate::http::io_err)?;
+    let status: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow!("bad status line: {line:?}"))?;
+    let mut headers = Vec::new();
+    loop {
+        line.clear();
+        if r.read_line(&mut line).map_err(crate::http::io_err)? == 0 {
+            bail!("connection closed inside headers");
+        }
+        let l = line.trim_end();
+        if l.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = l.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+        }
+    }
+    Ok((status, headers))
+}
+
+/// The body as the headers describe it: chunked, sized, or to the end.
+fn read_body<R: BufRead>(
+    r: &mut R,
+    headers: &[(String, String)],
+    sink: &mut dyn Write,
+) -> Result<()> {
+    let chunked = header(headers, "transfer-encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    if chunked {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if r.read_line(&mut line).map_err(crate::http::io_err)? == 0 {
+                bail!("connection closed inside a chunked body");
+            }
+            let size_hex = line.trim().split(';').next().unwrap_or("").trim();
+            let size = u64::from_str_radix(size_hex, 16)
+                .with_context(|| format!("chunk size {size_hex:?}"))?;
+            if size == 0 {
+                // Trailers, then the blank line.
+                loop {
+                    line.clear();
+                    if r.read_line(&mut line).map_err(crate::http::io_err)? == 0
+                        || line.trim_end().is_empty()
+                    {
+                        break;
+                    }
+                }
+                return Ok(());
+            }
+            if size > MAX_DOWNLOAD {
+                bail!("chunk of {size} bytes is too large");
+            }
+            std::io::copy(&mut r.take(size), sink).map_err(crate::http::io_err)?;
+            line.clear();
+            r.read_line(&mut line).map_err(crate::http::io_err)?; // the CRLF after the chunk
+        }
+    }
+    match header(headers, "content-length").and_then(|v| v.parse::<u64>().ok()) {
+        Some(n) if n > MAX_DOWNLOAD => bail!("reply of {n} bytes is too large"),
+        Some(n) => {
+            let copied = std::io::copy(&mut r.take(n), sink).map_err(crate::http::io_err)?;
+            if copied != n {
+                bail!("connection closed after {copied} of {n} bytes");
+            }
+        }
+        None => {
+            std::io::copy(&mut r.take(MAX_DOWNLOAD), sink).map_err(crate::http::io_err)?;
+        }
+    }
+    Ok(())
+}
+
+fn connect(host: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
+    let addr = (host, 443u16)
+        .to_socket_addrs()
+        .with_context(|| format!("resolve {host}"))?
+        .next()
+        .ok_or_else(|| anyhow!("{host} has no address"))?;
+    let tcp = TcpStream::connect_timeout(&addr, TIMEOUT)
+        .map_err(crate::http::io_err)
+        .with_context(|| format!("connect to {host}"))?;
+    tcp.set_read_timeout(Some(TIMEOUT))
+        .map_err(crate::http::io_err)?;
+    tcp.set_write_timeout(Some(TIMEOUT))
+        .map_err(crate::http::io_err)?;
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
+    let conn = rustls::ClientConnection::new(tls_config()?, name)?;
+    Ok(rustls::StreamOwned::new(conn, tcp))
+}
+
+fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
+    static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    if let Some(c) = CONFIG.get() {
+        return Ok(c.clone());
+    }
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let provider = rustls::crypto::ring::default_provider();
+    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let cfg = Arc::new(cfg);
+    Ok(CONFIG.get_or_init(|| cfg).clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RELEASE: &str = r#"{
+      "tag_name": "v3.1.0", "prerelease": false,
+      "assets": [
+        {"name": "brolink-macos-arm64.tar.gz", "url": "https://api.github.com/repos/x/y/releases/assets/1",
+         "size": 5243666, "digest": "sha256:226CE7321E5185D10F6F83CD38916D25485D1734794119B279A72A9AF3CC4AB7"},
+        {"name": "brolink-windows-x64.zip", "url": "https://api.github.com/repos/x/y/releases/assets/2", "size": 28514670}
+      ]
+    }"#;
+
+    #[test]
+    fn release_json_is_parsed_and_compared() {
+        let r = parse_release(RELEASE.as_bytes()).unwrap();
+        assert_eq!(r.version, Version::new(3, 1, 0));
+        assert_eq!(r.tag, "v3.1.0");
+        let mac = r.asset(MAC_ASSET).unwrap();
+        assert_eq!(mac.size, 5_243_666);
+        assert_eq!(
+            mac.sha256.as_deref(),
+            Some("226ce7321e5185d10f6f83cd38916d25485d1734794119b279a72a9af3cc4ab7")
+        );
+        assert_eq!(r.asset(WINDOWS_ASSET).unwrap().sha256, None);
+        assert!(r.asset("nope").is_none());
+        assert!(r.is_newer_than(&Version::new(3, 0, 0)));
+        assert!(!r.is_newer_than(&Version::new(3, 1, 0)));
+        assert!(!r.is_newer_than(&Version::new(4, 0, 0)));
+        // A pre-release goes only to machines already on one.
+        let mut pre = r.clone();
+        pre.prerelease = true;
+        pre.version = Version::parse("3.2.0-beta.1").unwrap();
+        assert!(!pre.is_newer_than(&Version::new(3, 1, 0)));
+        assert!(pre.is_newer_than(&Version::parse("3.2.0-alpha.1").unwrap()));
+        assert!(parse_release(br#"{"tag_name":"latest"}"#).is_err());
+    }
+
+    #[test]
+    fn urls_split_and_headers_are_case_insensitive() {
+        assert_eq!(
+            split_url("https://api.github.com/repos/a/b?x=1").unwrap(),
+            ("api.github.com".into(), "/repos/a/b?x=1".into())
+        );
+        assert_eq!(split_url("https://h").unwrap(), ("h".into(), "/".into()));
+        assert!(split_url("http://h/").is_err());
+        assert!(split_url("https:///x").is_err());
+        let h = vec![("location".to_string(), "https://o/x".to_string())];
+        assert_eq!(header(&h, "Location"), Some("https://o/x"));
+    }
+
+    #[test]
+    fn chunked_sized_and_unsized_bodies_are_read() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n7\r\n, world\r\n0\r\nX-Trailer: 1\r\n\r\n";
+        let mut r = BufReader::new(&raw[..]);
+        let (status, headers) = read_head(&mut r).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(header(&headers, "content-type"), Some("text/plain"));
+        let mut out = Vec::new();
+        read_body(&mut r, &headers, &mut out).unwrap();
+        assert_eq!(out, b"hello, world");
+
+        let raw =
+            b"HTTP/1.1 302 Found\r\nLocation: https://x/y\r\nContent-Length: 3\r\n\r\nabcEXTRA";
+        let mut r = BufReader::new(&raw[..]);
+        let (status, headers) = read_head(&mut r).unwrap();
+        assert_eq!(status, 302);
+        let mut out = Vec::new();
+        read_body(&mut r, &headers, &mut out).unwrap();
+        assert_eq!(out, b"abc");
+
+        let raw = b"HTTP/1.1 200 OK\r\n\r\nto the end";
+        let mut r = BufReader::new(&raw[..]);
+        let (_, headers) = read_head(&mut r).unwrap();
+        let mut out = Vec::new();
+        read_body(&mut r, &headers, &mut out).unwrap();
+        assert_eq!(out, b"to the end");
+
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nshort";
+        let mut r = BufReader::new(&raw[..]);
+        let (_, headers) = read_head(&mut r).unwrap();
+        assert!(read_body(&mut r, &headers, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn digests_are_lowercase_hex() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            current(),
+            Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
+        );
+        assert_eq!(first_update(), Version::new(3, 1, 0));
+        assert!(!host_can_receive_update(&Version::new(3, 0, 0)));
+        assert!(!host_can_receive_update(&Version::new(3, 0, 1)));
+        assert!(host_can_receive_update(&Version::new(3, 1, 0)));
+        assert!(host_can_receive_update(&Version::new(3, 2, 0)));
+    }
+
+    #[test]
+    fn a_bad_download_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("brolink-dl-{}", std::process::id()));
+        let dest = dir.join("x.bin");
+        let asset = Asset {
+            name: "x.bin".into(),
+            url: "https://127.0.0.1/nothing-listens-here".into(),
+            size: 1,
+            sha256: None,
+        };
+        assert!(download(&asset, None, &dest).is_err());
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

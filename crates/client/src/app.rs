@@ -1,15 +1,19 @@
 //! The window: a list of PCs with a Connect button each, settings, and the
 //! stream screen once connected.
 
-use crate::config::{ClientConfig, Codec, Resolution};
+use crate::config::{ClientConfig, Codec, Quality, Resolution};
+use crate::handover::{self, Handover};
+use crate::path;
 use crate::session::{self, Connect, Discovery, Live, Pc, Progress, Step, Target};
-use crate::stream::{self, Action};
+use crate::stream::{self, Action, Env, QualityChoice};
+use crate::update;
 use brolink_core::api::PowerAction;
 use brolink_core::tailscale;
 use brolink_stream::Event;
 use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
 use parking_lot::Mutex;
+use semver::Version;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,13 +41,28 @@ pub struct ClientApp {
     offer_sleep: Option<Pc>,
     ended_seen: bool,
     pending_notice: Option<Notice>,
+    updates: Arc<Mutex<update::State>>,
+    /// The PC last connected to, for a reconnect at another quality.
+    last_pc: Option<Pc>,
+    /// Connect again as soon as the current stream has stopped.
+    reconnect: Option<Pc>,
+    /// An install of BroLink Host through the stream, while it runs and a
+    /// little after.
+    handover: Option<Handover>,
 }
 
 impl ClientApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let discovery = Arc::new(Mutex::new(Discovery::default()));
         session::spawn_discovery(discovery.clone(), cc.egui_ctx.clone());
-        Self::with_shared(cc, discovery, Arc::default(), true)
+        let app = Self::with_shared(cc, discovery.clone(), Arc::default(), true);
+        update::spawn(
+            app.updates.clone(),
+            discovery,
+            app.live.clone(),
+            cc.egui_ctx.clone(),
+        );
+        app
     }
 
     fn with_shared(
@@ -73,6 +92,10 @@ impl ClientApp {
             offer_sleep: None,
             ended_seen: true,
             pending_notice: None,
+            updates: Arc::default(),
+            last_pc: None,
+            reconnect: None,
+            handover: None,
         }
     }
 
@@ -100,6 +123,7 @@ impl ClientApp {
         };
         self.ended_seen = false;
         self.offer_sleep = None;
+        self.last_pc = Some(pc.clone());
         session::connect(Connect {
             target,
             settings: self.cfg.stream.clone(),
@@ -191,10 +215,21 @@ impl ClientApp {
                         if self.cfg.stream.fullscreen {
                             fullscreen = Some(true);
                         }
+                        if let Some(problem) = host_audio_problem(&self.discovery, &live.node_id) {
+                            self.view.toast(
+                                Tone::Danger,
+                                format!(
+                                    "{} has no sound to send: Sunshine reports “{problem}”. See the host window.",
+                                    live.pc
+                                ),
+                            );
+                        }
                     }
                     Event::Failed { stage, code } => {
+                        let cancelled = prog.cancel;
                         prog.step = Step::Ended {
-                            error: Some(format!("Connecting failed at {stage} (code {code}).")),
+                            error: (!cancelled)
+                                .then_some(format!("Connecting failed at {stage} (code {code}).")),
                         };
                     }
                     Event::Terminated { code, message } => {
@@ -204,6 +239,9 @@ impl ClientApp {
                         };
                     }
                     Event::Poor(p) => self.view.set_poor(p),
+                    Event::NoAudio(e) => self
+                        .view
+                        .toast(Tone::Danger, format!("No sound on this Mac: {e}.")),
                 }
             }
             // A stop we asked for ends without a Terminated event.
@@ -245,8 +283,27 @@ impl eframe::App for ClientApp {
             let live = self.live.clone();
             let guard = live.lock();
             if let Some(l) = guard.as_ref() {
-                let actions = self.view.show(ctx, l, &self.cfg, self.fullscreen);
-                let (ip, name) = (l.ip, l.pc.clone());
+                // Text copied on the PC lands in this Mac's clipboard.
+                if let Some(text) = l.clipboard.take_incoming() {
+                    ctx.copy_text(text);
+                }
+                let disc = self.discovery.lock().clone();
+                let pc_now = disc.pcs.iter().find(|p| p.node_id == l.node_id);
+                let latest = self.updates.lock().latest.clone();
+                let old_host = pc_now
+                    .and_then(|p| p.host.as_ref())
+                    .and_then(|h| stream::old_host(&h.version, latest.as_ref()));
+                self.tend_handover(pc_now, &l.pc);
+                let env = Env {
+                    live: l,
+                    cfg: &self.cfg,
+                    fullscreen: self.fullscreen,
+                    path: pc_now.map(|p| p.path.clone()),
+                    old_host,
+                    handover: self.handover.as_ref().map(|h| h.status(&l.pc)),
+                };
+                let actions = self.view.show(ctx, &env);
+                let (ip, name, input) = (l.ip, l.pc.clone(), l.input.clone());
                 drop(guard);
                 for a in actions {
                     match a {
@@ -260,6 +317,18 @@ impl eframe::App for ClientApp {
                         Action::ToggleCmd => {
                             self.cfg.cmd_is_ctrl = !self.cfg.cmd_is_ctrl;
                             self.dirty = true;
+                        }
+                        Action::Quality(choice) => {
+                            match choice {
+                                QualityChoice::Auto => self.cfg.stream.quality = Quality::Auto,
+                                QualityChoice::Preset(p) => self.cfg.stream.apply_preset(p),
+                            }
+                            self.dirty = true;
+                            self.reconnect = self.last_pc.clone();
+                            self.disconnect();
+                        }
+                        Action::InstallHost => {
+                            self.start_handover(ctx, ip, &name, input.clone(), &disc)
                         }
                     }
                 }
@@ -275,6 +344,22 @@ impl eframe::App for ClientApp {
         }
         let disc = self.discovery.lock().clone();
         let prog = self.progress.lock().clone();
+        if let Some(pc) = self.reconnect.take() {
+            if prog.active() {
+                self.reconnect = Some(pc);
+            } else {
+                // Fresh details if discovery has them; the saved ones otherwise.
+                let fresh = disc
+                    .pcs
+                    .iter()
+                    .find(|p| p.node_id == pc.node_id)
+                    .cloned()
+                    .unwrap_or(pc);
+                self.connect(ctx, &fresh);
+                self.commit();
+                return;
+            }
+        }
         if let Step::Ended { .. } = &prog.step {
             if !self.ended_seen {
                 self.ended_seen = true;
@@ -337,12 +422,17 @@ impl eframe::App for ClientApp {
                         if let Some((tone, text, _)) = &self.notice {
                             ui::notice(ui, *tone, text);
                         }
+                        if let Some((tone, text)) = self.updates.lock().notice.clone() {
+                            ui::notice(ui, tone, &text);
+                        }
                         if prog.active() {
                             self.session_card(ui, &prog);
                         } else if let Step::Ended { error } = &prog.step {
                             self.ended_card(ui, &prog, error.as_deref());
                         }
                         self.pcs_card(ui, ctx, &disc, &prog);
+                        self.path_notices(ui, &disc);
+                        self.key_expiry_notices(ui, &disc);
                         if self.settings_open {
                             self.settings_card(ui, ctx, &prog);
                         }
@@ -407,7 +497,11 @@ impl ClientApp {
                     let detail = describe(pc);
                     ui::list_row(ui, &pc.name, &detail, |ui| {
                         let busy = prog.active();
-                        if pc.can_stream() && !busy && ui::primary_button(ui, "Connect").clicked() {
+                        if pc.can_stream()
+                            && !pc.remembered
+                            && !busy
+                            && ui::primary_button(ui, "Connect").clicked()
+                        {
                             self.connect(ctx, pc);
                         }
                         if !pc.online
@@ -454,6 +548,95 @@ impl ClientApp {
                 }
             },
         );
+    }
+
+    /// Why a PC is relayed, a PC whose host encodes in software, and a PC
+    /// whose host is too old to update itself: each gets one line under
+    /// the list, with what to do about it.
+    fn path_notices(&self, ui: &mut egui::Ui, disc: &Discovery) {
+        for text in path_warnings(disc) {
+            ui::notice(ui, Tone::Accent, &text);
+        }
+    }
+
+    /// Start installing the newest BroLink Host on the PC through the
+    /// stream. See `handover.rs`.
+    fn start_handover(
+        &mut self,
+        ctx: &egui::Context,
+        ip: std::net::Ipv4Addr,
+        name: &str,
+        input: brolink_stream::Input,
+        disc: &Discovery,
+    ) {
+        let Some(mac_ip) = disc.self_ip else {
+            self.view.toast(
+                Tone::Danger,
+                "Tailscale on this Mac has no address to serve from.",
+            );
+            return;
+        };
+        let running = disc
+            .pcs
+            .iter()
+            .find(|p| p.ip == Some(ip))
+            .and_then(|p| p.host.as_ref())
+            .and_then(|h| Version::parse(&h.version).ok())
+            .unwrap_or_else(|| Version::new(0, 0, 0));
+        let release = self.updates.lock().release.clone();
+        if let Some(rel) = &release {
+            if let Err(e) = handover::usable(rel, &running) {
+                self.view.toast(Tone::Danger, format!("{name}: {e}."));
+                return;
+            }
+        }
+        let token = brolink_core::update::token(self.cfg.github_token.as_deref());
+        self.handover = Some(Handover::start(
+            release,
+            token,
+            mac_ip,
+            ip,
+            input,
+            ctx.clone(),
+        ));
+        self.view.toast(
+            Tone::Info,
+            format!("Installing BroLink Host on {name} through the stream…"),
+        );
+    }
+
+    /// Notice when the install through the stream has landed (the host
+    /// reports the new version) or has given up, and let it go.
+    fn tend_handover(&mut self, pc_now: Option<&Pc>, name: &str) {
+        let Some(h) = &self.handover else { return };
+        let p = h.progress();
+        let landed = p.version.as_ref().is_some_and(|v| {
+            pc_now
+                .and_then(|pc| pc.host.as_ref())
+                .and_then(|st| Version::parse(&st.version).ok())
+                .is_some_and(|running| running >= *v)
+        });
+        if landed {
+            self.view.toast(
+                Tone::Success,
+                format!(
+                    "{name} now runs BroLink Host {}. Updates arrive by themselves from here on.",
+                    p.version.map(|v| v.to_string()).unwrap_or_default()
+                ),
+            );
+            self.handover = None;
+        } else if !h.active() && p.since.elapsed() > Duration::from_secs(20) {
+            self.handover = None;
+        }
+    }
+
+    /// A Tailscale node key that expires is the one thing that can take a
+    /// far-away PC off the tailnet with nobody there to sign it back in.
+    fn key_expiry_notices(&self, ui: &mut egui::Ui, disc: &Discovery) {
+        for text in key_expiry_warnings(disc) {
+            let urgent = text.contains("expired") || text.contains(" days") && days_in(&text) <= 30;
+            ui::notice(ui, if urgent { Tone::Danger } else { Tone::Info }, &text);
+        }
     }
 
     fn power_menu(&mut self, ui: &mut egui::Ui, pc: &Pc) {
@@ -541,6 +724,20 @@ impl ClientApp {
                         self.progress.lock().step = Step::Idle;
                     }
                 }
+                if let (Some(_), Some(pc)) = (error, self.last_pc.clone()) {
+                    // A stream that died is usually one the path could not
+                    // carry; the smallest ask is the likeliest to hold.
+                    if ui::primary_button(ui, "Try again at Smooth").clicked() {
+                        self.cfg.stream.apply_preset(crate::config::Preset::Smooth);
+                        self.dirty = true;
+                        self.reconnect = Some(pc.clone());
+                        self.progress.lock().step = Step::Idle;
+                    }
+                    if ui::ghost_button(ui, "Try again").clicked() {
+                        self.reconnect = Some(pc);
+                        self.progress.lock().step = Step::Idle;
+                    }
+                }
                 let label = if error.is_some() {
                     "Dismiss"
                 } else {
@@ -562,46 +759,69 @@ impl ClientApp {
             |ui| {
                 let native = Self::native_pixels(ctx);
                 let s = &mut self.cfg.stream;
-                let hint = format!(
-                "This screen is {}×{}. “This screen” is exact only with a virtual display on the PC; otherwise the PC's monitor is scaled.",
-                native.0, native.1
-            );
-                ui::setting_row(ui, "Resolution", Some(&hint), |ui| {
-                    if ui::segmented(
-                        ui,
-                        &[
-                            (Resolution::P1080, "1080p"),
-                            (Resolution::P1440, "1440p"),
-                            (Resolution::P2160, "4K"),
-                            (Resolution::Native, "This screen"),
-                        ],
-                        &mut s.resolution,
-                    ) {
-                        self.dirty = true;
-                    }
-                });
-                ui::row_separator(ui);
-                ui::setting_row(ui, "Frame rate", None, |ui| {
-                    if ui::segmented(ui, &[(60u32, "60"), (90, "90"), (120, "120")], &mut s.fps) {
-                        self.dirty = true;
-                    }
-                });
-                ui::row_separator(ui);
                 ui::setting_row(
                     ui,
-                    "Bitrate",
-                    Some("Higher is sharper; lower survives a slow uplink."),
+                    "Quality",
+                    Some("Auto picks resolution, frame rate and bitrate from the path to the PC each time you connect: less through a relay or across a long round trip, more on a LAN. Custom uses the values below. The toolbar's Quality menu switches while streaming."),
                     |ui| {
-                        let mut mbps = s.bitrate_kbps / 1000;
-                        if ui
-                            .add(egui::Slider::new(&mut mbps, 5..=150).suffix(" Mbps"))
-                            .changed()
-                        {
-                            s.bitrate_kbps = mbps * 1000;
+                        if ui::segmented(
+                            ui,
+                            &[(Quality::Auto, "Auto"), (Quality::Custom, "Custom")],
+                            &mut s.quality,
+                        ) {
                             self.dirty = true;
                         }
                     },
                 );
+                ui::row_separator(ui);
+                let custom = s.quality == Quality::Custom;
+                let hint = format!(
+                "This screen is {}×{}. “This screen” is exact only with a virtual display on the PC; otherwise the PC's monitor is scaled.{}",
+                native.0, native.1,
+                if custom { "" } else { " Set by Auto." }
+            );
+                ui.add_enabled_ui(custom, |ui| {
+                    ui::setting_row(ui, "Resolution", Some(&hint), |ui| {
+                        if ui::segmented(
+                            ui,
+                            &[
+                                (Resolution::P1080, "1080p"),
+                                (Resolution::P1440, "1440p"),
+                                (Resolution::P2160, "4K"),
+                                (Resolution::Native, "This screen"),
+                            ],
+                            &mut s.resolution,
+                        ) {
+                            self.dirty = true;
+                        }
+                    });
+                    ui::row_separator(ui);
+                    ui::setting_row(ui, "Frame rate", None, |ui| {
+                        if ui::segmented(
+                            ui,
+                            &[(30u32, "30"), (60, "60"), (90, "90"), (120, "120")],
+                            &mut s.fps,
+                        ) {
+                            self.dirty = true;
+                        }
+                    });
+                    ui::row_separator(ui);
+                    ui::setting_row(
+                        ui,
+                        "Bitrate",
+                        Some("Higher is sharper; lower survives a slow uplink. A relayed path carries a few Mbps at best."),
+                        |ui| {
+                            let mut mbps = s.bitrate_kbps / 1000;
+                            if ui
+                                .add(egui::Slider::new(&mut mbps, 2..=150).suffix(" Mbps"))
+                                .changed()
+                            {
+                                s.bitrate_kbps = mbps * 1000;
+                                self.dirty = true;
+                            }
+                        },
+                    );
+                });
                 ui::row_separator(ui);
                 ui::setting_row(
                     ui,
@@ -669,18 +889,94 @@ impl ClientApp {
                     ui,
                     &mut self.cfg.sleep_prompt,
                     "Offer to sleep the PC after each session",
-                    Some("Asleep, the PC wakes from this Mac in seconds."),
+                    Some("Asleep, Tailscale is off. This Mac can only wake the PC from that PC's own network, not from elsewhere."),
                 ) {
                     self.dirty = true;
                 }
+                ui::row_separator(ui);
+                if ui::toggle_row(
+                    ui,
+                    &mut self.cfg.auto_update,
+                    "Keep BroLink and your PCs up to date",
+                    Some("Checks GitHub every few hours, installs new versions of this app, and sends BroLink Host updates to your PCs over Tailscale."),
+                ) {
+                    self.dirty = true;
+                }
+                let (message, checked) = {
+                    let st = self.updates.lock();
+                    (st.message.clone(), st.checked)
+                };
+                let hint = format!(
+                    "{} · {}",
+                    if message.is_empty() {
+                        "Waiting for the first check."
+                    } else {
+                        &message
+                    },
+                    update::ago(checked)
+                );
+                ui::setting_row(ui, "Updates", Some(&hint), |ui| {
+                    if ui::ghost_button(ui, "Check now").clicked() {
+                        self.updates.lock().check_now = true;
+                    }
+                });
             },
         );
     }
 }
 
+/// One line per machine whose Tailscale key expires, this Mac included.
+fn key_expiry_warnings(disc: &Discovery) -> Vec<String> {
+    let mut out = Vec::new();
+    for pc in &disc.pcs {
+        if let Some(d) = pc.key_expiry_days {
+            out.push(if d <= 0 {
+                format!(
+                    "{}'s Tailscale key has expired: it is off the tailnet until someone signs Tailscale in at the PC.",
+                    pc.name
+                )
+            } else {
+                format!(
+                    "{}'s Tailscale key expires in {d} days. In the Tailscale admin console (login.tailscale.com/admin/machines), open {} and choose Disable key expiry; otherwise it drops off the tailnet and needs a sign-in at the PC.",
+                    pc.name, pc.name
+                )
+            });
+        }
+    }
+    if let Some(d) = disc.self_key_days {
+        out.push(if d <= 0 {
+            "This Mac's Tailscale key has expired; sign in to Tailscale again.".to_string()
+        } else {
+            format!(
+                "This Mac's Tailscale key expires in {d} days; disable key expiry for it in the admin console as well."
+            )
+        });
+    }
+    out
+}
+
+/// The day count inside a warning line, for its tone.
+fn days_in(text: &str) -> i64 {
+    text.split(" in ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(i64::MAX)
+}
+
 /// The second line under a PC's name. Kept short: it is cut, not wrapped.
 fn describe(pc: &Pc) -> String {
     let ip = pc.ip.map(|ip| ip.to_string()).unwrap_or_default();
+    if pc.remembered {
+        let seen = pc.known.as_ref().and_then(|k| k.last_seen_unix);
+        return match seen {
+            Some(t) => format!(
+                "Last seen {} · Tailscale is off on this Mac",
+                brolink_core::dates::ymd(t)
+            ),
+            None => "Tailscale is off on this Mac".into(),
+        };
+    }
     if !pc.online {
         return if pc.can_wake() {
             "Asleep or off · Connect wakes it".into()
@@ -688,19 +984,114 @@ fn describe(pc: &Pc) -> String {
             "Offline · turn it on once with BroLink Host running".into()
         };
     }
+    let path = if pc.path.direct.is_some() {
+        format!(" · {}", pc.path.label())
+    } else {
+        String::new()
+    };
     match (&pc.host, pc.sunshine) {
-        (Some(h), true) if h.setup.is_empty() => format!("Ready · {ip}"),
+        (Some(h), true) if h.setup.is_empty() => format!("Ready · {ip}{path}"),
         (Some(_), true) => format!("Ready · {ip} · the PC still needs setup"),
         (Some(_), false) => format!("Online · {ip} · nothing is streaming from it yet"),
-        (None, true) => format!("Online · {ip} · no BroLink Host: no wake or sleep"),
+        (None, true) => format!("Online · {ip}{path} · no BroLink Host: no wake or sleep"),
         (None, false) => format!("Online · {ip} · nothing to stream from"),
     }
+}
+
+/// Sunshine's audio failure on the PC with `node_id`, as its host last
+/// reported it (3.1+ hosts); `None` when sound works or nothing is known.
+fn host_audio_problem(discovery: &Mutex<Discovery>, node_id: &str) -> Option<String> {
+    discovery
+        .lock()
+        .pcs
+        .iter()
+        .find(|p| p.node_id == node_id)
+        .and_then(|p| p.host.as_ref())
+        .map(|h| h.streamer.audio_problem.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// One line per PC that is relayed, encodes in software, has no sound to
+/// send, or runs a host too old to update itself.
+fn path_warnings(disc: &Discovery) -> Vec<String> {
+    let mut out = Vec::new();
+    for pc in disc.pcs.iter().filter(|p| !p.remembered && p.online) {
+        let nat = pc.host.as_ref().and_then(|h| h.nat.as_ref());
+        if let Some(t) = path::explain(&pc.name, &pc.path, nat, disc.self_nat.as_ref()) {
+            out.push(t);
+        }
+        if let Some(h) = &pc.host {
+            if h.streamer.encoder == "software" {
+                out.push(format!(
+                    "{} encodes video in software: Sunshine found no GPU encoder there, so frames are slow to make whatever the network does. Check the GPU driver on the PC, or keep the stream at 1080p and 30 fps.",
+                    pc.name
+                ));
+            }
+            if !h.streamer.audio_problem.is_empty() {
+                out.push(format!(
+                    "{} has no sound to send: Sunshine reports “{}”. A PC with no monitor or speakers has no audio device to capture; give it a virtual one (Steam's Streaming Speakers, or VB-CABLE) and pick it as Sunshine's audio sink.",
+                    pc.name, h.streamer.audio_problem
+                ));
+            }
+            if let Ok(v) = Version::parse(&h.version) {
+                if !brolink_core::update::host_can_receive_update(&v) {
+                    out.push(update::old_host_message(&pc.name, &v));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::KnownPc;
+
+    #[test]
+    fn remembered_pcs_say_when_they_were_seen_and_keys_get_warnings() {
+        let pc = Pc {
+            name: "Gaming-PC".into(),
+            remembered: true,
+            known: Some(KnownPc {
+                last_seen_unix: Some(1_788_739_200),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            describe(&pc),
+            "Last seen 2026-09-07 · Tailscale is off on this Mac"
+        );
+        let disc = Discovery {
+            pcs: vec![
+                Pc {
+                    name: "Gaming-PC".into(),
+                    key_expiry_days: Some(176),
+                    ..Default::default()
+                },
+                Pc {
+                    name: "Den".into(),
+                    key_expiry_days: None,
+                    ..Default::default()
+                },
+                Pc {
+                    name: "Office".into(),
+                    key_expiry_days: Some(-2),
+                    ..Default::default()
+                },
+            ],
+            self_key_days: Some(12),
+            ..Default::default()
+        };
+        let w = key_expiry_warnings(&disc);
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("Gaming-PC") && w[0].contains("176 days"));
+        assert_eq!(days_in(&w[0]), 176);
+        assert!(w[1].contains("Office") && w[1].contains("expired"));
+        assert!(w[2].starts_with("This Mac") && days_in(&w[2]) == 12);
+        assert!(key_expiry_warnings(&Discovery::default()).is_empty());
+    }
 
     #[test]
     fn descriptions_cover_every_state() {
@@ -722,6 +1113,77 @@ mod tests {
         assert!(describe(&pc).len() < 60, "{}", describe(&pc));
         pc.host = Some(brolink_core::api::Status::default());
         assert_eq!(describe(&pc), "Ready · 203.0.113.10");
+        pc.path = crate::path::Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            rtt_ms: Some(210),
+        };
+        assert_eq!(
+            describe(&pc),
+            "Ready · 203.0.113.10 · Relayed via Tokyo · 210 ms"
+        );
+    }
+
+    #[test]
+    fn the_lobby_warns_about_relays_software_encoders_and_old_hosts() {
+        let mut gaming_pc = Pc {
+            name: "Gaming-PC".into(),
+            online: true,
+            ip: Some("100.64.0.10".parse().unwrap()),
+            path: crate::path::Path {
+                direct: Some(false),
+                relay: "tok".into(),
+                rtt_ms: Some(200),
+            },
+            host: Some(brolink_core::api::Status {
+                version: "3.0.0".into(),
+                streamer: brolink_core::api::Streamer {
+                    encoder: "software".into(),
+                    audio_problem:
+                        "Unable to initialize audio capture. The stream will not have audio.".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let disc = Discovery {
+            pcs: vec![gaming_pc.clone()],
+            ..Default::default()
+        };
+        let w = path_warnings(&disc);
+        assert_eq!(w.len(), 4, "{w:?}");
+        assert!(w[0].contains("Tokyo relay"), "{}", w[0]);
+        assert!(w[1].contains("software"), "{}", w[1]);
+        assert!(
+            w[2].contains("no sound") && w[2].contains("audio capture"),
+            "{}",
+            w[2]
+        );
+        assert!(w[3].contains("Update BroLink Host"), "{}", w[3]);
+        assert_eq!(
+            host_audio_problem(&Mutex::new(disc.clone()), &gaming_pc.node_id).as_deref(),
+            Some("Unable to initialize audio capture. The stream will not have audio.")
+        );
+        // Direct, GPU encoder, sound, current host: nothing to say.
+        gaming_pc.path.direct = Some(true);
+        let h = gaming_pc.host.as_mut().unwrap();
+        h.version = "3.1.0".into();
+        h.streamer.encoder = "nvenc".into();
+        h.streamer.audio_problem.clear();
+        let disc = Discovery {
+            pcs: vec![gaming_pc.clone()],
+            ..Default::default()
+        };
+        assert!(path_warnings(&disc).is_empty());
+        // Nothing is said about a PC that is off.
+        gaming_pc.online = false;
+        gaming_pc.path.direct = Some(false);
+        let disc = Discovery {
+            pcs: vec![gaming_pc],
+            ..Default::default()
+        };
+        assert!(path_warnings(&disc).is_empty());
     }
 }
 
@@ -754,9 +1216,19 @@ mod snapshots {
             online: true,
             host: Some(Status {
                 app: "brolink".into(),
+                version: "3.0.0".into(),
                 power_allowed: true,
+                streamer: brolink_core::api::Streamer {
+                    encoder: "software".into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
+            path: crate::path::Path {
+                direct: Some(false),
+                relay: "tok".into(),
+                rtt_ms: Some(210),
+            },
             sunshine: true,
             known: Some(KnownPc {
                 name: "Gaming-PC".into(),
@@ -764,6 +1236,8 @@ mod snapshots {
                 lan_ip: Some("192.168.1.10".into()),
                 ..Default::default()
             }),
+            key_expiry_days: Some(176),
+            ..Default::default()
         };
         let asleep = Pc {
             node_id: "n2".into(),
@@ -788,6 +1262,15 @@ mod snapshots {
             login: "user@example.com".into(),
             pcs: vec![ready, asleep, bare],
             refreshed: Some(Instant::now()),
+            self_nat: Some(brolink_core::api::NatReport {
+                udp: true,
+                ipv4: true,
+                ipv6: false,
+                hard: Some(false),
+                portmap: false,
+                derp: "tok".into(),
+            }),
+            ..Default::default()
         }
     }
 
@@ -796,12 +1279,22 @@ mod snapshots {
         prog: Progress,
         settings: bool,
     ) -> egui_kittest::Harness<'static, ClientApp> {
+        build_sized(disc, prog, settings, egui::vec2(640.0, 1100.0), 2.0)
+    }
+
+    fn build_sized(
+        disc: Discovery,
+        prog: Progress,
+        settings: bool,
+        size: egui::Vec2,
+        ppp: f32,
+    ) -> egui_kittest::Harness<'static, ClientApp> {
         let disc = Arc::new(Mutex::new(disc));
         let prog = Arc::new(Mutex::new(prog));
         let mut harness = egui_kittest::Harness::builder()
             .wgpu()
-            .with_size(egui::vec2(640.0, 1100.0))
-            .with_pixels_per_point(2.0)
+            .with_size(size)
+            .with_pixels_per_point(ppp)
             .with_max_steps(8)
             .build_eframe(move |cc| {
                 let mut app = ClientApp::with_shared(cc, disc, prog, false);
@@ -810,6 +1303,73 @@ mod snapshots {
             });
         harness.run_steps(3);
         harness
+    }
+
+    /// The stream screen with its toolbar, before any picture has arrived:
+    /// the session points at an address that never answers.
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn stream_toolbar() {
+        let mut h = build_sized(
+            pcs(),
+            Progress::default(),
+            false,
+            egui::vec2(1400.0, 860.0),
+            1.0,
+        );
+        let ctx = h.ctx.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let frames = Arc::new(brolink_stream::FrameSlot::default());
+        let path = crate::path::Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            rtt_ms: Some(210),
+        };
+        let settings = crate::path::effective(&crate::config::StreamSettings::default(), &path);
+        let session = brolink_stream::Session::start(
+            brolink_stream::session::Server {
+                address: "10.255.255.1".into(),
+                app_version: "7.1.431.-1".into(),
+                gfe_version: "3.23.0.74".into(),
+                rtsp_url: "rtsp://10.255.255.1:48010".into(),
+                codec_mode_support: 1,
+            },
+            brolink_stream::Settings {
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 4000,
+                hevc: true,
+                remote: true,
+            },
+            [0; 16],
+            [0; 16],
+            frames.clone(),
+            tx,
+            || {},
+        );
+        let ip: std::net::Ipv4Addr = "100.64.0.10".parse().unwrap();
+        let input = session.input();
+        let live = Live {
+            pc: "Gaming-PC".into(),
+            node_id: "n1".into(),
+            ip,
+            session,
+            input,
+            frames,
+            events: rx,
+            started: Instant::now(),
+            codec: "HEVC",
+            requested: (1920, 1080, 30),
+            settings,
+            path,
+            clipboard: crate::clipboard::Sync::spawn(ip, ctx),
+        };
+        *h.state().live.lock() = Some(live);
+        h.state().progress.lock().step = Step::Streaming;
+        h.run_steps(3);
+        save(h.render().unwrap(), "client-stream-toolbar.png");
+        h.state_mut().disconnect();
     }
 
     #[test]

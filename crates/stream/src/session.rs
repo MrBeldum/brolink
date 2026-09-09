@@ -3,7 +3,7 @@
 //! happens through [`Event`]s. moonlight-common-c holds exactly one
 //! connection at a time, so sessions are serialised through a global lock.
 
-use crate::audio::Player;
+use crate::audio::{Output, Player};
 use crate::ffi;
 use crate::video::{self, Decoder, FrameSlot};
 use parking_lot::{Condvar, Mutex};
@@ -34,6 +34,8 @@ pub enum Event {
     },
     /// The network is struggling (`true`) or fine again (`false`).
     Poor(bool),
+    /// This machine cannot play the stream's sound; the reason.
+    NoAudio(String),
 }
 
 #[derive(Debug, Clone)]
@@ -63,11 +65,20 @@ pub struct Stats {
     pub fps: f32,
     pub mbps: f32,
     pub rtt_ms: u32,
+    pub rtt_var_ms: u32,
     pub decode_ms: f32,
     pub host_ms: f32,
     pub width: u32,
     pub height: u32,
     pub decoder: &'static str,
+    /// Share of video packets in the last second that arrived too late or
+    /// not at all and could not be rebuilt from FEC.
+    pub loss_pct: f32,
+    /// Packets FEC did rebuild in the last second.
+    pub fec_recovered: u32,
+    /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
+    /// not; empty until the first second of video.
+    pub audio: String,
 }
 
 #[derive(Default)]
@@ -77,6 +88,8 @@ struct Window {
     bytes: u64,
     decode_us: u64,
     host_tenths: u64,
+    /// RTP totals at the start of the window, to difference against.
+    rtp: Option<ffi::RtpVideoStats>,
 }
 
 struct Inner {
@@ -85,6 +98,10 @@ struct Inner {
     frames: Arc<FrameSlot>,
     decoder: Mutex<Option<Box<dyn Decoder>>>,
     audio: Mutex<Option<Player>>,
+    /// Why the player could not be made, when it could not.
+    audio_error: Mutex<Option<String>>,
+    /// The one notice about sound has gone out.
+    audio_warned: AtomicBool,
     window: Mutex<Window>,
     stats: Mutex<Stats>,
     connected: AtomicBool,
@@ -110,59 +127,21 @@ pub struct Session {
     inner: Arc<Inner>,
 }
 
-impl Session {
-    /// Connect on a worker thread. `wake` is called whenever there is a new
-    /// event or frame, so a UI can repaint.
-    pub fn start(
-        server: Server,
-        settings: Settings,
-        ri_key: [u8; 16],
-        ri_iv: [u8; 16],
-        frames: Arc<FrameSlot>,
-        events: Sender<Event>,
-        wake: impl Fn() + Send + Sync + 'static,
-    ) -> Session {
-        let inner = Arc::new(Inner {
-            events,
-            wake: Box::new(wake),
-            frames,
-            decoder: Mutex::new(None),
-            audio: Mutex::new(None),
-            window: Mutex::new(Window::default()),
-            stats: Mutex::new(Stats::default()),
-            connected: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            done: Mutex::new(false),
-            done_cv: Condvar::new(),
-        });
-        let worker = inner.clone();
-        std::thread::Builder::new()
-            .name("stream".into())
-            .spawn(move || run(worker, server, settings, ri_key, ri_iv))
-            .expect("spawn stream thread");
-        Session { inner }
-    }
+/// The keyboard-and-mouse side of a session, cheap to clone and safe to
+/// use from any thread: a worker that has to type on the PC after a
+/// network round trip holds one of these instead of the session.
+#[derive(Clone)]
+pub struct Input {
+    inner: Arc<Inner>,
+}
 
+/// One UTF-8 text event is kept this small: the control stream's packet
+/// buffer is 128 bytes on hosts without the newer encryption.
+const TEXT_CHUNK: usize = 32;
+
+impl Input {
     pub fn connected(&self) -> bool {
         self.inner.connected.load(Ordering::Acquire)
-    }
-
-    /// The worker has torn everything down; a new session may start.
-    pub fn finished(&self) -> bool {
-        self.inner.finished.load(Ordering::Acquire)
-    }
-
-    /// Ask the connection to end. Returns at once; poll [`Session::finished`].
-    pub fn stop(&self) {
-        if *self.inner.done.lock() {
-            return;
-        }
-        unsafe { ffi::bl_interrupt() };
-        self.inner.finish();
-    }
-
-    pub fn stats(&self) -> Stats {
-        self.inner.stats.lock().clone()
     }
 
     pub fn mouse_move(&self, dx: i16, dy: i16) {
@@ -201,9 +180,15 @@ impl Session {
         }
     }
 
+    /// Type `text` on the PC as it is, whatever the keyboard layouts.
     pub fn text(&self, text: &str) {
-        if self.connected() && !text.is_empty() {
-            unsafe { ffi::LiSendUtf8TextEvent(text.as_ptr() as *const c_char, text.len() as u32) };
+        if !self.connected() {
+            return;
+        }
+        for chunk in text_chunks(text) {
+            unsafe {
+                ffi::LiSendUtf8TextEvent(chunk.as_ptr() as *const c_char, chunk.len() as u32)
+            };
         }
     }
 
@@ -217,6 +202,116 @@ impl Session {
                 unsafe { ffi::LiSendHighResHScrollEvent(horizontal) };
             }
         }
+    }
+}
+
+/// `text` in pieces of at most [`TEXT_CHUNK`] bytes, cut between characters.
+fn text_chunks(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + TEXT_CHUNK).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            break;
+        }
+        out.push(&text[start..end]);
+        start = end;
+    }
+    out
+}
+
+impl Session {
+    /// Connect on a worker thread. `wake` is called whenever there is a new
+    /// event or frame, so a UI can repaint.
+    pub fn start(
+        server: Server,
+        settings: Settings,
+        ri_key: [u8; 16],
+        ri_iv: [u8; 16],
+        frames: Arc<FrameSlot>,
+        events: Sender<Event>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Session {
+        let inner = Arc::new(Inner {
+            events,
+            wake: Box::new(wake),
+            frames,
+            decoder: Mutex::new(None),
+            audio: Mutex::new(None),
+            audio_error: Mutex::new(None),
+            audio_warned: AtomicBool::new(false),
+            window: Mutex::new(Window::default()),
+            stats: Mutex::new(Stats::default()),
+            connected: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            done: Mutex::new(false),
+            done_cv: Condvar::new(),
+        });
+        let worker = inner.clone();
+        std::thread::Builder::new()
+            .name("stream".into())
+            .spawn(move || run(worker, server, settings, ri_key, ri_iv))
+            .expect("spawn stream thread");
+        Session { inner }
+    }
+
+    pub fn connected(&self) -> bool {
+        self.inner.connected.load(Ordering::Acquire)
+    }
+
+    /// The worker has torn everything down; a new session may start.
+    pub fn finished(&self) -> bool {
+        self.inner.finished.load(Ordering::Acquire)
+    }
+
+    /// Ask the connection to end. Returns at once; poll [`Session::finished`].
+    pub fn stop(&self) {
+        if *self.inner.done.lock() {
+            return;
+        }
+        unsafe { ffi::bl_interrupt() };
+        self.inner.finish();
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.inner.stats.lock().clone()
+    }
+
+    /// A handle for sending input from other threads.
+    pub fn input(&self) -> Input {
+        Input {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub fn mouse_move(&self, dx: i16, dy: i16) {
+        self.input().mouse_move(dx, dy);
+    }
+
+    pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
+        self.input().mouse_position(x, y, width, height);
+    }
+
+    /// `button` is one of `ffi::BUTTON_*`.
+    pub fn mouse_button(&self, button: c_int, down: bool) {
+        self.input().mouse_button(button, down);
+    }
+
+    /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
+    pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
+        self.input().key(vk, down, modifiers);
+    }
+
+    pub fn text(&self, text: &str) {
+        self.input().text(text);
+    }
+
+    /// Vertical and horizontal scroll in 1/120ths of a wheel click.
+    pub fn scroll(&self, vertical: i16, horizontal: i16) {
+        self.input().scroll(vertical, horizontal);
     }
 }
 
@@ -262,7 +357,7 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         color_space: ffi::COLORSPACE_REC_709,
         color_range: ffi::COLOR_RANGE_LIMITED,
         encryption_flags: ffi::ENCFLG_ALL,
-        video_capabilities: 0,
+        video_capabilities: video::capabilities(),
         audio_capabilities: ffi::CAPABILITY_DIRECT_SUBMIT
             | ffi::CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION,
         ri_key: ri_key.as_ptr(),
@@ -377,6 +472,10 @@ fn account(inner: &Inner, bytes: u64, decode_us: u64, host_tenths: u16) {
     w.bytes += bytes;
     w.decode_us += decode_us;
     w.host_tenths += host_tenths as u64;
+    let connected = inner.connected.load(Ordering::Relaxed);
+    if w.rtp.is_none() && connected {
+        w.rtp = rtp_stats();
+    }
     let elapsed = since.elapsed().as_secs_f32();
     if elapsed >= 1.0 {
         let mut st = inner.stats.lock();
@@ -386,16 +485,77 @@ fn account(inner: &Inner, bytes: u64, decode_us: u64, host_tenths: u16) {
         st.host_ms = w.host_tenths as f32 / w.frames.max(1) as f32 / 10.0;
         let mut rtt = 0u32;
         let mut var = 0u32;
-        if inner.connected.load(Ordering::Relaxed)
-            && unsafe { ffi::LiGetEstimatedRttInfo(&mut rtt, &mut var) }
-        {
+        if connected && unsafe { ffi::LiGetEstimatedRttInfo(&mut rtt, &mut var) } {
             st.rtt_ms = rtt;
+            st.rtt_var_ms = var;
+        }
+        let now = if connected { rtp_stats() } else { None };
+        if let (Some(before), Some(after)) = (w.rtp, now) {
+            let (loss, recovered) = loss_in_window(&before, &after);
+            st.loss_pct = loss;
+            st.fec_recovered = recovered;
+        }
+        let (audio, problem) = audio_state(inner);
+        st.audio = audio;
+        drop(st);
+        if let Some(p) = problem {
+            if !inner.audio_warned.swap(true, Ordering::Relaxed) {
+                inner.emit(Event::NoAudio(p));
+            }
         }
         *w = Window {
             since: Some(Instant::now()),
+            rtp: now,
             ..Default::default()
         };
     }
+}
+
+/// The stats phrase for sound and, when this machine cannot play it, the
+/// reason worth one notice. Silence from the PC is not a problem here:
+/// Sunshine sends nothing while nothing plays there.
+fn audio_state(inner: &Inner) -> (String, Option<String>) {
+    if let Some(e) = inner.audio_error.lock().as_ref() {
+        return (format!("no sound: {e}"), Some(e.clone()));
+    }
+    let guard = inner.audio.lock();
+    let Some(a) = guard.as_ref() else {
+        return (String::new(), None);
+    };
+    match a.output() {
+        Output::Failed(e) => (format!("no sound: {e}"), Some(e)),
+        _ => (a.describe(), None),
+    }
+}
+
+fn rtp_stats() -> Option<ffi::RtpVideoStats> {
+    let p = unsafe { ffi::LiGetRTPVideoStats() };
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { *p })
+    }
+}
+
+/// Loss as a percentage of the video packets seen between two readings of
+/// the RTP counters, and how many packets FEC saved in that time.
+fn loss_in_window(before: &ffi::RtpVideoStats, after: &ffi::RtpVideoStats) -> (f32, u32) {
+    let video = after
+        .packet_count_video
+        .saturating_sub(before.packet_count_video);
+    let failed = after
+        .packet_count_fec_failed
+        .saturating_sub(before.packet_count_fec_failed);
+    let recovered = after
+        .packet_count_fec_recovered
+        .saturating_sub(before.packet_count_fec_recovered);
+    let seen = video + failed;
+    let loss = if seen == 0 {
+        0.0
+    } else {
+        failed as f32 * 100.0 / seen as f32
+    };
+    (loss, recovered)
 }
 
 unsafe extern "C" fn audio_setup(
@@ -422,15 +582,18 @@ unsafe extern "C" fn audio_setup(
             0
         }
         Err(e) => {
-            // Streaming without sound beats not streaming.
+            // Streaming without sound beats not streaming; say why.
             tracing::warn!("audio: {e:#}");
+            *inner.audio_error.lock() = Some(format!("{e:#}"));
             0
         }
     }
 }
 
 unsafe extern "C" fn audio_cleanup(p: *mut c_void) {
-    *ctx(p).audio.lock() = None;
+    let inner = ctx(p);
+    *inner.audio.lock() = None;
+    *inner.audio_error.lock() = None;
 }
 
 unsafe extern "C" fn audio_packet(p: *mut c_void, data: *const u8, len: c_int) {
@@ -510,6 +673,40 @@ pub fn termination_message(code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_is_typed_in_small_pieces_between_characters() {
+        let short = "powershell";
+        assert_eq!(text_chunks(short), vec![short]);
+        let long = "é".repeat(40); // 80 bytes
+        let chunks = text_chunks(&long);
+        assert!(chunks.iter().all(|c| c.len() <= TEXT_CHUNK), "{chunks:?}");
+        assert!(chunks.iter().all(|c| c.chars().all(|ch| ch == 'é')));
+        assert_eq!(chunks.concat(), long);
+        assert!(text_chunks("").is_empty());
+    }
+
+    #[test]
+    fn loss_is_the_share_of_packets_fec_could_not_save() {
+        let before = ffi::RtpVideoStats {
+            packet_count_video: 1000,
+            packet_count_fec_failed: 10,
+            packet_count_fec_recovered: 5,
+            ..Default::default()
+        };
+        let after = ffi::RtpVideoStats {
+            packet_count_video: 1900,
+            packet_count_fec_failed: 110,
+            packet_count_fec_recovered: 25,
+            ..Default::default()
+        };
+        let (loss, recovered) = loss_in_window(&before, &after);
+        assert!((loss - 10.0).abs() < 0.01, "{loss}");
+        assert_eq!(recovered, 20);
+        assert_eq!(loss_in_window(&after, &after), (0.0, 0));
+        // Counters reset (a new session): never negative, never a panic.
+        assert_eq!(loss_in_window(&after, &before), (0.0, 0));
+    }
 
     #[test]
     fn stage_names_and_messages_are_readable() {

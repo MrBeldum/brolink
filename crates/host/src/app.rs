@@ -9,6 +9,8 @@ use brolink_core::{CONTROL_PORT, SUNSHINE_WEB_PORT};
 use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
 use parking_lot::Mutex;
+use semver::Version;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -325,7 +327,7 @@ impl HostApp {
                 "not installed".to_string()
             } else {
                 format!(
-                    "{} · {}{}",
+                    "{} · {}{}{}{}",
                     s.streamer.kind,
                     if s.streamer.running {
                         "running"
@@ -336,8 +338,26 @@ impl HostApp {
                         " · BroLink logged in"
                     } else {
                         ""
+                    },
+                    match s.streamer.encoder.as_str() {
+                        "" => String::new(),
+                        "software" =>
+                            " · software encoder (no GPU encoder worked: streams will be slow)"
+                                .into(),
+                        e => format!(" · {e} encoder"),
+                    },
+                    if s.streamer.audio_problem.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · no sound: {}", s.streamer.audio_problem)
                     }
                 )
+            };
+            let network = match &s.nat {
+                Some(n) => crate::service::describe_nat(n)
+                    .trim_start_matches("network: ")
+                    .to_string(),
+                None => "checking…".into(),
             };
             let mut wake = match (&s.mac, s.wake_ready) {
                 (Some(mac), Some(true)) => format!("ready · {} · {mac}", s.wake_adapter),
@@ -362,6 +382,7 @@ impl HostApp {
                 &[
                     ("Name", s.name.clone()),
                     ("Tailscale", tailscale),
+                    ("Network", network),
                     ("Streaming", streamer),
                     ("Wake-on-LAN", wake),
                     (
@@ -449,17 +470,39 @@ impl HostApp {
             let mut auto = self.autostart;
             if ui::toggle_row(
                 ui,
+                &mut self.cfg.stay_awake,
+                "Keep this PC awake while plugged in",
+                Some("Tailscale only works while the PC is on. Asleep, a Mac on another network cannot wake it. Sleep from the Mac or the Start menu still works."),
+            ) {
+                self.dirty = true;
+            }
+            ui::row_separator(ui);
+            if ui::toggle_row(
+                ui,
                 &mut auto,
                 "Start the background service with Windows",
-                Some("Otherwise the Mac cannot pair with or sleep this PC until this window is opened."),
+                Some("On by default, so the Mac can reach this PC after every restart without anyone at the keyboard."),
             ) {
                 if let Ok(exe) = std::env::current_exe() {
                     match setup::set_start_with_windows(auto, &exe) {
-                        Ok(()) => self.autostart = auto,
+                        Ok(()) => {
+                            self.autostart = auto;
+                            self.cfg.start_with_windows = auto;
+                            self.dirty = true;
+                        }
                         Err(e) => tracing::warn!("autostart: {e:#}"),
                     }
                 }
             }
+            ui::row_separator(ui);
+            ui::setting_row(
+                ui,
+                "Updates",
+                Some("New versions of BroLink Host arrive from your Mac over Tailscale and install by themselves; nothing to do here."),
+                |ui| {
+                    ui::muted(ui, format!("v{}", env!("CARGO_PKG_VERSION")));
+                },
+            );
             ui::row_separator(ui);
             ui.horizontal(|ui| {
                 if ui::danger_button(ui, "Stop the background service").clicked() {
@@ -531,12 +574,45 @@ fn decode_log(bytes: &[u8]) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateAction {
+    None,
+    /// Service is older than this panel: quit it and start the file on disk.
+    RestartService,
+    /// Service is newer: this panel is the leftover window, replace it.
+    RelaunchPanel,
+}
+
+fn update_action(service: &str, panel: &str) -> UpdateAction {
+    let (Ok(s), Ok(p)) = (Version::parse(service), Version::parse(panel)) else {
+        return UpdateAction::None;
+    };
+    match s.cmp(&p) {
+        Ordering::Less => UpdateAction::RestartService,
+        Ordering::Greater => UpdateAction::RelaunchPanel,
+        Ordering::Equal => UpdateAction::None,
+    }
+}
+
+fn relaunch_this_exe() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    std::process::Command::new(exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
 /// Poll the service every second; refresh Sunshine's client list now and
 /// then; restart the service after an update.
 fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut failures = 0u32;
         let mut tick = 0u64;
+        let mut restarted_service = false;
         loop {
             let r: Result<Status, _> = http::get_json(
                 ("127.0.0.1", CONTROL_PORT),
@@ -546,16 +622,27 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             match r {
                 Ok(st) => {
                     failures = 0;
-                    if st.version != env!("CARGO_PKG_VERSION") {
-                        let _ = http::request(
-                            ("127.0.0.1", CONTROL_PORT),
-                            "POST",
-                            "/v1/quit",
-                            None,
-                            Duration::from_secs(2),
-                        );
-                        std::thread::sleep(Duration::from_secs(1));
-                        crate::ensure_service_running();
+                    match update_action(&st.version, env!("CARGO_PKG_VERSION")) {
+                        UpdateAction::RestartService if !restarted_service => {
+                            // This panel is newer than the service (an
+                            // update replaced the exe; current_exe still
+                            // names it). Restart once; looping on != used
+                            // to kill a *newer* service every second.
+                            restarted_service = true;
+                            let _ = http::request(
+                                ("127.0.0.1", CONTROL_PORT),
+                                "POST",
+                                "/v1/quit",
+                                None,
+                                Duration::from_secs(2),
+                            );
+                            std::thread::sleep(Duration::from_secs(1));
+                            crate::ensure_service_running();
+                        }
+                        UpdateAction::RelaunchPanel if relaunch_this_exe() => {
+                            std::process::exit(0);
+                        }
+                        _ => {}
                     }
                     let cfg = HostConfig::load();
                     if st.streamer.api_ok && cfg.has_creds() && tick.is_multiple_of(10) {
@@ -624,6 +711,17 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_service_does_not_get_killed_by_the_old_panel() {
+        assert_eq!(update_action("3.1.0", "3.1.0"), UpdateAction::None);
+        assert_eq!(
+            update_action("3.0.1", "3.1.0"),
+            UpdateAction::RestartService
+        );
+        assert_eq!(update_action("3.1.0", "3.0.1"), UpdateAction::RelaunchPanel);
+        assert_eq!(update_action("nope", "3.1.0"), UpdateAction::None);
+    }
+
+    #[test]
     fn pill_reflects_setup_state() {
         assert_eq!(pill(None, None).0, "Starting");
         let mut s = Status::default();
@@ -677,8 +775,18 @@ mod snapshots {
                 installed: true,
                 running: true,
                 api_ok: true,
+                encoder: "nvenc".into(),
+                audio_problem: String::new(),
             },
             power_allowed: true,
+            nat: Some(brolink_core::api::NatReport {
+                udp: true,
+                ipv4: true,
+                ipv6: false,
+                hard: Some(true),
+                portmap: false,
+                derp: "tok".into(),
+            }),
             setup: vec![],
             log: vec![
                 "BroLink Host 3.0.1 listening on TCP 47850".into(),

@@ -67,6 +67,27 @@ pub fn supported_formats() -> i32 {
     }
 }
 
+/// `CAPABILITY_*` bits for this platform's decoder.
+///
+/// VideoToolbox decodes synchronously in a few milliseconds, so frames can
+/// be handed to it straight from the receive thread (no queue, one hop
+/// less of latency), and its HEVC decoder keeps enough reference frames
+/// for the host to repair a lost frame by referencing an older one
+/// instead of sending a whole keyframe, which on a slow link is the
+/// difference between a hiccup and a two-second freeze. H.264 reference
+/// invalidation is left off: Moonlight's own Mac client does the same.
+pub fn capabilities() -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        crate::ffi::CAPABILITY_DIRECT_SUBMIT
+            | crate::ffi::CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
 pub fn new_decoder(format: i32, width: u32, height: u32) -> Result<Box<dyn Decoder>> {
     #[cfg(target_os = "macos")]
     {

@@ -15,5 +15,11 @@ fi
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 rm -rf /Applications/BroLink.app
 cp -R "$APP" /Applications/BroLink.app
+# The staging bundle in dist/ would otherwise appear as a second BroLink
+# in Spotlight and Launchpad. Unregister it; the real app is in /Applications.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+"$LSREGISTER" -u "$APP" 2>/dev/null || true
+"$LSREGISTER" -f /Applications/BroLink.app 2>/dev/null || true
+rm -rf "$APP"
 echo "installed /Applications/BroLink.app"
 echo "open it; it lists the Windows PCs on your Tailscale account."

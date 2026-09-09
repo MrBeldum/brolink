@@ -22,12 +22,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
 clap.workspace = true
+semver = "1"
 eframe.workspace = true
 egui.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Power",
 ] }
 
@@ -35,6 +39,7 @@ windows = { version = "0.58", features = [
 winresource = "0.1"
 
 [dev-dependencies]
+toml.workspace = true
 # Renders the screens to PNGs without a display, so the UI can be reviewed
 # from any machine. See the `snapshots` test module in app.rs.
 egui_kittest = { version = "0.31", features = ["wgpu", "eframe"] }

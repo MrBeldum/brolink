@@ -8,7 +8,9 @@
 //! the service re-probes afterwards and the setup card says what is still
 //! missing.
 
-use anyhow::{Context, Result};
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::Result;
 use brolink_core::config::data_dir;
 use brolink_core::CONTROL_PORT;
 use std::path::{Path, PathBuf};
@@ -56,7 +58,7 @@ pub fn script(p: &Plan<'_>) -> String {
         $downloaded = $true
         Step "Installing Sunshine $($api.tag_name) (silent)"
     }}
-    $r = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/quiet', '/norestart') -Wait -PassThru
+    $r = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/quiet', '/norestart') -Wait -PassThru
     if ($r.ExitCode -ne 0) {{ throw "msiexec exited with $($r.ExitCode)" }}
     $dir = 'C:\Program Files\Sunshine'
     if ($downloaded) {{ Remove-Item $msi -ErrorAction SilentlyContinue }}
@@ -135,6 +137,9 @@ if ($dir) {{
 }}
 Step "Turning Fast Startup off: a PC shut down with it on cannot be woken"
 Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord
+Step "Never idle-sleep when plugged in, so Tailscale stays up from anywhere"
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
 {adapter}Step "BroLink setup finished"
 "#,
         install = install,
@@ -151,7 +156,12 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 
 pub fn run(p: &Plan<'_>) -> Result<()> {
     let dir = data_dir()?;
     let path = dir.join("setup.ps1");
-    std::fs::write(&path, script(p))?;
+    // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
+    // a Korean/Japanese username or adapter name ("이더넷") would be mangled
+    // and the firewall rule would point at a path that does not exist.
+    let mut bytes = b"\xEF\xBB\xBF".to_vec();
+    bytes.extend(script(p).as_bytes());
+    std::fs::write(&path, bytes)?;
     let log = dir.join("setup.log");
     #[cfg(windows)]
     {
@@ -272,6 +282,8 @@ mod tests {
         assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
         assert!(s.contains("'S5WakeOnLan'"));
         assert!(s.contains("HiberbootEnabled -Value 0"));
+        assert!(s.contains("powercfg /change standby-timeout-ac 0"));
+        assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
         assert!(s.contains("protocol=UDP localport=9 program=\"C:\\x\\brolink-host.exe\""));
         assert!(s.contains("localport=47984-48010 remoteip=100.64.0.0/10"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
@@ -288,7 +300,12 @@ mod tests {
             adapter_description: "",
         });
         assert!(s.contains("Downloading Sunshine"));
-        assert!(s.contains("Join-Path 'C:\\x' 'Sunshine-Windows-AMD64-installer.msi'"));
+        assert!(s.contains("Sunshine-Windows-AMD64-installer.msi"));
+        assert!(s.contains("Join-Path"));
+        assert!(
+            s.contains(r#"@('/i', "`"$msi`"", '/quiet', '/norestart')"#),
+            "{s}"
+        );
         assert!(s.contains("adapter unknown, skipped"));
         assert!(!s.contains("Set-NetAdapterPowerManagement"));
     }
