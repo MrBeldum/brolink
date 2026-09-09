@@ -14,7 +14,9 @@ use brolink_core::api::{UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
 use brolink_core::http::Request;
 use brolink_core::update;
 use semver::Version;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Anything smaller is not the host.
 const MIN_SIZE: usize = 1024 * 1024;
@@ -97,10 +99,19 @@ pub fn stage(req: &Request, exe: &Path) -> Result<Version, Rejected> {
 pub fn apply(exe: &Path) -> Result<()> {
     let new = staged(exe);
     anyhow::ensure!(new.exists(), "nothing is staged at {}", new.display());
-    let old = retired(exe);
-    let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old).context("retire the running executable")?;
-    if let Err(e) = std::fs::rename(&new, exe) {
+    let old = {
+        let p = retired(exe);
+        let _ = std::fs::remove_file(&p);
+        if p.exists() {
+            // A leftover panel from a previous update still has `.old`
+            // mapped; retire beside it instead of failing the swap.
+            with_suffix(exe, &format!(".old-{}", std::process::id()))
+        } else {
+            p
+        }
+    };
+    rename_retry(exe, &old).context("retire the running executable")?;
+    if let Err(e) = rename_retry(&new, exe) {
         let _ = std::fs::rename(&old, exe);
         return Err(e).context("move the new executable in");
     }
@@ -123,6 +134,42 @@ pub fn apply(exe: &Path) -> Result<()> {
 /// Remove what the last update retired, once its process has gone.
 pub fn tidy(exe: &Path) {
     let _ = std::fs::remove_file(retired(exe));
+    let Some(dir) = exe.parent() else { return };
+    let prefix = format!(
+        "{}.old",
+        exe.file_name().unwrap_or_default().to_string_lossy()
+    );
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Defender often holds a just-written exe open; one rename then fails
+/// with a sharing violation and the Mac already got 200.
+fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut last = None;
+    for _ in 0..20 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if sharing(&e) => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap())
+}
+
+fn sharing(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::ResourceBusy
+    ) || matches!(e.raw_os_error(), Some(5 | 32))
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@ use brolink_core::{CONTROL_PORT, SUNSHINE_WEB_PORT};
 use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
 use parking_lot::Mutex;
+use semver::Version;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -325,7 +327,7 @@ impl HostApp {
                 "not installed".to_string()
             } else {
                 format!(
-                    "{} · {}{}{}",
+                    "{} · {}{}{}{}",
                     s.streamer.kind,
                     if s.streamer.running {
                         "running"
@@ -343,6 +345,11 @@ impl HostApp {
                             " · software encoder (no GPU encoder worked: streams will be slow)"
                                 .into(),
                         e => format!(" · {e} encoder"),
+                    },
+                    if s.streamer.audio_problem.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · no sound: {}", s.streamer.audio_problem)
                     }
                 )
             };
@@ -567,12 +574,45 @@ fn decode_log(bytes: &[u8]) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateAction {
+    None,
+    /// Service is older than this panel: quit it and start the file on disk.
+    RestartService,
+    /// Service is newer: this panel is the leftover window, replace it.
+    RelaunchPanel,
+}
+
+fn update_action(service: &str, panel: &str) -> UpdateAction {
+    let (Ok(s), Ok(p)) = (Version::parse(service), Version::parse(panel)) else {
+        return UpdateAction::None;
+    };
+    match s.cmp(&p) {
+        Ordering::Less => UpdateAction::RestartService,
+        Ordering::Greater => UpdateAction::RelaunchPanel,
+        Ordering::Equal => UpdateAction::None,
+    }
+}
+
+fn relaunch_this_exe() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    std::process::Command::new(exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
 /// Poll the service every second; refresh Sunshine's client list now and
 /// then; restart the service after an update.
 fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut failures = 0u32;
         let mut tick = 0u64;
+        let mut restarted_service = false;
         loop {
             let r: Result<Status, _> = http::get_json(
                 ("127.0.0.1", CONTROL_PORT),
@@ -582,16 +622,27 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             match r {
                 Ok(st) => {
                     failures = 0;
-                    if st.version != env!("CARGO_PKG_VERSION") {
-                        let _ = http::request(
-                            ("127.0.0.1", CONTROL_PORT),
-                            "POST",
-                            "/v1/quit",
-                            None,
-                            Duration::from_secs(2),
-                        );
-                        std::thread::sleep(Duration::from_secs(1));
-                        crate::ensure_service_running();
+                    match update_action(&st.version, env!("CARGO_PKG_VERSION")) {
+                        UpdateAction::RestartService if !restarted_service => {
+                            // This panel is newer than the service (an
+                            // update replaced the exe; current_exe still
+                            // names it). Restart once; looping on != used
+                            // to kill a *newer* service every second.
+                            restarted_service = true;
+                            let _ = http::request(
+                                ("127.0.0.1", CONTROL_PORT),
+                                "POST",
+                                "/v1/quit",
+                                None,
+                                Duration::from_secs(2),
+                            );
+                            std::thread::sleep(Duration::from_secs(1));
+                            crate::ensure_service_running();
+                        }
+                        UpdateAction::RelaunchPanel if relaunch_this_exe() => {
+                            std::process::exit(0);
+                        }
+                        _ => {}
                     }
                     let cfg = HostConfig::load();
                     if st.streamer.api_ok && cfg.has_creds() && tick.is_multiple_of(10) {
@@ -660,6 +711,17 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_service_does_not_get_killed_by_the_old_panel() {
+        assert_eq!(update_action("3.1.0", "3.1.0"), UpdateAction::None);
+        assert_eq!(
+            update_action("3.0.1", "3.1.0"),
+            UpdateAction::RestartService
+        );
+        assert_eq!(update_action("3.1.0", "3.0.1"), UpdateAction::RelaunchPanel);
+        assert_eq!(update_action("nope", "3.1.0"), UpdateAction::None);
+    }
+
+    #[test]
     fn pill_reflects_setup_state() {
         assert_eq!(pill(None, None).0, "Starting");
         let mut s = Status::default();
@@ -714,6 +776,7 @@ mod snapshots {
                 running: true,
                 api_ok: true,
                 encoder: "nvenc".into(),
+                audio_problem: String::new(),
             },
             power_allowed: true,
             nat: Some(brolink_core::api::NatReport {

@@ -283,29 +283,41 @@ fn prepare_self(rel: &Release, token: Option<&str>) -> Result<Option<Version>> {
             ],
         )?;
     }
-    anyhow::ensure!(app.exists(), "the download holds no BroLink.app");
-    run(
-        "/usr/bin/codesign",
-        &["--verify", "--deep", "--strict", &app.display().to_string()],
-    )
-    .context("the new app's signature does not verify")?;
-    let version = run(
-        "/usr/bin/plutil",
-        &[
-            "-extract",
-            "CFBundleShortVersionString",
-            "raw",
-            &app.join("Contents/Info.plist").display().to_string(),
-        ],
-    )?;
-    let version =
-        Version::parse(&version).with_context(|| format!("bundle version {version:?}"))?;
-    anyhow::ensure!(
-        version == rel.version,
-        "the download says {version}, the release {}",
-        rel.version
-    );
-    Ok(Some(version))
+    let verified = (|| -> Result<Version> {
+        anyhow::ensure!(app.exists(), "the download holds no BroLink.app");
+        run(
+            "/usr/bin/codesign",
+            &["--verify", "--deep", "--strict", &app.display().to_string()],
+        )
+        .context("the new app's signature does not verify")?;
+        let version = run(
+            "/usr/bin/plutil",
+            &[
+                "-extract",
+                "CFBundleShortVersionString",
+                "raw",
+                &app.join("Contents/Info.plist").display().to_string(),
+            ],
+        )?;
+        let version =
+            Version::parse(&version).with_context(|| format!("bundle version {version:?}"))?;
+        anyhow::ensure!(
+            version == rel.version,
+            "the download says {version}, the release {}",
+            rel.version
+        );
+        Ok(version)
+    })();
+    match verified {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            // Nothing from a failed check may be found and trusted at the
+            // next attempt: fetch and unpack again from scratch.
+            let _ = std::fs::remove_dir_all(&unpacked);
+            let _ = std::fs::remove_file(&tarball);
+            Err(e)
+        }
+    }
 }
 
 /// Move the verified app over this one. macOS keeps the running executable

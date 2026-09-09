@@ -198,12 +198,18 @@ impl Default for ClientConfig {
 impl ClientConfig {
     pub fn load() -> Self {
         let mut c: Self = brolink_core::config::load(FILE);
-        c.stream.fps = c.stream.fps.clamp(30, 240);
-        c.stream.bitrate_kbps = c.stream.bitrate_kbps.clamp(5_000, 150_000);
-        if c.stream.app.trim().is_empty() {
-            c.stream.app = "Desktop".into();
-        }
+        c.normalise();
         c
+    }
+
+    /// Keep a hand-edited or older file within what the UI offers. The
+    /// bitrate floor is the slider's 2 Mbps, under the Smooth preset's 4.
+    fn normalise(&mut self) {
+        self.stream.fps = self.stream.fps.clamp(30, 240);
+        self.stream.bitrate_kbps = self.stream.bitrate_kbps.clamp(2_000, 150_000);
+        if self.stream.app.trim().is_empty() {
+            self.stream.app = "Desktop".into();
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -250,5 +256,23 @@ mod tests {
         );
         let back: ClientConfig = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn every_preset_survives_a_reload() {
+        for p in Preset::ALL {
+            let mut c = ClientConfig::default();
+            c.stream.apply_preset(p);
+            c.normalise();
+            assert_eq!(c.stream.preset(), Some(p), "{p:?} was clamped away");
+        }
+        let mut c = ClientConfig::default();
+        c.stream.bitrate_kbps = 500;
+        c.stream.fps = 5;
+        c.stream.app = "  ".into();
+        c.normalise();
+        assert_eq!(c.stream.bitrate_kbps, 2_000);
+        assert_eq!(c.stream.fps, 30);
+        assert_eq!(c.stream.app, "Desktop");
     }
 }

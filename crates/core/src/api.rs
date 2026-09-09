@@ -143,6 +143,11 @@ pub struct Streamer {
     /// "software"), read from its log; empty when unknown. Software
     /// encoding is why a stream can be slow on a fast network.
     pub encoder: String,
+    /// Why Sunshine has no sound to send, in its own words from its log
+    /// (3.1+); empty when audio capture works or nothing is known. A PC
+    /// with no monitor or speakers has no audio device, and Sunshine then
+    /// streams silence.
+    pub audio_problem: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +248,7 @@ mod tests {
         let s: Status = serde_json::from_str(r#"{"streamer":{"kind":"Sunshine"}}"#).unwrap();
         assert_eq!(s.nat, None);
         assert_eq!(s.streamer.encoder, "");
+        assert_eq!(s.streamer.audio_problem, "");
     }
 
     #[test]

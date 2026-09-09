@@ -78,6 +78,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+      - name: release notes
+        # The CHANGELOG.md section whose heading is this version, up to
+        # the next heading. A tag without one gets GitHub's generated notes.
+        run: |
+          awk -v want="${GITHUB_REF_NAME#v}" '
+            /^## / { on = ($2 == want); next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+            echo "NOTES=--notes-file notes.md" >> "$GITHUB_ENV"
+          else
+            echo "no CHANGELOG.md section for ${GITHUB_REF_NAME}; using generated notes"
+            echo "NOTES=--generate-notes" >> "$GITHUB_ENV"
+          fi
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -86,77 +104,9 @@ jobs:
             *-*) PRE=--prerelease ;;
             *)   PRE= ;;
           esac
-          cat > notes.md <<'EOF'
-          ## BroLink 3.0
-
-          The Mac app streams by itself. Moonlight's GameStream client
-          library (moonlight-common-c) is compiled into BroLink, frames are
-          decoded with VideoToolbox and drawn in BroLink's own window. There
-          is no Moonlight to install. The Windows zip carries the Sunshine
-          installer, so the PC downloads nothing during setup either.
-
-          - A toolbar above the picture instead of a bare video: PC name and
-            stream details, mouse capture (Ctrl+Alt), what the Command key
-            does, a Keys menu (Ctrl+Alt+Del, Windows key, Alt+Tab, Esc,
-            Print Screen), stats, full screen, the PC's power menu, and
-            Disconnect. In full screen the toolbar sits in the letterbox bar
-            when there is one and drops down from the top edge when there is
-            not.
-          - Waking: setup turns Fast Startup off and writes the driver
-            keywords for magic-packet wake from sleep, modern standby and
-            shutdown. The host listens on UDP 9 while awake, and the PC menu
-            on the Mac has **Test wake**, which says whether wake packets
-            from where you are reach the PC at all.
-          - Pairing talks to both Sunshine's current PIN API and the next
-            one (pairing ids).
-          - License: GPL-3.0-or-later, as moonlight-common-c requires.
-
-          ## Install
-
-          **Windows PC**: unzip, run `brolink-host.exe` (or `install-host.ps1`
-          for shortcuts and start-at-logon), click **Set up this PC** once.
-          Sign the PC in to Tailscale with your account.
-
-          **Mac (Apple Silicon)**: with the GitHub CLI signed in,
-
-          ```bash
-          curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
-          ```
-
-          or download the tarball and
-
-          ```bash
-          tar xzf brolink-macos-arm64.tar.gz
-          xattr -dr com.apple.quarantine BroLink.app
-          open BroLink.app
-          ```
-
-          ## Verified
-
-          - Unit tests, clippy and fmt on Windows and macOS in CI
-          - On a Windows 11 PC with Sunshine v2026.516: pairing through the
-            built-in client (all five phases, pinned certificate), app list,
-            launch and resume, an encrypted RTSP session with decoded video,
-            a clean stop, and the live picture rendered in the BroLink
-            window
-          - The host service on the same PC: status, the wake-packet
-            listener receiving a real magic packet, the Mac-side wake test
-            against it
-          - Every screen of both apps rendered to PNG and reviewed
-
-          ## Not verified
-
-          - The app on an actual Mac: macOS CI builds it, and the
-            VideoToolbox decoder is written against Apple's documented API,
-            but nobody has run this build on Apple hardware yet
-          - The elevated setup script end to end: the development PC already
-            had Sunshine, the firewall rules and Wake-on-LAN in place
-          - Wake from a full shutdown depends on the board's firmware
-            allowing it; the Test wake result covers the network path only
-          EOF
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "BroLink ${GITHUB_REF_NAME}" \
-            --notes-file notes.md \
+            $NOTES \
             $PRE \
             artifacts/*/*

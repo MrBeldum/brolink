@@ -245,10 +245,6 @@ impl Held {
     pub fn is_down(&self, vk: i16) -> bool {
         self.keys.contains(&vk)
     }
-
-    pub fn modifiers_now(&self) -> Modifiers {
-        self.modifiers
-    }
 }
 
 #[cfg(test)]

@@ -119,12 +119,14 @@ impl Service {
     /// A PC nobody can reach in person has to come back by itself after a
     /// restart, so the logon entry is kept unless the owner turned it off.
     fn ensure_autostart(&self, exe: &std::path::Path) {
-        if !self.cfg.lock().start_with_windows || crate::setup::starts_with_windows() {
+        if !self.cfg.lock().start_with_windows {
             return;
         }
-        match crate::setup::set_start_with_windows(true, exe) {
-            Ok(()) => self.log("registered the background service to start at logon"),
-            Err(e) => self.log(format!("could not register start at logon: {e:#}")),
+        // Rewrite even when a Run value already exists: install-host.ps1
+        // may have moved the exe after the first setup, and the old path
+        // would start nothing at logon.
+        if let Err(e) = crate::setup::set_start_with_windows(true, exe) {
+            self.log(format!("could not register start at logon: {e:#}"));
         }
     }
 
@@ -184,16 +186,24 @@ impl Service {
         } else {
             running && self.streamer.lock().api_ok
         };
-        // The encoder Sunshine picked, from its log; re-read now and then
-        // since Sunshine restarts on its own after setup.
-        let encoder = if tick.is_multiple_of(12) || self.streamer.lock().encoder.is_empty() {
-            install
-                .as_ref()
-                .and_then(streamer::encoder)
-                .unwrap_or_default()
-        } else {
-            self.streamer.lock().encoder.clone()
-        };
+        // The encoder Sunshine picked and whether it could capture audio,
+        // from its log; re-read now and then since Sunshine restarts on
+        // its own after setup and every session tries the audio device.
+        let (encoder, audio_problem) =
+            if tick.is_multiple_of(12) || self.streamer.lock().encoder.is_empty() {
+                let log = install.as_ref().and_then(streamer::log_text);
+                (
+                    log.as_deref()
+                        .and_then(streamer::encoder_in)
+                        .unwrap_or_default(),
+                    log.as_deref()
+                        .and_then(streamer::audio_problem_in)
+                        .unwrap_or_default(),
+                )
+            } else {
+                let cur = self.streamer.lock();
+                (cur.encoder.clone(), cur.audio_problem.clone())
+            };
         let st = Streamer {
             kind: install
                 .as_ref()
@@ -203,6 +213,7 @@ impl Service {
             running,
             api_ok,
             encoder,
+            audio_problem,
         };
         {
             let mut cur = self.streamer.lock();
@@ -226,6 +237,16 @@ impl Service {
                     )
                 } else {
                     format!("{} encodes with {}", st.kind, st.encoder)
+                });
+            }
+            if cur.audio_problem != st.audio_problem {
+                self.log(if st.audio_problem.is_empty() {
+                    format!("{} can capture audio again", st.kind)
+                } else {
+                    format!(
+                        "{} has no sound to send: {}. A PC with no monitor or speakers needs a virtual audio device",
+                        st.kind, st.audio_problem
+                    )
                 });
             }
             *cur = st;
@@ -396,6 +417,19 @@ impl Service {
                 &Ack::err("not a machine on this PC's Tailscale account"),
             );
         }
+        // A web page open in a browser on an authorised machine (this PC,
+        // or the Mac) can POST here without asking: a cross-origin form
+        // post needs no preflight, and sleep, quit or a clipboard write
+        // happen whether or not the page can read the reply. BroLink's own
+        // callers send JSON or an executable, neither of which a browser
+        // can send cross-origin without a preflight that nothing here
+        // answers.
+        if req.method == "POST" && !sent_by_brolink(req) {
+            return Response::json(
+                403,
+                &Ack::err("a BroLink request carries JSON or an executable"),
+            );
+        }
         let local = peer.ip().is_loopback();
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
@@ -548,6 +582,18 @@ pub fn describe_nat(n: &NatReport) -> String {
     }
 }
 
+/// The `Content-Type` BroLink's own callers send: JSON, or the executable
+/// on the update route. A browser cannot send either cross-origin without
+/// a CORS preflight, so this keeps web pages from driving the service.
+fn sent_by_brolink(req: &Request) -> bool {
+    let ct = req
+        .header("content-type")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    ct.starts_with("application/json") || ct.starts_with("application/octet-stream")
+}
+
 /// Tailscale hands out addresses from 100.64.0.0/10.
 fn is_tailnet(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
@@ -594,6 +640,7 @@ mod tests {
         let post = |path: &str, body: &str| Request {
             method: "POST".into(),
             path: path.into(),
+            headers: json_header(),
             body: body.into(),
             ..Default::default()
         };
@@ -623,11 +670,74 @@ mod tests {
             &Request {
                 method: "POST".into(),
                 path: UPDATE_PATH.into(),
-                headers: vec![("x-brolink-version".into(), "0.0.1".into())],
+                headers: vec![
+                    ("x-brolink-version".into(), "0.0.1".into()),
+                    ("content-type".into(), "application/octet-stream".into()),
+                ],
                 body: b"MZ".to_vec(),
             },
         );
         assert_eq!(r.status, 409, "{}", r.body);
+    }
+
+    fn json_header() -> Vec<(String, String)> {
+        vec![("content-type".into(), "application/json".into())]
+    }
+
+    #[test]
+    fn a_web_page_cannot_post_from_an_authorised_machine() {
+        // A cross-origin form post from a browser on this PC arrives from
+        // loopback with a form or text content type and no preflight. It
+        // must not sleep the PC, stop the service or touch the clipboard.
+        let svc = Service::new();
+        let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        for ct in [
+            None,
+            Some("text/plain"),
+            Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data; boundary=x"),
+        ] {
+            for path in ["/v1/power", "/v1/quit", CLIPBOARD_PATH, UPDATE_PATH] {
+                let mut headers = Vec::new();
+                if let Some(ct) = ct {
+                    headers.push(("content-type".to_string(), ct.to_string()));
+                }
+                let r = svc.handle(
+                    local,
+                    &Request {
+                        method: "POST".into(),
+                        path: path.into(),
+                        headers,
+                        body: br#"{"action":"sleep","text":"x"}"#.to_vec(),
+                    },
+                );
+                assert_eq!(r.status, 403, "{path} with {ct:?}: {}", r.body);
+            }
+        }
+        // BroLink's own callers are unaffected, whatever the case of the header.
+        let r = svc.handle(
+            local,
+            &Request {
+                method: "POST".into(),
+                path: "/v1/power".into(),
+                headers: vec![(
+                    "content-type".into(),
+                    "Application/JSON; charset=utf-8".into(),
+                )],
+                body: br#"{"action":"nap"}"#.to_vec(),
+            },
+        );
+        assert_eq!(r.status, 400, "{}", r.body);
+        // GETs carry no side effect and stay open to the panel.
+        let r = svc.handle(
+            local,
+            &Request {
+                method: "GET".into(),
+                path: "/v1/status".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, 200);
     }
 
     #[test]
@@ -666,6 +776,7 @@ mod tests {
             &Request {
                 method: "POST".into(),
                 path: CLIPBOARD_PATH.into(),
+                headers: json_header(),
                 body: b"not json".to_vec(),
                 ..Default::default()
             },
@@ -691,6 +802,7 @@ mod tests {
             &Request {
                 method: "POST".into(),
                 path: "/v1/power".into(),
+                headers: json_header(),
                 body: r#"{"action":"sleep"}"#.into(),
                 ..Default::default()
             },

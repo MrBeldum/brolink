@@ -6,14 +6,16 @@ use brolink_core::api::PowerAction;
 /// Prevent Windows from idle-sleeping while BroLink Host is running, so
 /// Tailscale stays up. User-initiated Sleep (Start menu or the Mac) still
 /// works. Call this from the background service, not the control panel:
-/// the execution state is per-process.
+/// the execution state is per-thread, and `refresh_loop` is the one caller.
 pub fn keep_awake(on: bool) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use windows::Win32::System::Power::{
             SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
         };
+        static PLAN_ZEROED: AtomicBool = AtomicBool::new(false);
         unsafe {
             if on {
                 SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
@@ -21,7 +23,11 @@ pub fn keep_awake(on: bool) {
                 SetThreadExecutionState(ES_CONTINUOUS);
             }
         }
-        if on {
+        // The plan is written once when the setting turns on (setup also
+        // does this). Running powercfg every five seconds rewrote HKLM
+        // ~35,000 times a day and made the toggle irreversible, because
+        // turning it off never restored the timers.
+        if on && !PLAN_ZEROED.swap(true, Ordering::Relaxed) {
             for args in [
                 ["/change", "standby-timeout-ac", "0"],
                 ["/change", "hibernate-timeout-ac", "0"],
@@ -31,6 +37,9 @@ pub fn keep_awake(on: bool) {
                     .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
                     .status();
             }
+        }
+        if !on {
+            PLAN_ZEROED.store(false, Ordering::Relaxed);
         }
     }
     #[cfg(not(windows))]

@@ -215,10 +215,21 @@ impl ClientApp {
                         if self.cfg.stream.fullscreen {
                             fullscreen = Some(true);
                         }
+                        if let Some(problem) = host_audio_problem(&self.discovery, &live.node_id) {
+                            self.view.toast(
+                                Tone::Danger,
+                                format!(
+                                    "{} has no sound to send: Sunshine reports “{problem}”. See the host window.",
+                                    live.pc
+                                ),
+                            );
+                        }
                     }
                     Event::Failed { stage, code } => {
+                        let cancelled = prog.cancel;
                         prog.step = Step::Ended {
-                            error: Some(format!("Connecting failed at {stage} (code {code}).")),
+                            error: (!cancelled)
+                                .then_some(format!("Connecting failed at {stage} (code {code}).")),
                         };
                     }
                     Event::Terminated { code, message } => {
@@ -228,6 +239,9 @@ impl ClientApp {
                         };
                     }
                     Event::Poor(p) => self.view.set_poor(p),
+                    Event::NoAudio(e) => self
+                        .view
+                        .toast(Tone::Danger, format!("No sound on this Mac: {e}.")),
                 }
             }
             // A stop we asked for ends without a Terminated event.
@@ -984,8 +998,21 @@ fn describe(pc: &Pc) -> String {
     }
 }
 
-/// One line per PC that is relayed, encodes in software, or runs a host
-/// too old to update itself.
+/// Sunshine's audio failure on the PC with `node_id`, as its host last
+/// reported it (3.1+ hosts); `None` when sound works or nothing is known.
+fn host_audio_problem(discovery: &Mutex<Discovery>, node_id: &str) -> Option<String> {
+    discovery
+        .lock()
+        .pcs
+        .iter()
+        .find(|p| p.node_id == node_id)
+        .and_then(|p| p.host.as_ref())
+        .map(|h| h.streamer.audio_problem.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// One line per PC that is relayed, encodes in software, has no sound to
+/// send, or runs a host too old to update itself.
 fn path_warnings(disc: &Discovery) -> Vec<String> {
     let mut out = Vec::new();
     for pc in disc.pcs.iter().filter(|p| !p.remembered && p.online) {
@@ -998,6 +1025,12 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
                 out.push(format!(
                     "{} encodes video in software: Sunshine found no GPU encoder there, so frames are slow to make whatever the network does. Check the GPU driver on the PC, or keep the stream at 1080p and 30 fps.",
                     pc.name
+                ));
+            }
+            if !h.streamer.audio_problem.is_empty() {
+                out.push(format!(
+                    "{} has no sound to send: Sunshine reports “{}”. A PC with no monitor or speakers has no audio device to capture; give it a virtual one (Steam's Streaming Speakers, or VB-CABLE) and pick it as Sunshine's audio sink.",
+                    pc.name, h.streamer.audio_problem
                 ));
             }
             if let Ok(v) = Version::parse(&h.version) {
@@ -1106,6 +1139,8 @@ mod tests {
                 version: "3.0.0".into(),
                 streamer: brolink_core::api::Streamer {
                     encoder: "software".into(),
+                    audio_problem:
+                        "Unable to initialize audio capture. The stream will not have audio.".into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1117,15 +1152,25 @@ mod tests {
             ..Default::default()
         };
         let w = path_warnings(&disc);
-        assert_eq!(w.len(), 3, "{w:?}");
+        assert_eq!(w.len(), 4, "{w:?}");
         assert!(w[0].contains("Tokyo relay"), "{}", w[0]);
         assert!(w[1].contains("software"), "{}", w[1]);
-        assert!(w[2].contains("Update BroLink Host"), "{}", w[2]);
-        // Direct, GPU encoder, current host: nothing to say.
+        assert!(
+            w[2].contains("no sound") && w[2].contains("audio capture"),
+            "{}",
+            w[2]
+        );
+        assert!(w[3].contains("Update BroLink Host"), "{}", w[3]);
+        assert_eq!(
+            host_audio_problem(&Mutex::new(disc.clone()), &gaming_pc.node_id).as_deref(),
+            Some("Unable to initialize audio capture. The stream will not have audio.")
+        );
+        // Direct, GPU encoder, sound, current host: nothing to say.
         gaming_pc.path.direct = Some(true);
         let h = gaming_pc.host.as_mut().unwrap();
         h.version = "3.1.0".into();
         h.streamer.encoder = "nvenc".into();
+        h.streamer.audio_problem.clear();
         let disc = Discovery {
             pcs: vec![gaming_pc.clone()],
             ..Default::default()

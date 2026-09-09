@@ -532,8 +532,19 @@ fn run(c: &Connect) -> Result<()> {
     report(Step::Launching, "Checking pairing…".into());
     let identity = Identity::load_or_create(&brolink_core::config::data_dir()?.join("identity"))?;
     let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
-    let mut info = retry(8, || client.server_info())?;
-    if !info.paired {
+    let mut info = match client.server_info() {
+        Ok(i) => i,
+        Err(e) if e.to_string().contains("certificate changed") => {
+            // Sunshine was reinstalled; the saved cert is the old one.
+            // Forget it and pair again so the user does not have to edit
+            // client.toml.
+            tracing::warn!("{}: {e:#}; pairing again", t.name);
+            client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
+            retry(8, || client.server_info())?
+        }
+        Err(_) => retry(8, || client.server_info())?,
+    };
+    if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
         let der = client.pair(&pin, &brolink_core::config::machine_name(), || {

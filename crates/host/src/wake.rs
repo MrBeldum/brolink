@@ -26,7 +26,7 @@ pub struct WakeInfo {
 pub fn listen(on_packet: impl Fn(MacAddr, SocketAddr) + Send + 'static) -> Result<()> {
     let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, WOL_PORTS[0])).context("bind UDP 9")?;
     std::thread::spawn(move || {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; 1500];
         loop {
             match sock.recv_from(&mut buf) {
                 Ok((n, from)) => {

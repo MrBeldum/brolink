@@ -29,11 +29,16 @@ impl Identity {
             (Ok(k), Ok(c)) if !k.is_empty() && !c.is_empty() => (k, c),
             _ => {
                 let (k, c) = generate()?;
-                std::fs::write(&key_path, &k)?;
+                write_secret(&key_path, k.as_bytes())?;
                 std::fs::write(&cert_path, &c)?;
                 (k, c)
             }
         };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
         let unique_id = match std::fs::read_to_string(&id_path) {
             Ok(s) if s.trim().len() == 16 => s.trim().to_string(),
             _ => {
@@ -68,6 +73,29 @@ impl Identity {
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
         let digest = Sha256::digest(data);
         Ok(self.key.sign(Pkcs1v15Sign::new::<Sha256>(), &digest)?)
+    }
+}
+
+/// The pairing private key is not world-readable.
+fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut f| f.write_all(bytes))
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
+        Ok(())
     }
 }
 

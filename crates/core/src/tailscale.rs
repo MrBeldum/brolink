@@ -7,10 +7,21 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// Where the CLI lives, first hit wins. The macOS App Store build keeps it
 /// inside the bundle; the standalone build symlinks it; Homebrew's is last.
 pub fn cli() -> Option<PathBuf> {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(p) = PATH.get() {
+        return Some(p.clone());
+    }
+    let found = find_cli()?;
+    let _ = PATH.set(found.clone());
+    Some(found)
+}
+
+fn find_cli() -> Option<PathBuf> {
     let candidates: &[&str] = if cfg!(windows) {
         &[
             r"C:\Program Files\Tailscale\tailscale.exe",
@@ -28,7 +39,14 @@ pub fn cli() -> Option<PathBuf> {
         .map(PathBuf::from)
         .find(|p| p.exists())
         .or_else(|| {
-            let out = Command::new("tailscale").arg("--version").output().ok()?;
+            let mut c = Command::new("tailscale");
+            c.arg("--version");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let out = c.output().ok()?;
             out.status.success().then(|| PathBuf::from("tailscale"))
         })
 }

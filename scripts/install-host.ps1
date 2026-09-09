@@ -31,7 +31,7 @@ $DestExe = Join-Path $DestDir "brolink-host.exe"
 
 # A running service or panel holds the old exe open; stop them first.
 try {
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47850/v1/quit" -TimeoutSec 2 | Out-Null
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47850/v1/quit" -ContentType 'application/json' -Body '{}' -TimeoutSec 2 | Out-Null
     Start-Sleep -Milliseconds 800
 } catch {}
 Get-Process brolink-host -ErrorAction SilentlyContinue | Stop-Process -Force

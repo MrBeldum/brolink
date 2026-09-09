@@ -77,6 +77,10 @@ pub struct View {
     toasts: Vec<Toast>,
     /// Pastes seen through `clipboard.pastes_done()`.
     pastes_seen: u32,
+    /// Ctrl+Alt was down when capture last toggled; ignore further edges
+    /// until both keys are up. `release_all` clears `Held.modifiers`, so
+    /// deriving "was down" from that retriggered the toggle every frame.
+    capture_chord_held: bool,
 }
 
 impl Default for View {
@@ -96,6 +100,7 @@ impl Default for View {
             poor_hinted: false,
             toasts: Vec::new(),
             pastes_seen: 0,
+            capture_chord_held: false,
         }
     }
 }
@@ -137,6 +142,7 @@ impl View {
         self.poor = false;
         self.poor_hinted = false;
         self.toasts.clear();
+        self.capture_chord_held = false;
     }
 
     fn set_captured(&mut self, ctx: &egui::Context, on: bool) {
@@ -642,6 +648,9 @@ impl View {
         if self.stats {
             let path = env.path.clone().unwrap_or_else(|| live.path.clone());
             text.push_str(&format!("   {}   {}", path.label(), live.quality_label()));
+            if !stats.audio.is_empty() {
+                text.push_str(&format!("   {}", stats.audio));
+            }
         }
         let font = egui::FontId::monospace(12.0);
         if in_gap {
@@ -710,9 +719,12 @@ impl View {
         }
         if keys_to_pc {
             let ctrl_alt = modifiers.ctrl && modifiers.alt;
-            let was = self.held_ctrl_alt();
+            if !ctrl_alt {
+                self.capture_chord_held = false;
+            }
             self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
-            if ctrl_alt && !was {
+            if ctrl_alt && !self.capture_chord_held {
+                self.capture_chord_held = true;
                 self.toggle_capture(ctx, live);
                 return;
             }
@@ -745,7 +757,10 @@ impl View {
                     pressed,
                     repeat,
                     ..
-                } if keys_to_pc && !repeat => {
+                } if keys_to_pc && (pressed || !repeat) => {
+                    // OS autorepeat arrives as extra Downs with `repeat`.
+                    // Sunshine does not generate them, so holding a key
+                    // would otherwise type once. Releases never repeat.
                     if let Some(vk) = physical_key.and_then(input::vk).or_else(|| input::vk(key)) {
                         self.held.key(input, vk, pressed);
                     }
@@ -826,10 +841,6 @@ impl View {
                 h.clamp(-32000.0, 32000.0) as i16,
             );
         }
-    }
-
-    fn held_ctrl_alt(&self) -> bool {
-        self.held.modifiers_now().ctrl && self.held.modifiers_now().alt
     }
 
     /// What ⌘ stands for in a clipboard shortcut.

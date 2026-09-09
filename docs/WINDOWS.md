@@ -55,7 +55,11 @@ service logs the finding each time it changes.
 The **Streaming** line names the encoder Sunshine settled on, read from
 its log. "software" means no GPU encoder worked (a missing or broken
 driver): frames are slow to make whatever the network does. Fix the GPU
-driver, then restart the Sunshine service.
+driver, then restart the Sunshine service. If it also says **no sound**,
+Sunshine found no audio device to capture (a PC with no speakers, or a
+sink that was unplugged). Install a virtual one (Steam's Streaming
+Speakers, or VB-CABLE), pick it as Sunshine's audio sink, and restart
+Sunshine.
 
 ## What the service does
 

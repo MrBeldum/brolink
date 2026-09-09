@@ -3,7 +3,7 @@
 //! happens through [`Event`]s. moonlight-common-c holds exactly one
 //! connection at a time, so sessions are serialised through a global lock.
 
-use crate::audio::Player;
+use crate::audio::{Output, Player};
 use crate::ffi;
 use crate::video::{self, Decoder, FrameSlot};
 use parking_lot::{Condvar, Mutex};
@@ -34,6 +34,8 @@ pub enum Event {
     },
     /// The network is struggling (`true`) or fine again (`false`).
     Poor(bool),
+    /// This machine cannot play the stream's sound; the reason.
+    NoAudio(String),
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +76,9 @@ pub struct Stats {
     pub loss_pct: f32,
     /// Packets FEC did rebuild in the last second.
     pub fec_recovered: u32,
+    /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
+    /// not; empty until the first second of video.
+    pub audio: String,
 }
 
 #[derive(Default)]
@@ -93,6 +98,10 @@ struct Inner {
     frames: Arc<FrameSlot>,
     decoder: Mutex<Option<Box<dyn Decoder>>>,
     audio: Mutex<Option<Player>>,
+    /// Why the player could not be made, when it could not.
+    audio_error: Mutex<Option<String>>,
+    /// The one notice about sound has gone out.
+    audio_warned: AtomicBool,
     window: Mutex<Window>,
     stats: Mutex<Stats>,
     connected: AtomicBool,
@@ -232,6 +241,8 @@ impl Session {
             frames,
             decoder: Mutex::new(None),
             audio: Mutex::new(None),
+            audio_error: Mutex::new(None),
+            audio_warned: AtomicBool::new(false),
             window: Mutex::new(Window::default()),
             stats: Mutex::new(Stats::default()),
             connected: AtomicBool::new(false),
@@ -484,11 +495,36 @@ fn account(inner: &Inner, bytes: u64, decode_us: u64, host_tenths: u16) {
             st.loss_pct = loss;
             st.fec_recovered = recovered;
         }
+        let (audio, problem) = audio_state(inner);
+        st.audio = audio;
+        drop(st);
+        if let Some(p) = problem {
+            if !inner.audio_warned.swap(true, Ordering::Relaxed) {
+                inner.emit(Event::NoAudio(p));
+            }
+        }
         *w = Window {
             since: Some(Instant::now()),
             rtp: now,
             ..Default::default()
         };
+    }
+}
+
+/// The stats phrase for sound and, when this machine cannot play it, the
+/// reason worth one notice. Silence from the PC is not a problem here:
+/// Sunshine sends nothing while nothing plays there.
+fn audio_state(inner: &Inner) -> (String, Option<String>) {
+    if let Some(e) = inner.audio_error.lock().as_ref() {
+        return (format!("no sound: {e}"), Some(e.clone()));
+    }
+    let guard = inner.audio.lock();
+    let Some(a) = guard.as_ref() else {
+        return (String::new(), None);
+    };
+    match a.output() {
+        Output::Failed(e) => (format!("no sound: {e}"), Some(e)),
+        _ => (a.describe(), None),
     }
 }
 
@@ -546,15 +582,18 @@ unsafe extern "C" fn audio_setup(
             0
         }
         Err(e) => {
-            // Streaming without sound beats not streaming.
+            // Streaming without sound beats not streaming; say why.
             tracing::warn!("audio: {e:#}");
+            *inner.audio_error.lock() = Some(format!("{e:#}"));
             0
         }
     }
 }
 
 unsafe extern "C" fn audio_cleanup(p: *mut c_void) {
-    *ctx(p).audio.lock() = None;
+    let inner = ctx(p);
+    *inner.audio.lock() = None;
+    *inner.audio_error.lock() = None;
 }
 
 unsafe extern "C" fn audio_packet(p: *mut c_void, data: *const u8, len: c_int) {

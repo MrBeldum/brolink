@@ -168,7 +168,7 @@ Invoke-WebRequest -UseBasicParsing "$src/brolink-host.exe" -OutFile "$p.new"
 $h = (Get-FileHash "$p.new" -Algorithm SHA256).Hash
 if ($h -ne '{sha}') {{ Remove-Item "$p.new" -Force; throw "the download did not match its SHA-256" }}
 Write-Host "Stopping the old service"
-try {{ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:47850/v1/quit -TimeoutSec 3 | Out-Null }} catch {{}}
+try {{ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:47850/v1/quit -ContentType 'application/json' -Body '{{}}' -TimeoutSec 3 | Out-Null }} catch {{}}
 Start-Sleep -Milliseconds 800
 Get-Process brolink-host -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
