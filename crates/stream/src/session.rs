@@ -549,7 +549,7 @@ fn loss_in_window(before: &ffi::RtpVideoStats, after: &ffi::RtpVideoStats) -> (f
     let recovered = after
         .packet_count_fec_recovered
         .saturating_sub(before.packet_count_fec_recovered);
-    let seen = video + failed;
+    let seen = u64::from(video) + u64::from(failed);
     let loss = if seen == 0 {
         0.0
     } else {
@@ -568,7 +568,13 @@ unsafe extern "C" fn audio_setup(
     mapping: *const u8,
 ) -> c_int {
     let inner = ctx(p);
-    let mapping = std::slice::from_raw_parts(mapping, channels.max(0) as usize);
+    // moonlight's mapping array contains at most eight entries. Reject
+    // invalid lengths before turning its pointer into a Rust slice.
+    if mapping.is_null() || !(1..=8).contains(&channels) {
+        *inner.audio_error.lock() = Some("invalid audio channel mapping".into());
+        return 0;
+    }
+    let mapping = std::slice::from_raw_parts(mapping, channels as usize);
     match Player::new(
         sample_rate as u32,
         channels as usize,

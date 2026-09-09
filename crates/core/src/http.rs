@@ -1,4 +1,4 @@
-//! Just enough HTTP/1.1 for two programs that trust each other: one request
+//! A bounded HTTP/1.1 transport for the control API: one request
 //! per connection, small JSON bodies (and one large upload, the host update),
 //! `Connection: close`. No framework, no TLS (Tailscale is the transport),
 //! no keep-alive.
@@ -12,6 +12,7 @@ use std::time::Duration;
 /// host executable on [`crate::api::UPDATE_PATH`], which has its own limit.
 const MAX_BODY: usize = 64 * 1024;
 const MAX_HEADER: usize = 16 * 1024;
+const MAX_CONNECTIONS: usize = 16;
 /// Time to read headers and a small JSON body, and to write the reply.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Time to read `brolink-host.exe` after the headers. Tailscale plus a
@@ -102,51 +103,42 @@ impl Response {
 /// scan, a health probe) so the caller can drop it quietly.
 pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line).map_err(io_err)? == 0 {
+    let mut remaining = MAX_HEADER;
+    let Some(line) = read_line(&mut reader, &mut remaining)? else {
         return Ok(None);
-    }
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_ascii_uppercase();
+    };
+    let mut parts = line.split(' ');
+    let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
-    if method.is_empty() || !path.starts_with('/') {
-        bail!("bad request line: {line:?}");
+    let version = parts.next().unwrap_or("");
+    validate_target(&method, &path)?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || parts.next().is_some() {
+        bail!("bad request line");
     }
-    let mut content_length = 0usize;
-    let mut header_bytes = line.len();
-    let mut headers = Vec::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).map_err(io_err)? == 0 {
-            bail!("connection closed inside headers");
-        }
-        header_bytes += line.len();
-        if header_bytes > MAX_HEADER {
-            bail!("headers too large");
-        }
-        let l = line.trim_end();
-        if l.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = l.split_once(':') {
-            let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
-            if k == "content-length" {
-                content_length = v.parse().context("content-length")?;
-            }
-            headers.push((k, v));
-        }
+    let headers = read_headers(&mut reader, &mut remaining)?;
+    if header(&headers, "transfer-encoding").is_some() {
+        bail!("request transfer-encoding is not supported");
     }
-    if content_length > max_body(&path) {
+    let content_length = content_length(&headers)?.unwrap_or(0);
+    if content_length > max_body(&path) as u64 {
         bail!("body too large ({content_length} bytes)");
     }
-    if content_length > MAX_BODY {
+    if content_length > MAX_BODY as u64 {
         reader
             .get_mut()
             .set_read_timeout(Some(UPDATE_BODY_TIMEOUT))
             .map_err(io_err)?;
     }
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).map_err(io_err)?;
+    // Grow only as bytes arrive; an untrusted size must not reserve the
+    // entire update allowance before the sender transmits its body.
+    let mut body = Vec::new();
+    let received = reader
+        .take(content_length)
+        .read_to_end(&mut body)
+        .map_err(io_err)?;
+    if received as u64 != content_length {
+        bail!("connection closed inside the body");
+    }
     Ok(Some(Request {
         method,
         path,
@@ -162,6 +154,7 @@ pub fn write_bytes(
     content_type: &str,
     body: &[u8],
 ) -> Result<()> {
+    validate_header("Content-Type", content_type)?;
     let head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status,
@@ -182,6 +175,7 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         _ => "Status",
@@ -197,23 +191,48 @@ pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
     )
 }
 
-/// Accept forever, one thread per connection. `handler` sees the peer
+/// Accept forever, with a bounded number of active connections. `handler` sees the peer
 /// address so it can decide who is allowed to ask.
 pub fn serve<F>(listener: TcpListener, handler: F)
 where
     F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
 {
+    serve_with_peer_check(listener, |_| true, handler);
+}
+
+/// Authorize the peer before reading headers or allocating a request body.
+/// The check runs in a bounded connection worker, so it may perform I/O.
+pub fn serve_with_peer_check<A, F>(listener: TcpListener, authorize: A, handler: F)
+where
+    A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
+    F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
+{
     let handler = std::sync::Arc::new(handler);
+    let authorize = std::sync::Arc::new(authorize);
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for conn in listener.incoming() {
         let Ok(mut stream) = conn else { continue };
+        let Some(slot) = ConnectionSlot::acquire(&active) else {
+            // Closing immediately also bounds work on the accept thread.
+            continue;
+        };
         let handler = handler.clone();
+        let authorize = authorize.clone();
         std::thread::spawn(move || {
+            let _slot = slot;
             let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
             let _ = stream.set_write_timeout(Some(IDLE_TIMEOUT));
             let peer = match stream.peer_addr() {
                 Ok(p) => p,
                 Err(_) => return,
             };
+            if !authorize(peer) {
+                let _ = write_response(
+                    &mut stream,
+                    &Response::json(403, &crate::api::Ack::err("peer is not authorized")),
+                );
+                return;
+            }
             let resp = match read_request(&mut stream) {
                 Ok(Some(req)) => handler(peer, &req),
                 Ok(None) => return,
@@ -224,6 +243,27 @@ where
             };
             let _ = write_response(&mut stream, &resp);
         });
+    }
+}
+
+struct ConnectionSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ConnectionSlot {
+    fn acquire(active: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
+        active
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| (n < MAX_CONNECTIONS).then_some(n + 1),
+            )
+            .ok()
+            .map(|_| Self(active.clone()))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -298,8 +338,20 @@ pub fn exchange_with<S: Read + Write>(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<Response> {
+    validate_target(method, path)?;
+    validate_header("Host", host)?;
+    if host.is_empty() || host.bytes().any(|b| b.is_ascii_whitespace()) {
+        bail!("invalid host");
+    }
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
     for (k, v) in headers {
+        validate_header(k, v)?;
+        if ["host", "content-length", "transfer-encoding", "connection"]
+            .iter()
+            .any(|reserved| k.eq_ignore_ascii_case(reserved))
+        {
+            bail!("reserved request header {k}");
+        }
         head.push_str(&format!("{k}: {v}\r\n"));
     }
     head.push_str(&format!(
@@ -311,46 +363,202 @@ pub fn exchange_with<S: Read + Write>(
     stream.flush().map_err(io_err)?;
 
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(io_err)?;
-    let status: u16 = line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow!("bad status line: {line:?}"))?;
-    let mut content_length: Option<usize> = None;
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).map_err(io_err)? == 0 {
-            break;
-        }
-        let l = line.trim_end();
-        if l.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = l.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().ok();
-            }
-        }
-    }
+    let (status, headers) = read_response_head(&mut reader)?;
     let mut body = Vec::new();
-    match content_length {
-        Some(n) if n <= MAX_BODY => {
-            body.resize(n, 0);
-            reader.read_exact(&mut body).map_err(io_err)?;
-        }
-        Some(n) => bail!("reply too large ({n} bytes)"),
-        None => {
-            // TLS peers report a truncated close as an error after the data;
-            // the bytes read so far are the reply.
-            let _ = reader.take(MAX_BODY as u64).read_to_end(&mut body);
-        }
+    if method != "HEAD" && !matches!(status, 204 | 304) {
+        read_response_body(&mut reader, &headers, &mut body, MAX_BODY as u64, true)?;
     }
     Ok(Response {
         status,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
+}
+
+fn token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+pub(crate) fn validate_header(name: &str, value: &str) -> Result<()> {
+    if !token(name) || value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+        bail!("invalid HTTP header");
+    }
+    Ok(())
+}
+
+fn validate_target(method: &str, path: &str) -> Result<()> {
+    if !token(method)
+        || !path.starts_with('/')
+        || path
+            .bytes()
+            .any(|b| !b.is_ascii() || b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        bail!("invalid HTTP method or request target");
+    }
+    Ok(())
+}
+
+/// Read only within the remaining metadata budget, including before a
+/// newline arrives. `BufRead::read_line` alone can allocate without limit.
+fn read_line<R: BufRead>(reader: &mut R, remaining: &mut usize) -> Result<Option<String>> {
+    let mut line = String::new();
+    let n = reader
+        .take(*remaining as u64 + 1)
+        .read_line(&mut line)
+        .map_err(io_err)?;
+    if n > *remaining {
+        bail!("HTTP metadata too large");
+    }
+    *remaining -= n;
+    if n == 0 {
+        return Ok(None);
+    }
+    if !line.ends_with("\r\n") {
+        bail!("incomplete HTTP line");
+    }
+    line.truncate(line.len() - 2);
+    Ok(Some(line))
+}
+
+fn read_headers<R: BufRead>(r: &mut R, remaining: &mut usize) -> Result<Vec<(String, String)>> {
+    let mut headers = Vec::new();
+    loop {
+        let line = read_line(r, remaining)?.context("connection closed inside headers")?;
+        if line.is_empty() {
+            return Ok(headers);
+        }
+        let (name, value) = line.split_once(':').context("invalid HTTP header")?;
+        let value = value.trim_matches([' ', '\t']);
+        validate_header(name, value)?;
+        let name = name.to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "content-length" | "transfer-encoding" | "host" | "location"
+        ) && header(&headers, &name).is_some()
+        {
+            bail!("duplicate {name} header");
+        }
+        headers.push((name, value.to_string()));
+    }
+}
+
+pub(crate) fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn content_length(headers: &[(String, String)]) -> Result<Option<u64>> {
+    header(headers, "content-length")
+        .map(|value| {
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                bail!("invalid content-length");
+            }
+            value.parse().context("invalid content-length")
+        })
+        .transpose()
+}
+
+pub(crate) fn read_response_head<R: BufRead>(r: &mut R) -> Result<(u16, Vec<(String, String)>)> {
+    let mut remaining = MAX_HEADER;
+    // Bound interim replies with the same metadata budget.
+    loop {
+        let line = read_line(r, &mut remaining)?.context("connection closed before HTTP status")?;
+        let mut parts = line.splitn(3, ' ');
+        if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+            bail!("invalid HTTP version");
+        }
+        let code = parts.next().context("missing HTTP status")?;
+        if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            bail!("invalid HTTP status");
+        }
+        let status: u16 = code.parse()?;
+        if !(100..=599).contains(&status) || status == 101 {
+            bail!("unsupported HTTP status");
+        }
+        let headers = read_headers(r, &mut remaining)?;
+        if status >= 200 {
+            return Ok((status, headers));
+        }
+    }
+}
+
+pub(crate) fn read_response_body<R: BufRead>(
+    r: &mut R,
+    headers: &[(String, String)],
+    sink: &mut dyn Write,
+    limit: u64,
+    allow_tls_eof: bool,
+) -> Result<()> {
+    let length = content_length(headers)?;
+    if let Some(encoding) = header(headers, "transfer-encoding") {
+        if length.is_some() || !encoding.eq_ignore_ascii_case("chunked") {
+            bail!("ambiguous or unsupported HTTP body framing");
+        }
+        let mut total = 0u64;
+        let mut metadata = MAX_HEADER;
+        loop {
+            let line =
+                read_line(r, &mut metadata)?.context("connection closed inside a chunked body")?;
+            let size_hex = line.split(';').next().unwrap_or("");
+            if size_hex.is_empty() || !size_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                bail!("invalid HTTP chunk size");
+            }
+            let size = u64::from_str_radix(size_hex, 16).context("invalid HTTP chunk size")?;
+            total = total
+                .checked_add(size)
+                .filter(|n| *n <= limit)
+                .context("reply too large")?;
+            if size == 0 {
+                read_headers(r, &mut metadata)?;
+                return Ok(());
+            }
+            copy_exact(r, sink, size)?;
+            let mut ending = [0; 2];
+            r.read_exact(&mut ending).map_err(io_err)?;
+            if ending != *b"\r\n" {
+                bail!("invalid HTTP chunk terminator");
+            }
+            // Chunk headers need their own bounded budget, but valid large
+            // downloads can contain more than 16 KiB of chunk sizes overall.
+            metadata = MAX_HEADER;
+        }
+    }
+    if let Some(length) = length {
+        if length > limit {
+            bail!("reply too large ({length} bytes)");
+        }
+        return copy_exact(r, sink, length);
+    }
+    let mut remaining = limit;
+    let mut buffer = [0; 8192];
+    loop {
+        // Read one beyond the limit to distinguish a complete body from
+        // silent truncation, without writing that extra byte to the sink.
+        let available = buffer.len().min(remaining.saturating_add(1) as usize);
+        let n = match r.read(&mut buffer[..available]) {
+            Ok(0) => return Ok(()),
+            Ok(n) => n,
+            Err(e) if allow_tls_eof && e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(io_err(e)),
+        };
+        if n as u64 > remaining {
+            bail!("reply too large");
+        }
+        sink.write_all(&buffer[..n]).map_err(io_err)?;
+        remaining -= n as u64;
+    }
+}
+
+fn copy_exact<R: Read>(r: &mut R, sink: &mut dyn Write, length: u64) -> Result<()> {
+    let copied = std::io::copy(&mut r.take(length), sink).map_err(io_err)?;
+    if copied != length {
+        bail!("connection closed after {copied} of {length} bytes");
+    }
+    Ok(())
 }
 
 /// GET `path` and decode the JSON reply.

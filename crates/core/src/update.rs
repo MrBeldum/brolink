@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
@@ -230,6 +230,33 @@ pub fn download(asset: &Asset, token: Option<&str>, dest: &Path) -> Result<()> {
     std::fs::rename(&tmp, dest).with_context(|| dest.display().to_string())
 }
 
+/// Check that `path` holds exactly the bytes the release describes. A cached
+/// download is only as trustworthy as this check: the file may have been
+/// truncated or replaced since it was written.
+pub fn verify_asset(asset: &Asset, path: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(path).with_context(|| path.display().to_string())?;
+    let mut sink = Hashing {
+        inner: &mut std::io::sink(),
+        sha: Sha256::new(),
+        written: 0,
+    };
+    std::io::copy(&mut file, &mut sink)?;
+    if asset.size > 0 && sink.written != asset.size {
+        bail!(
+            "{} is {} bytes, the release says {}",
+            asset.name,
+            sink.written,
+            asset.size
+        );
+    }
+    if let Some(want) = &asset.sha256 {
+        if !hex(&sink.sha.finalize()).eq_ignore_ascii_case(want) {
+            bail!("{} does not match its published SHA-256", asset.name);
+        }
+    }
+    Ok(())
+}
+
 struct Hashing<'a, W: Write> {
     inner: &'a mut W,
     sha: Sha256,
@@ -280,9 +307,9 @@ pub fn fetch(url: &str, token: Option<&str>, accept: &str, sink: &mut dyn Write)
             .map_err(crate::http::io_err)?;
         tls.flush().map_err(crate::http::io_err)?;
         let mut reader = BufReader::new(tls);
-        let (status, headers) = read_head(&mut reader)?;
+        let (status, headers) = crate::http::read_response_head(&mut reader)?;
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            let loc = header(&headers, "location")
+            let loc = crate::http::header(&headers, "location")
                 .ok_or_else(|| anyhow!("redirect without a location"))?;
             url = if loc.starts_with("https://") {
                 loc.to_string()
@@ -293,7 +320,9 @@ pub fn fetch(url: &str, token: Option<&str>, accept: &str, sink: &mut dyn Write)
             };
             continue;
         }
-        read_body(&mut reader, &headers, sink)?;
+        // TLS peers report a truncated close as an error after the data;
+        // the bytes read so far are the reply.
+        crate::http::read_response_body(&mut reader, &headers, sink, MAX_DOWNLOAD, true)?;
         return Ok(status);
     }
     bail!("too many redirects")
@@ -312,92 +341,6 @@ fn split_url(url: &str) -> Result<(String, String)> {
         bail!("{url:?} has no host");
     }
     Ok((host.to_string(), path.to_string()))
-}
-
-fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_str())
-}
-
-/// Status line and headers; header names come back lowercase.
-fn read_head<R: BufRead>(r: &mut R) -> Result<(u16, Vec<(String, String)>)> {
-    let mut line = String::new();
-    r.read_line(&mut line).map_err(crate::http::io_err)?;
-    let status: u16 = line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow!("bad status line: {line:?}"))?;
-    let mut headers = Vec::new();
-    loop {
-        line.clear();
-        if r.read_line(&mut line).map_err(crate::http::io_err)? == 0 {
-            bail!("connection closed inside headers");
-        }
-        let l = line.trim_end();
-        if l.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = l.split_once(':') {
-            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
-        }
-    }
-    Ok((status, headers))
-}
-
-/// The body as the headers describe it: chunked, sized, or to the end.
-fn read_body<R: BufRead>(
-    r: &mut R,
-    headers: &[(String, String)],
-    sink: &mut dyn Write,
-) -> Result<()> {
-    let chunked = header(headers, "transfer-encoding")
-        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
-    if chunked {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if r.read_line(&mut line).map_err(crate::http::io_err)? == 0 {
-                bail!("connection closed inside a chunked body");
-            }
-            let size_hex = line.trim().split(';').next().unwrap_or("").trim();
-            let size = u64::from_str_radix(size_hex, 16)
-                .with_context(|| format!("chunk size {size_hex:?}"))?;
-            if size == 0 {
-                // Trailers, then the blank line.
-                loop {
-                    line.clear();
-                    if r.read_line(&mut line).map_err(crate::http::io_err)? == 0
-                        || line.trim_end().is_empty()
-                    {
-                        break;
-                    }
-                }
-                return Ok(());
-            }
-            if size > MAX_DOWNLOAD {
-                bail!("chunk of {size} bytes is too large");
-            }
-            std::io::copy(&mut r.take(size), sink).map_err(crate::http::io_err)?;
-            line.clear();
-            r.read_line(&mut line).map_err(crate::http::io_err)?; // the CRLF after the chunk
-        }
-    }
-    match header(headers, "content-length").and_then(|v| v.parse::<u64>().ok()) {
-        Some(n) if n > MAX_DOWNLOAD => bail!("reply of {n} bytes is too large"),
-        Some(n) => {
-            let copied = std::io::copy(&mut r.take(n), sink).map_err(crate::http::io_err)?;
-            if copied != n {
-                bail!("connection closed after {copied} of {n} bytes");
-            }
-        }
-        None => {
-            std::io::copy(&mut r.take(MAX_DOWNLOAD), sink).map_err(crate::http::io_err)?;
-        }
-    }
-    Ok(())
 }
 
 fn connect(host: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
@@ -438,6 +381,7 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
 
     const RELEASE: &str = r#"{
       "tag_name": "v3.1.0", "prerelease": false,
@@ -483,7 +427,19 @@ mod tests {
         assert!(split_url("http://h/").is_err());
         assert!(split_url("https:///x").is_err());
         let h = vec![("location".to_string(), "https://o/x".to_string())];
-        assert_eq!(header(&h, "Location"), Some("https://o/x"));
+        assert_eq!(crate::http::header(&h, "Location"), Some("https://o/x"));
+    }
+
+    fn read_head<R: BufRead>(r: &mut R) -> Result<(u16, Vec<(String, String)>)> {
+        crate::http::read_response_head(r)
+    }
+
+    fn read_body<R: BufRead>(
+        r: &mut R,
+        headers: &[(String, String)],
+        sink: &mut dyn Write,
+    ) -> Result<()> {
+        crate::http::read_response_body(r, headers, sink, MAX_DOWNLOAD, true)
     }
 
     #[test]
@@ -492,7 +448,10 @@ mod tests {
         let mut r = BufReader::new(&raw[..]);
         let (status, headers) = read_head(&mut r).unwrap();
         assert_eq!(status, 200);
-        assert_eq!(header(&headers, "content-type"), Some("text/plain"));
+        assert_eq!(
+            crate::http::header(&headers, "content-type"),
+            Some("text/plain")
+        );
         let mut out = Vec::new();
         read_body(&mut r, &headers, &mut out).unwrap();
         assert_eq!(out, b"hello, world");
@@ -534,6 +493,29 @@ mod tests {
         assert!(!host_can_receive_update(&Version::new(3, 0, 1)));
         assert!(host_can_receive_update(&Version::new(3, 1, 0)));
         assert!(host_can_receive_update(&Version::new(3, 2, 0)));
+    }
+
+    #[test]
+    fn a_cached_asset_is_rechecked_before_use() {
+        let dir = std::env::temp_dir().join(format!("brolink-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut asset = Asset {
+            name: "x.bin".into(),
+            url: String::new(),
+            size: 3,
+            sha256: Some(sha256_hex(b"abc").to_uppercase()),
+        };
+        assert!(verify_asset(&asset, &path).is_ok());
+        assert!(verify_asset(&asset, &dir.join("missing")).is_err());
+        std::fs::write(&path, b"abd").unwrap();
+        assert!(verify_asset(&asset, &path).is_err());
+        asset.sha256 = None;
+        assert!(verify_asset(&asset, &path).is_ok());
+        std::fs::write(&path, b"abcd").unwrap();
+        assert!(verify_asset(&asset, &path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
