@@ -238,7 +238,7 @@ fn poll_loop(ip: Ipv4Addr, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, ct
 /// Whether the window should offer a paste at all: `Event::Paste` carries
 /// text only when the Mac's clipboard holds some.
 pub fn worth_sending(text: &str) -> bool {
-    !text.trim().is_empty()
+    !text.is_empty()
 }
 
 #[cfg(test)]
@@ -261,7 +261,8 @@ mod tests {
         assert!(ran.load(Ordering::Relaxed));
         assert_eq!(s.pastes_done(), 1);
         assert!(worth_sending("x"));
-        assert!(!worth_sending("  \n"));
+        assert!(worth_sending("  \n"), "whitespace is valid clipboard text");
+        assert!(!worth_sending(""));
         assert!(s.take_incoming().is_none());
         s.shared.lock().incoming = Some("from pc".into());
         assert_eq!(s.take_incoming().as_deref(), Some("from pc"));

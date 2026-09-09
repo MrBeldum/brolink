@@ -314,8 +314,21 @@ fn text_button(
         let fg = paint(ui, &response, rect);
         let pos = rect.center() - galley.size() / 2.0;
         ui.painter().galley(pos, galley, fg);
+        focus_ring(ui, &response, RADIUS);
     }
     response
+}
+
+/// Keep keyboard navigation visible for controls with custom painting.
+fn focus_ring(ui: &Ui, response: &Response, radius: u8) {
+    if response.has_focus() && ui.is_enabled() {
+        ui.painter().rect_stroke(
+            response.rect.shrink(2.0),
+            CornerRadius::same(radius.saturating_sub(2)),
+            stroke(2.0, P.text),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 /// The one accent-filled button on a screen.
@@ -480,6 +493,7 @@ pub fn segmented<T: PartialEq + Copy>(
             .rect(seg, corner, fill, Stroke::NONE, StrokeKind::Inside);
         ui.painter()
             .galley(seg.center() - galley.size() / 2.0, galley, fg);
+        focus_ring(ui, &resp, RADIUS);
     }
     if visible {
         ui.painter().rect_stroke(
@@ -494,13 +508,18 @@ pub fn segmented<T: PartialEq + Copy>(
 
 /// An on/off switch. Returns the response; `changed()` fires on toggle.
 pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    labelled_toggle(ui, on, "")
+}
+
+fn labelled_toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let size = Vec2::new(40.0, 22.0);
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
     }
-    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, ""));
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, label));
     if ui.is_rect_visible(rect) {
         let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
         let enabled = ui.is_enabled();
@@ -526,6 +545,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
         let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
         ui.painter()
             .circle_filled(egui::pos2(x, rect.center().y), radius - 4.0, knob);
+        focus_ring(ui, &response, radius as u8);
     }
     response
 }
@@ -608,7 +628,9 @@ pub fn setting_row<R>(
 
 /// A [`setting_row`] whose control is a [`toggle`]. Returns true on change.
 pub fn toggle_row(ui: &mut Ui, on: &mut bool, label: &str, hint: Option<&str>) -> bool {
-    setting_row(ui, label, hint, |ui| toggle(ui, on).changed())
+    setting_row(ui, label, hint, |ui| {
+        labelled_toggle(ui, on, label).changed()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -628,7 +650,8 @@ pub fn list_row(ui: &mut Ui, title: &str, detail: &str, actions: impl FnOnce(&mu
                     .color(P.muted),
             )
             .truncate(),
-        );
+        )
+        .on_hover_text(detail);
     });
 }
 

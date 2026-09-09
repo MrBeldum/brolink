@@ -85,6 +85,25 @@ unsafe fn args<'a>(
     if key_len != 16 || iv_len < 0 || input_len < 0 || tag_len < 0 {
         return None;
     }
+    // The C callers use separate source and destination buffers. Reject
+    // overlapping ranges before creating shared and exclusive references.
+    let output_range = (output as usize, out_cap);
+    let tag_range = (
+        tag as usize,
+        if tag.is_null() { 0 } else { tag_len as usize },
+    );
+    let inputs = [
+        (key as usize, 16),
+        (iv as usize, iv_len as usize),
+        (input as usize, input_len as usize),
+    ];
+    if inputs
+        .iter()
+        .any(|&range| overlaps(range, output_range) || overlaps(range, tag_range))
+        || overlaps(output_range, tag_range)
+    {
+        return None;
+    }
     Some(Args {
         key: std::slice::from_raw_parts(key, 16),
         iv: std::slice::from_raw_parts(iv, iv_len as usize),
@@ -93,6 +112,10 @@ unsafe fn args<'a>(
         input: std::slice::from_raw_parts(input, input_len as usize),
         output: std::slice::from_raw_parts_mut(output, out_cap),
     })
+}
+
+fn overlaps((a, a_len): (usize, usize), (b, b_len): (usize, usize)) -> bool {
+    a_len != 0 && b_len != 0 && a < b.saturating_add(b_len) && b < a.saturating_add(a_len)
 }
 
 fn padded_len(n: usize) -> usize {
@@ -144,6 +167,8 @@ fn gcm(a: &mut Args<'_>, encrypt: bool) -> Option<usize> {
 /// # Safety
 /// Pointer arguments follow the contract in moonlight-common-c's
 /// `PlatformCrypto.h`; `output` holds at least the padded input length.
+/// `ctx` and `output_len` are valid and disjoint from all byte buffers.
+/// Overlapping source, destination, and tag buffers are rejected.
 #[no_mangle]
 pub unsafe extern "C" fn PltEncryptMessage(
     ctx: *mut c_void,
@@ -163,40 +188,29 @@ pub unsafe extern "C" fn PltEncryptMessage(
     if ctx.is_null() || output_len.is_null() {
         return false;
     }
+    *output_len = 0;
+    if input.is_null() || input_len < 0 {
+        return false;
+    }
     let ctx = &mut *(ctx as *mut Context);
-    let mut in_len = input_len.max(0) as usize;
-    if algorithm == ALGORITHM_AES_CBC && flags & CIPHER_FLAG_PAD_TO_BLOCK_SIZE != 0 {
-        // The caller's buffer is sized for this and may be modified.
-        let padded = padded_len(in_len);
-        let pad = (padded - in_len) as u8;
-        let buf = std::slice::from_raw_parts_mut(input, padded);
-        for b in &mut buf[in_len..] {
-            *b = if pad == 0 { 16 } else { pad };
-        }
-        in_len = padded;
+    let in_len = input_len as usize;
+    let out_len = if algorithm == ALGORITHM_AES_CBC && flags & CIPHER_FLAG_PAD_TO_BLOCK_SIZE != 0 {
+        padded_len(in_len)
+    } else {
+        in_len
+    };
+    if out_len > c_int::MAX as usize {
+        return false;
     }
     let Some(mut a) = args(
-        key,
-        key_len,
-        iv,
-        iv_len,
-        tag,
-        tag_len,
-        input,
-        in_len as c_int,
-        output,
-        if algorithm == ALGORITHM_AES_CBC {
-            padded_len(in_len)
-        } else {
-            in_len
-        },
+        key, key_len, iv, iv_len, tag, tag_len, input, input_len, output, out_len,
     ) else {
         return false;
     };
     let n = match algorithm {
         ALGORITHM_AES_GCM => gcm(&mut a, true),
         ALGORITHM_AES_CBC => {
-            if a.iv.len() != 16 || !in_len.is_multiple_of(16) {
+            if a.iv.len() != 16 || !out_len.is_multiple_of(16) {
                 None
             } else {
                 if ctx.cbc_enc.is_none() || flags & CIPHER_FLAG_RESET_IV != 0 {
@@ -206,15 +220,19 @@ pub unsafe extern "C" fn PltEncryptMessage(
                     ));
                 }
                 let enc = ctx.cbc_enc.as_mut().unwrap();
-                let out = &mut a.output[..in_len];
-                out.copy_from_slice(a.input);
+                let out = &mut a.output[..out_len];
+                out[..in_len].copy_from_slice(a.input);
+                // Match moonlight's block-rounding convention: aligned
+                // input gets no extra block. Padding belongs in output;
+                // input needs only its advertised readable length.
+                out[in_len..].fill((out_len - in_len) as u8);
                 for block in out.as_chunks_mut::<16>().0 {
                     enc.encrypt_block_mut(GenericArray::from_mut_slice(block));
                 }
                 if flags & CIPHER_FLAG_FINISH != 0 {
                     ctx.cbc_enc = None;
                 }
-                Some(in_len)
+                Some(out_len)
             }
         }
         _ => None,
@@ -249,22 +267,10 @@ pub unsafe extern "C" fn PltDecryptMessage(
     if ctx.is_null() || output_len.is_null() {
         return false;
     }
+    *output_len = 0;
     let in_len = input_len.max(0) as usize;
     let Some(mut a) = args(
-        key,
-        key_len,
-        iv,
-        iv_len,
-        tag,
-        tag_len,
-        input,
-        input_len,
-        output,
-        if algorithm == ALGORITHM_AES_CBC {
-            padded_len(in_len)
-        } else {
-            in_len
-        },
+        key, key_len, iv, iv_len, tag, tag_len, input, input_len, output, in_len,
     ) else {
         return false;
     };

@@ -226,14 +226,14 @@ fn updates_dir(rel: &Release) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The asset on disk, downloading it if needed. A file that exists was
-/// verified when it was written.
+/// Recheck cached assets before using them: an interrupted download or a
+/// modified cache must never become an executable update.
 fn fetch_asset(rel: &Release, name: &str, token: Option<&str>) -> Result<PathBuf> {
     let asset = rel
         .asset(name)
         .ok_or_else(|| anyhow!("release {} has no {name}", rel.tag))?;
     let dest = updates_dir(rel)?.join(name);
-    if !dest.exists() {
+    if update::verify_asset(asset, &dest).is_err() {
         update::download(asset, token, &dest)?;
     }
     Ok(dest)
@@ -326,38 +326,62 @@ fn install_self(rel: &Release) -> Result<()> {
     let bundle = bundle_path().ok_or_else(|| anyhow!("not running from an app bundle"))?;
     let new = updates_dir(rel)?.join("unpacked").join("BroLink.app");
     anyhow::ensure!(new.exists(), "nothing is downloaded");
-    let parked = bundle.with_extension("old");
-    let _ = std::fs::remove_dir_all(&parked);
-    std::fs::rename(&bundle, &parked)
-        .with_context(|| format!("move {} aside", bundle.display()))?;
-    let moved = std::fs::rename(&new, &bundle).or_else(|_| {
-        // Another volume: copy instead.
+    replace_bundle(&bundle, &new, |new, staged| {
         run(
             "/usr/bin/ditto",
-            &[&new.display().to_string(), &bundle.display().to_string()],
+            &[&new.display().to_string(), &staged.display().to_string()],
         )
         .map(|_| ())
-    });
-    if let Err(e) = moved {
-        let _ = std::fs::rename(&parked, &bundle);
-        return Err(e).context("put the new app in place");
-    }
+    })?;
     let _ = run(
         "/usr/bin/xattr",
         &["-dr", "com.apple.quarantine", &bundle.display().to_string()],
     );
-    let _ = std::fs::remove_dir_all(&parked);
     let _ = std::fs::remove_dir_all(updates_dir(rel)?.join("unpacked"));
     Ok(())
+}
+
+/// Stage on the destination volume before moving the running app. A failed
+/// cross-volume copy leaves the working app untouched, and the final swaps
+/// are both same-volume renames.
+fn replace_bundle(
+    bundle: &std::path::Path,
+    new: &std::path::Path,
+    copy: impl FnOnce(&std::path::Path, &std::path::Path) -> Result<()>,
+) -> Result<()> {
+    let parent = bundle
+        .parent()
+        .ok_or_else(|| anyhow!("app has no parent"))?;
+    let stage = parent.join(format!(".brolink-update-{:016x}", rand::random::<u64>()));
+    std::fs::create_dir(&stage).context("create update staging directory")?;
+    let staged = stage.join("BroLink.app");
+    let parked = stage.join("previous.app");
+    let outcome = (|| -> Result<()> {
+        copy(new, &staged).context("stage the new app")?;
+        std::fs::rename(bundle, &parked).context("move the current app aside")?;
+        if let Err(e) = std::fs::rename(&staged, bundle) {
+            std::fs::rename(&parked, bundle).with_context(|| {
+                format!(
+                    "restore the previous app; backup remains at {}",
+                    parked.display()
+                )
+            })?;
+            return Err(e).context("put the new app in place");
+        }
+        Ok(())
+    })();
+    // If rollback failed, keep the previous app so it can be recovered.
+    if outcome.is_ok() || !parked.exists() {
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+    outcome
 }
 
 /// Start the new copy and leave. `open` goes through LaunchServices, so the
 /// new instance gets a proper app launch rather than inheriting this one.
 fn relaunch() {
     if let Some(bundle) = bundle_path() {
-        let script = format!("sleep 1; /usr/bin/open \"{}\"", bundle.display());
-        let _ = std::process::Command::new("/bin/sh")
-            .args(["-c", &script])
+        let _ = relaunch_command(&bundle)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -367,15 +391,22 @@ fn relaunch() {
     std::process::exit(0);
 }
 
-/// `brolink-host.exe` out of the Windows zip, kept beside it.
+fn relaunch_command(bundle: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new("/bin/sh");
+    // The bundle is an argument, never shell source (paths can contain $, ",
+    // backticks and newlines). $0 is a diagnostic command name.
+    command.args([
+        "-c",
+        "sleep 1; exec /usr/bin/open \"$1\"",
+        "brolink-relaunch",
+    ]);
+    command.arg(bundle);
+    command
+}
+
+/// Extract `brolink-host.exe` from the verified Windows archive. An extracted
+/// cache has no published digest, so never trust one from an earlier run.
 pub(crate) fn host_exe(rel: &Release, token: Option<&str>) -> Result<Vec<u8>> {
-    let dir = updates_dir(rel)?;
-    let exe = dir.join(HOST_EXE);
-    if let Ok(bytes) = std::fs::read(&exe) {
-        if bytes.len() > 1024 * 1024 {
-            return Ok(bytes);
-        }
-    }
     let zip = fetch_asset(rel, WINDOWS_ASSET, token)?;
     let out = std::process::Command::new("/usr/bin/unzip")
         .args(["-p", &zip.display().to_string(), HOST_EXE])
@@ -384,7 +415,6 @@ pub(crate) fn host_exe(rel: &Release, token: Option<&str>) -> Result<Vec<u8>> {
     if !out.status.success() || out.stdout.len() < 1024 * 1024 {
         bail!("{} holds no {HOST_EXE}", WINDOWS_ASSET);
     }
-    std::fs::write(&exe, &out.stdout)?;
     Ok(out.stdout)
 }
 
@@ -474,6 +504,57 @@ pub fn ago(at: Option<Instant>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relaunch_keeps_shell_metacharacters_in_the_path_literal() {
+        let path = std::path::Path::new("/Applications/$(touch nope) \"quoted\" `name`.app");
+        let command = relaunch_command(path);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[1], "sleep 1; exec /usr/bin/open \"$1\"");
+        assert_eq!(args[3], path.as_os_str());
+    }
+
+    #[test]
+    fn a_partial_update_copy_preserves_the_working_app() {
+        let dir = std::env::temp_dir().join(format!("brolink-swap-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let bundle = dir.join("BroLink.app");
+        std::fs::create_dir(&bundle).unwrap();
+        std::fs::write(bundle.join("version"), "original").unwrap();
+        let outcome = replace_bundle(&bundle, &dir.join("download"), |_, staged| {
+            std::fs::create_dir(staged)?;
+            std::fs::write(staged.join("partial"), "incomplete")?;
+            bail!("disk full");
+        });
+        assert!(outcome.is_err());
+        assert_eq!(
+            std::fs::read_to_string(bundle.join("version")).unwrap(),
+            "original"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_staged_update_replaces_the_app_and_removes_the_backup() {
+        let dir = std::env::temp_dir().join(format!("brolink-swap-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let bundle = dir.join("BroLink.app");
+        std::fs::create_dir(&bundle).unwrap();
+        std::fs::write(bundle.join("version"), "original").unwrap();
+        replace_bundle(&bundle, &dir.join("download"), |_, staged| {
+            std::fs::create_dir(staged)?;
+            std::fs::write(staged.join("version"), "updated")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bundle.join("version")).unwrap(),
+            "updated"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_bundle_is_found_only_inside_an_app() {

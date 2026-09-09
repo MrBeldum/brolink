@@ -10,7 +10,7 @@
 //! service to let go of the port, and the old one exits after answering.
 
 use anyhow::{Context, Result};
-use brolink_core::api::{UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
+use brolink_core::api::{UPDATE_MAX_BYTES, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
 use brolink_core::http::Request;
 use brolink_core::update;
 use semver::Version;
@@ -77,7 +77,10 @@ pub fn stage(req: &Request, exe: &Path) -> Result<Version, Rejected> {
     let want = req
         .header(UPDATE_SHA256_HEADER)
         .ok_or_else(|| Rejected::Bad(format!("missing {UPDATE_SHA256_HEADER}")))?;
-    if req.body.len() < MIN_SIZE || !req.body.starts_with(b"MZ") {
+    if req.body.len() < MIN_SIZE
+        || req.body.len() > UPDATE_MAX_BYTES
+        || !is_host_executable(&req.body)
+    {
         return Err(Rejected::Bad(
             "the upload is not a Windows executable".into(),
         ));
@@ -92,6 +95,36 @@ pub fn stage(req: &Request, exe: &Path) -> Result<Version, Rejected> {
     std::fs::write(&path, &req.body)
         .map_err(|e| Rejected::Bad(format!("could not write {}: {e}", path.display())))?;
     Ok(version)
+}
+
+/// Validate the DOS/PE headers and executable architecture before touching
+/// the running host. A DOS `MZ` prefix alone also accepts corrupt files,
+/// 32-bit programs and DLLs, none of which can replace the x64 service.
+fn is_host_executable(bytes: &[u8]) -> bool {
+    if bytes.get(..2) != Some(b"MZ") {
+        return false;
+    }
+    let Some(offset) = bytes.get(0x3c..0x40) else {
+        return false;
+    };
+    let offset = u32::from_le_bytes(offset.try_into().unwrap()) as usize;
+    if offset < 0x40 {
+        return false;
+    }
+    let Some(header) = bytes.get(offset..).and_then(|b| b.get(..26)) else {
+        return false;
+    };
+    let sections = u16::from_le_bytes([header[6], header[7]]) as usize;
+    let optional_size = u16::from_le_bytes([header[20], header[21]]) as usize;
+    let flags = u16::from_le_bytes([header[22], header[23]]);
+    header[..4] == *b"PE\0\0"
+        && header[4..6] == [0x64, 0x86] // IMAGE_FILE_MACHINE_AMD64
+        && (1..=96).contains(&sections)
+        && optional_size >= 112
+        && flags & 0x0002 != 0 // IMAGE_FILE_EXECUTABLE_IMAGE
+        && flags & 0x2000 == 0 // IMAGE_FILE_DLL
+        && header[24..26] == [0x0b, 0x02] // PE32+
+        && bytes.get(offset..).is_some_and(|b| b.len() >= 24 + optional_size + sections * 40)
 }
 
 /// Swap the staged executable in and start it. The caller exits afterwards;
@@ -112,7 +145,7 @@ pub fn apply(exe: &Path) -> Result<()> {
     };
     rename_retry(exe, &old).context("retire the running executable")?;
     if let Err(e) = rename_retry(&new, exe) {
-        let _ = std::fs::rename(&old, exe);
+        rename_retry(&old, exe).context("restore the previous executable after a failed swap")?;
         return Err(e).context("move the new executable in");
     }
     let mut c = std::process::Command::new(exe);
@@ -127,7 +160,13 @@ pub fn apply(exe: &Path) -> Result<()> {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
     }
-    c.spawn().context("start the new service")?;
+    if let Err(e) = c.spawn() {
+        // Keep the old service installed if Windows cannot start the
+        // replacement. The current process is still serving requests.
+        rename_retry(exe, &new).context("move failed replacement aside")?;
+        rename_retry(&old, exe).context("restore previous executable after launch failure")?;
+        return Err(e).context("start the new service (previous executable restored)");
+    }
     Ok(())
 }
 
@@ -141,7 +180,15 @@ pub fn tidy(exe: &Path) {
     );
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
-            if e.file_name().to_string_lossy().starts_with(&prefix) {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let owned = name == prefix
+                || name
+                    .strip_prefix(&format!("{prefix}-"))
+                    .is_some_and(|suffix| {
+                        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                    });
+            if owned {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -196,7 +243,28 @@ mod tests {
         let mut b = vec![0u8; MIN_SIZE + 10];
         b[0] = b'M';
         b[1] = b'Z';
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        b[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        b[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+        b[0x96..0x98].copy_from_slice(&2u16.to_le_bytes());
+        b[0x98..0x9a].copy_from_slice(&0x020bu16.to_le_bytes());
         b
+    }
+
+    #[test]
+    fn corrupt_and_incompatible_executables_are_refused() {
+        assert!(is_host_executable(&fake_exe()));
+        for (offset, value) in [(0x80, 0), (0x84, 0), (0x86, 0), (0x97, 0x20), (0x99, 1)] {
+            let mut b = fake_exe();
+            b[offset] = value;
+            assert!(!is_host_executable(&b));
+        }
+        let mut b = fake_exe();
+        b[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!is_host_executable(&b));
+        assert!(!is_host_executable(b"MZ"));
     }
 
     #[test]
@@ -272,21 +340,24 @@ mod tests {
     }
 
     #[test]
-    fn apply_needs_a_staged_file_and_swaps_names() {
+    fn failed_launch_restores_the_previous_executable() {
         let dir = std::env::temp_dir().join(format!("brolink-swap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("brolink-host.exe");
         std::fs::write(&exe, b"old").unwrap();
         assert!(apply(&exe).is_err());
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
-        // With a staged file the names rotate; starting a text file as the
-        // new service fails here, but the files are already in place.
+        // A corrupt replacement must not leave a broken executable at
+        // the path Windows starts on the next logon.
         std::fs::write(staged(&exe), b"new").unwrap();
-        let _ = apply(&exe);
-        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
-        assert_eq!(std::fs::read(retired(&exe)).unwrap(), b"old");
+        assert!(apply(&exe).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert_eq!(std::fs::read(staged(&exe)).unwrap(), b"new");
+        std::fs::write(retired(&exe), b"retired").unwrap();
+        std::fs::write(dir.join("brolink-host.exe.old-notes"), b"keep").unwrap();
         tidy(&exe);
         assert!(!retired(&exe).exists());
+        assert!(dir.join("brolink-host.exe.old-notes").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

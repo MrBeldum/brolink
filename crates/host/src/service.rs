@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 const LOG_LINES: usize = 80;
 /// How long a `whois` answer is trusted before asking again.
 const AUTH_TTL: Duration = Duration::from_secs(60);
+const AUTH_CACHE_LIMIT: usize = 256;
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
 const NETCHECK_TICKS: u64 = 120;
@@ -44,6 +45,7 @@ pub struct Service {
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
+    update_running: Arc<AtomicBool>,
 }
 
 impl Service {
@@ -59,6 +61,7 @@ impl Service {
             auth: Mutex::new(HashMap::new()),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
+            update_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -112,7 +115,12 @@ impl Service {
             self.log(format!("not listening for wake packets: {e:#}"));
         }
         let handler = self.clone();
-        http::serve(listener, move |peer, req| handler.handle(peer, req));
+        let authorizer = self.clone();
+        http::serve_with_peer_check(
+            listener,
+            move |peer| authorizer.authorized(peer.ip()),
+            move |peer, req| handler.handle(peer, req),
+        );
         Ok(())
     }
 
@@ -293,7 +301,7 @@ impl Service {
     /// A magic packet arrived while awake: remember when, for the status.
     fn wake_packet(&self, mac: brolink_core::wake::MacAddr, from: SocketAddr) {
         let own = self.wake.lock().mac.clone();
-        if own.is_some_and(|o| o != mac.to_string()) {
+        if own.as_deref() != Some(mac.to_string().as_str()) {
             return;
         }
         let mut seen = self.wake_seen.lock();
@@ -371,7 +379,8 @@ impl Service {
             return false;
         }
         let me = match &*self.tailscale.lock() {
-            Ok(s) => s.self_node.user_id,
+            Ok(s) if s.self_node.user_id != 0 => s.self_node.user_id,
+            Ok(_) => return false,
             Err(_) => return false,
         };
         let now = Instant::now();
@@ -403,7 +412,18 @@ impl Service {
                         None
                     }
                 };
-                self.auth.lock().insert(ip, (now, u));
+                let mut cache = self.auth.lock();
+                cache.retain(|_, (at, _)| at.elapsed() < AUTH_TTL);
+                if cache.len() >= AUTH_CACHE_LIMIT {
+                    if let Some(oldest) = cache
+                        .iter()
+                        .min_by_key(|(_, (at, _))| *at)
+                        .map(|(ip, _)| *ip)
+                    {
+                        cache.remove(&oldest);
+                    }
+                }
+                cache.insert(ip, (Instant::now(), u));
                 u
             }
         };
@@ -411,6 +431,17 @@ impl Service {
     }
 
     fn handle(&self, peer: SocketAddr, req: &Request) -> Response {
+        // The API is for native clients. Deny browser requests even when
+        // DNS rebinding makes a malicious page appear same-origin.
+        if req.header("origin").is_some()
+            || req.header("sec-fetch-site").is_some()
+            || req.header("host").is_some_and(|host| !control_host(host))
+        {
+            return Response::json(
+                403,
+                &Ack::err("browser access to the control API is disabled"),
+            );
+        }
         if !self.authorized(peer.ip()) {
             return Response::json(
                 403,
@@ -462,15 +493,22 @@ impl Service {
     /// A newer `brolink-host.exe` from the Mac: stage it, answer, then swap
     /// it in and hand over. See [`crate::update`].
     fn update(&self, req: &Request) -> Response {
+        if self.update_running.swap(true, Ordering::AcqRel) {
+            return Response::json(409, &Ack::err("an update is already being installed"));
+        }
         let exe = match std::env::current_exe() {
             Ok(e) => e,
-            Err(e) => return Response::json(500, &Ack::err(format!("own path unknown: {e}"))),
+            Err(e) => {
+                self.update_running.store(false, Ordering::Release);
+                return Response::json(500, &Ack::err(format!("own path unknown: {e}")));
+            }
         };
         match update::stage(req, &exe) {
             Ok(version) => {
                 self.log(format!(
                     "updating to {version}: the Mac sent the new BroLink Host"
                 ));
+                let running = self.update_running.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(500));
                     match update::apply(&exe) {
@@ -478,12 +516,16 @@ impl Service {
                             tracing::info!("handing over to {version}");
                             std::process::exit(0);
                         }
-                        Err(e) => tracing::error!("update to {version} failed: {e:#}"),
+                        Err(e) => {
+                            tracing::error!("update to {version} failed: {e:#}");
+                            running.store(false, Ordering::Release);
+                        }
                     }
                 });
                 Response::json(200, &Ack::ok())
             }
             Err(r) => {
+                self.update_running.store(false, Ordering::Release);
                 self.log(format!("update refused: {}", r.message()));
                 Response::json(r.status(), &Ack::err(r.message()))
             }
@@ -591,7 +633,23 @@ fn sent_by_brolink(req: &Request) -> bool {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    ct.starts_with("application/json") || ct.starts_with("application/octet-stream")
+    matches!(
+        ct.split(';').next().unwrap_or("").trim(),
+        "application/json" | "application/octet-stream"
+    )
+}
+
+/// Native callers use numeric addresses (the Windows installer also uses
+/// localhost). A page hosted on an attacker-controlled name must never be
+/// able to rebind that name to the control service.
+fn control_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case(&format!("localhost:{CONTROL_PORT}")) {
+        return true;
+    }
+    host.parse::<SocketAddr>().is_ok_and(|addr| {
+        addr.port() == CONTROL_PORT
+            && (addr.ip().is_loopback() || matches!(addr.ip(), IpAddr::V4(ip) if is_tailnet(ip)))
+    })
 }
 
 /// Tailscale hands out addresses from 100.64.0.0/10.
@@ -611,6 +669,62 @@ mod tests {
         assert!(is_tailnet("100.64.0.10".parse().unwrap()));
         assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
         assert!(!is_tailnet("192.168.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn browsers_and_rebound_hostnames_cannot_read_or_write_the_api() {
+        let svc = Service::new();
+        let local = "127.0.0.1:5".parse().unwrap();
+        for header in [
+            ("origin", "http://example.com"),
+            ("sec-fetch-site", "same-origin"),
+            ("host", "attacker.example:47850"),
+            ("host", "127.0.0.1:80"),
+        ] {
+            let req = Request {
+                method: "GET".into(),
+                path: CLIPBOARD_PATH.into(),
+                headers: vec![(header.0.into(), header.1.into())],
+                ..Default::default()
+            };
+            assert_eq!(svc.handle(local, &req).status, 403);
+        }
+        for host in [
+            "127.0.0.1:47850",
+            "localhost:47850",
+            "100.64.0.10:47850",
+            "[::1]:47850",
+        ] {
+            assert!(control_host(host), "{host}");
+        }
+        let req = Request {
+            headers: vec![("content-type".into(), "application/json-not-really".into())],
+            ..Default::default()
+        };
+        assert!(!sent_by_brolink(&req));
+    }
+
+    #[test]
+    fn updates_are_serialized_and_a_rejected_upload_releases_the_slot() {
+        let svc = Service::new();
+        let req = Request::default();
+        svc.update_running.store(true, Ordering::Release);
+        assert_eq!(svc.update(&req).status, 409);
+        svc.update_running.store(false, Ordering::Release);
+        assert_eq!(svc.update(&req).status, 400);
+        assert!(!svc.update_running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn wake_evidence_requires_a_known_matching_adapter() {
+        let svc = Service::new();
+        let mac = brolink_core::wake::MacAddr::parse("02:00:00:00:00:01").unwrap();
+        let from = "192.168.1.2:9".parse().unwrap();
+        svc.wake_packet(mac, from);
+        assert!(svc.wake_seen.lock().is_none());
+        svc.wake.lock().mac = Some(mac.to_string());
+        svc.wake_packet(mac, from);
+        assert!(svc.wake_seen.lock().is_some());
     }
 
     #[test]

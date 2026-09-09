@@ -165,7 +165,6 @@ fn mask_of(keys: &[i16]) -> i8 {
 pub struct Held {
     keys: BTreeSet<i16>,
     buttons: BTreeSet<i32>,
-    modifiers: Modifiers,
 }
 
 impl Held {
@@ -190,25 +189,36 @@ impl Held {
     /// Turn modifier changes into key presses. Cmd maps to Ctrl or the
     /// Windows key.
     pub fn modifiers(&mut self, input: &Input, now: Modifiers, cmd_is_ctrl: bool) {
-        let was = self.modifiers;
-        self.modifiers = now;
-        let cmd_vk = if cmd_is_ctrl { VK_CONTROL } else { VK_LWIN };
-        for (before, after, vk) in [
-            (was.shift, now.shift, VK_SHIFT),
-            (was.ctrl, now.ctrl, VK_CONTROL),
-            (was.alt, now.alt, VK_MENU),
-            (was.mac_cmd, now.mac_cmd, cmd_vk),
-        ] {
-            if before != after {
-                self.key(input, vk, after);
-            }
+        for (vk, down) in self.modifier_changes(now, cmd_is_ctrl) {
+            self.key(input, vk, down);
         }
+    }
+
+    /// Compare the effective remote keys, since Cmd and Ctrl can share one
+    /// key. This also releases the old key if the mapping changes mid-hold.
+    fn modifier_changes(&self, now: Modifiers, cmd_is_ctrl: bool) -> Vec<(i16, bool)> {
+        [
+            (VK_SHIFT, now.shift),
+            (VK_CONTROL, now.ctrl || (now.mac_cmd && cmd_is_ctrl)),
+            (VK_MENU, now.alt),
+            (VK_LWIN, now.mac_cmd && !cmd_is_ctrl),
+        ]
+        .into_iter()
+        .filter(|(vk, down)| self.keys.contains(vk) != *down)
+        .collect()
     }
 
     /// The modifier byte Moonlight wants alongside every key event.
     pub fn mask(&self) -> i8 {
-        let keys: Vec<i16> = self.keys.iter().copied().collect();
-        mask_of(&keys)
+        [
+            (VK_SHIFT, MODIFIER_SHIFT),
+            (VK_CONTROL, MODIFIER_CTRL),
+            (VK_MENU, MODIFIER_ALT),
+            (VK_LWIN, MODIFIER_META),
+        ]
+        .into_iter()
+        .filter(|(vk, _)| self.keys.contains(vk))
+        .fold(0, |mask, (_, bit)| mask | bit)
     }
 
     pub fn release_all(&mut self, input: &Input) {
@@ -218,7 +228,6 @@ impl Held {
         for b in std::mem::take(&mut self.buttons) {
             input.mouse_button(b, false);
         }
-        self.modifiers = Modifiers::NONE;
     }
 
     /// Press a chord and release it, e.g. Ctrl+Alt+Del. A key that is
@@ -250,6 +259,54 @@ impl Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_and_control_share_one_remote_control_key() {
+        let mut held = Held::default();
+        held.keys.insert(VK_CONTROL);
+        // Releasing either physical key must leave Ctrl down for the other.
+        for now in [
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                mac_cmd: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                ctrl: true,
+                mac_cmd: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            assert!(held.modifier_changes(now, true).is_empty());
+        }
+        assert_eq!(
+            held.modifier_changes(Modifiers::NONE, true),
+            [(VK_CONTROL, false)]
+        );
+    }
+
+    #[test]
+    fn changing_command_mapping_releases_the_previous_remote_key() {
+        let mut held = Held::default();
+        held.keys.insert(VK_CONTROL);
+        let command = Modifiers {
+            mac_cmd: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            held.modifier_changes(command, false),
+            [(VK_CONTROL, false), (VK_LWIN, true)]
+        );
+        held.keys.clear();
+        held.keys.insert(VK_LWIN);
+        assert_eq!(
+            held.modifier_changes(command, true),
+            [(VK_CONTROL, true), (VK_LWIN, false)]
+        );
+    }
 
     #[test]
     fn a_chord_leaves_held_modifiers_alone() {

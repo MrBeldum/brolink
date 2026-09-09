@@ -506,13 +506,17 @@ impl HostApp {
             ui::row_separator(ui);
             ui.horizontal(|ui| {
                 if ui::danger_button(ui, "Stop the background service").clicked() {
-                    let _ = http::request(
-                        ("127.0.0.1", CONTROL_PORT),
-                        "POST",
-                        "/v1/quit",
-                        None,
-                        Duration::from_secs(2),
-                    );
+                    // Off the UI thread: the service may take a moment to
+                    // answer, and the window must not freeze meanwhile.
+                    std::thread::spawn(|| {
+                        let _ = http::request(
+                            ("127.0.0.1", CONTROL_PORT),
+                            "POST",
+                            "/v1/quit",
+                            None,
+                            Duration::from_secs(2),
+                        );
+                    });
                     let mut s = self.shared.lock();
                     s.status = None;
                     s.service_error =
