@@ -4,6 +4,52 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## 3.1.1 (2026-09-09)
+
+A hardening release: both apps parse the network more strictly, update
+themselves more carefully, and the stream validates what the PC sends
+before acting on it. Nothing changes in how you use BroLink.
+
+### Control API
+
+- Requests and replies are read within a fixed size budget, must use
+  proper HTTP line endings and versions, and are refused when they carry
+  chunked encoding, duplicate framing headers or a malformed
+  `Content-Length`. Bodies grow only as bytes arrive.
+- BroLink Host checks who is asking before it reads a single header,
+  keeps at most sixteen connections open, and turns away browser
+  requests (including ones a rebound hostname makes look local).
+
+### Updates
+
+- The Mac rechecks a cached download against the SHA-256 and size GitHub
+  publishes before installing it, stages the new app on the same volume
+  so a failed copy cannot leave a half-installed app, and no longer
+  passes its own path through a shell when relaunching.
+- BroLink Host accepts only a 64-bit Windows executable image, installs
+  one update at a time, and puts the previous executable back if the new
+  one fails to start.
+- BroLink Host no longer rewrites the Windows power plan every few
+  seconds; **Keep this PC awake while plugged in** now does exactly that.
+
+### Stream
+
+- Audio parameters and channel mappings from the PC are validated before
+  any buffer is allocated or libopus is called.
+- The encryption shim refuses overlapping buffers and writes padding to
+  its output instead of the caller's input.
+- A failed pairing restores the previous pairing state.
+- Holding ⌘ and Ctrl together keeps Ctrl held on the PC when either is
+  released.
+
+### Interface
+
+- Buttons, segments and toggles show a focus ring when reached from the
+  keyboard, and toggles carry their label for assistive technology.
+- Long details in lists show in full on hover.
+- The host's **Stop the background service** button no longer freezes
+  the window while it waits.
+
 ## 3.1.0 (2026-09-09)
 
 Both apps now keep themselves current, the Mac says why a PC is slow and
