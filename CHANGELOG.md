@@ -16,6 +16,11 @@ GitHub release notes, so each version gets a heading of the form
   when video stops. Stream overlays no longer pass clicks through to the PC.
 - VideoToolbox callback errors now request a recovery frame and recreate
   failed decoder sessions, just like synchronous decode errors.
+- The PC's display report now answers why a capture is black: whether any
+  monitor hardware is present, whether the session is locked, how bright the
+  PC's own desktop is (as sampled numbers, never an image), and Sunshine's
+  full capture settings and log tail. Each part reports its own failure
+  rather than losing the whole report.
 - The live video test now checks for a visible picture, with a separate
   mode that verifies the black-picture notice and restart action. Synthetic
   video tests cover the Mac decoder and GPU renderer.
