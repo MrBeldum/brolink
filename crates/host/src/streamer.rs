@@ -141,45 +141,38 @@ pub struct Api<'a> {
 }
 
 impl Api<'_> {
-    /// Only display-related settings are exposed; the Sunshine login stays
-    /// on the PC. The log tail is useful when no picture can be captured.
+    /// Everything Sunshine will say about its own capture, minus the login
+    /// it is protected by. `/api/logs` answers with plain text, so the tail
+    /// is taken from the raw body rather than a JSON field.
     pub fn display_diagnostics(&self) -> serde_json::Value {
         let mut result = serde_json::Map::new();
         match self.call("GET", "/api/config", None) {
-            Ok(config) => {
-                for key in [
-                    "output_name",
-                    "adapter_name",
-                    "capture",
-                    "encoder",
-                    "hevc_mode",
-                    "dd_configuration_option",
-                    "dd_resolution_option",
-                    "dd_refresh_rate_option",
-                ] {
-                    if let Some(value) = config.get(key) {
-                        result.insert(key.into(), value.clone());
-                    }
-                }
+            Ok(serde_json::Value::Object(config)) => {
+                let kept = config
+                    .into_iter()
+                    .filter(|(k, _)| !is_secret(k))
+                    .collect::<serde_json::Map<_, _>>();
+                result.insert("config".into(), kept.into());
+            }
+            Ok(other) => {
+                result.insert("config".into(), other);
             }
             Err(e) => {
                 result.insert("config_error".into(), e.to_string().into());
             }
         }
-        match self.call("GET", "/api/logs", None) {
+        match self.raw("GET", "/api/logs") {
             Ok(log) => {
-                if let Some(log) = log.get("logs").and_then(|l| l.as_str()) {
-                    let tail = log
-                        .lines()
-                        .rev()
-                        .take(100)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    result.insert("log".into(), tail.into());
-                }
+                // Some builds wrap the log in JSON, others return the file.
+                let text = serde_json::from_str::<serde_json::Value>(log.trim())
+                    .ok()
+                    .and_then(|v| {
+                        ["content", "logs", "log"]
+                            .iter()
+                            .find_map(|k| v.get(*k).and_then(|l| l.as_str()).map(String::from))
+                    })
+                    .unwrap_or(log);
+                result.insert("log".into(), tail(&text, 150).into());
             }
             Err(e) => {
                 result.insert("log_error".into(), e.to_string().into());
@@ -189,6 +182,15 @@ impl Api<'_> {
     }
 
     fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value> {
+        parse_reply(&self.request(method, path, body)?)
+    }
+
+    /// A GET whose reply is read as text: not every endpoint answers JSON.
+    fn raw(&self, method: &str, path: &str) -> Result<String> {
+        self.request(method, path, None)
+    }
+
+    fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
         let mut c = Command::new("curl.exe");
         c.args([
             "-sk",
@@ -211,8 +213,7 @@ impl Api<'_> {
         if !out.status.success() {
             bail!("curl: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        parse_reply(&text)
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// True when the saved login is accepted.
@@ -290,6 +291,21 @@ fn pending_pairings(reply: Option<serde_json::Value>) -> Vec<Option<String>> {
     } else {
         ids
     }
+}
+
+/// Sunshine's config carries its own web login and the pairing secrets.
+/// Display diagnostics travel to the Mac, so those keys never leave the PC.
+fn is_secret(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    ["pass", "user", "salt", "token", "key", "cert", "secret", "pin"]
+        .iter()
+        .any(|needle| k.contains(needle))
+}
+
+/// The last `lines` lines: a capture failure is at the end of the log.
+fn tail(text: &str, lines: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
 }
 
 fn parse_reply(text: &str) -> Result<serde_json::Value> {
@@ -404,6 +420,38 @@ mod tests {
             pending_pairings(Some(master)),
             vec![Some("a".to_string()), Some("b".to_string())]
         );
+    }
+
+    #[test]
+    fn diagnostics_keep_the_capture_settings_and_drop_the_login() {
+        assert!(is_secret("username"));
+        assert!(is_secret("password"));
+        assert!(is_secret("origin_web_ui_allowed_pass"));
+        assert!(is_secret("salt"));
+        assert!(is_secret("pkey"));
+        assert!(is_secret("cert"));
+        for keep in [
+            "output_name",
+            "adapter_name",
+            "capture",
+            "encoder",
+            "hevc_mode",
+            "dd_configuration_option",
+            "resolutions",
+        ] {
+            assert!(!is_secret(keep), "{keep} is what the diagnosis needs");
+        }
+    }
+
+    #[test]
+    fn the_log_tail_is_the_end_of_the_log() {
+        let log = (1..=200).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let cut = tail(&log, 150);
+        assert!(cut.starts_with("51\n52\n"), "{}", &cut[..8]);
+        assert!(cut.ends_with("\n200"));
+        assert_eq!(cut.lines().count(), 150);
+        assert_eq!(tail("one\ntwo", 150), "one\ntwo");
+        assert_eq!(tail("", 150), "");
     }
 
     #[test]
