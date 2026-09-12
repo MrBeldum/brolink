@@ -426,6 +426,8 @@ impl Target {
 pub struct Connect {
     pub target: Target,
     pub settings: StreamSettings,
+    /// Reset Sunshine's Desktop capture instead of resuming a broken one.
+    pub restart_capture: bool,
     pub native: (u32, u32),
     pub progress: Arc<Mutex<Progress>>,
     pub live: Arc<Mutex<Option<Live>>>,
@@ -580,10 +582,28 @@ fn run(c: &Connect) -> Result<()> {
         .or_else(|| apps.iter().find(|a| a.title == "Desktop"))
         .or_else(|| apps.first())
         .ok_or_else(|| anyhow!("Sunshine on {} offers nothing to stream", t.name))?;
-    if info.current_game != 0 && info.current_game != app.id {
-        let _ = client.quit();
-        std::thread::sleep(Duration::from_millis(500));
-        info = client.server_info()?;
+    if info.current_game != 0
+        && (info.current_game != app.id
+            || (c.restart_capture && app.title.eq_ignore_ascii_case("Desktop")))
+    {
+        client.quit()?;
+        let stopped = Instant::now();
+        loop {
+            if cancelled(&c.progress) {
+                bail!("cancelled");
+            }
+            info = client.server_info()?;
+            if info.current_game == 0 {
+                break;
+            }
+            if stopped.elapsed() >= Duration::from_secs(10) {
+                bail!(
+                    "Sunshine did not stop the previous stream. Check Sunshine on {}.",
+                    t.name
+                );
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
     let (w, h) = settings.resolution.pixels(c.native);
     let fps = settings.fps;

@@ -46,6 +46,7 @@ pub struct ClientApp {
     last_pc: Option<Pc>,
     /// Connect again as soon as the current stream has stopped.
     reconnect: Option<Pc>,
+    restart_capture: bool,
     /// An install of BroLink Host through the stream, while it runs and a
     /// little after.
     handover: Option<Handover>,
@@ -95,6 +96,7 @@ impl ClientApp {
             updates: Arc::default(),
             last_pc: None,
             reconnect: None,
+            restart_capture: false,
             handover: None,
         }
     }
@@ -127,6 +129,7 @@ impl ClientApp {
         session::connect(Connect {
             target,
             settings: self.cfg.stream.clone(),
+            restart_capture: std::mem::take(&mut self.restart_capture),
             native: Self::native_pixels(ctx),
             progress: self.progress.clone(),
             live: self.live.clone(),
@@ -308,6 +311,11 @@ impl eframe::App for ClientApp {
                 for a in actions {
                     match a {
                         Action::Disconnect => self.disconnect(),
+                        Action::RestartStream => {
+                            self.restart_capture = true;
+                            self.reconnect = self.last_pc.clone();
+                            self.disconnect();
+                        }
                         Action::Power(action) => self.power(ip, &name, action),
                         Action::Fullscreen(on) => {
                             self.set_fullscreen(ctx, on);
@@ -1433,6 +1441,7 @@ mod live_snapshot {
     #[test]
     #[ignore = "needs a paired Sunshine on this machine and a GPU"]
     fn stream_snapshot() {
+        let _ = tracing_subscriber::fmt().with_target(false).try_init();
         let disc = Arc::new(Mutex::new(Discovery::default()));
         let prog = Arc::new(Mutex::new(Progress::default()));
         let mut harness = egui_kittest::Harness::builder()
@@ -1445,39 +1454,84 @@ mod live_snapshot {
                 move |cc| {
                     let mut app = ClientApp::with_shared(cc, disc, prog, false);
                     app.cfg.stream.fullscreen = false;
-                    app.cfg.stream.resolution = Resolution::P1080;
-                    app.cfg.stream.codec = Codec::H264;
+                    if std::env::var_os("BROLINK_TEST_PC").is_none() {
+                        app.cfg.stream.resolution = Resolution::P1080;
+                        app.cfg.stream.codec = Codec::H264;
+                    }
+                    if let Ok(codec) = std::env::var("BROLINK_TEST_CODEC") {
+                        app.cfg.stream.codec = match codec.as_str() {
+                            "h264" => Codec::H264,
+                            "hevc" => Codec::Hevc,
+                            _ => panic!("BROLINK_TEST_CODEC must be h264 or hevc"),
+                        };
+                    }
                     app
                 }
             });
         harness.run_steps(2);
-        let pc = Pc {
-            node_id: "local".into(),
-            name: "GAMING-PC".into(),
-            ip: Some("127.0.0.1".parse().unwrap()),
-            online: true,
-            sunshine: true,
-            known: Some(KnownPc {
-                server_cert: std::fs::read(
-                    std::env::temp_dir().join("brolink-pair-test/server.der"),
-                )
-                .ok()
-                .map(|d| brolink_stream::nvhttp::hex(&d)),
+        let pc = if let Ok(name) = std::env::var("BROLINK_TEST_PC") {
+            let cfg = ClientConfig::load();
+            let (id, known) = cfg
+                .pcs
+                .iter()
+                .find(|(id, pc)| **id == name || pc.name == name)
+                .expect("BROLINK_TEST_PC must name a saved PC");
+            Pc {
+                node_id: id.clone(),
+                name: known.name.clone(),
+                ip: Some(known.tailscale_ip.as_ref().unwrap().parse().unwrap()),
+                online: true,
+                sunshine: true,
+                known: Some(known.clone()),
                 ..Default::default()
-            }),
-            ..Default::default()
+            }
+        } else {
+            Pc {
+                node_id: "local".into(),
+                name: "GAMING-PC".into(),
+                ip: Some("127.0.0.1".parse().unwrap()),
+                online: true,
+                sunshine: true,
+                known: Some(KnownPc {
+                    server_cert: std::fs::read(
+                        std::env::temp_dir().join("brolink-pair-test/server.der"),
+                    )
+                    .ok()
+                    .map(|d| brolink_stream::nvhttp::hex(&d)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
         };
         let ctx = harness.ctx.clone();
         harness.state_mut().connect(&ctx, &pc);
         let start = Instant::now();
         let mut shot = 0;
-        while start.elapsed() < Duration::from_secs(10) {
+        let mut decoded = 0;
+        let mut black = None;
+        let mut problem = None;
+        while start.elapsed() < Duration::from_secs(20) {
             harness.run_steps(1);
             let step = prog.lock().step.clone();
             if let Step::Ended { error } = step {
                 panic!("ended: {error:?}");
             }
-            if step == Step::Streaming && start.elapsed() > Duration::from_secs(3) && shot == 0 {
+            if let Some(live) = harness.state().live.lock().as_ref() {
+                decoded = live.frames.seq();
+            }
+            if step == Step::Streaming
+                && decoded > 30
+                && start.elapsed() > Duration::from_secs(15)
+                && shot == 0
+            {
+                if let Some(live) = harness.state().live.lock().as_ref() {
+                    problem = live.session.stats().video_problem;
+                    if let Some(frame) = live.frames.take() {
+                        black = Some(frame.is_black());
+                        eprintln!("black picture: {black:?}; video problem: {problem:?}");
+                        live.frames.publish(frame);
+                    }
+                }
                 let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../target/ui-snapshots");
                 std::fs::create_dir_all(&dir).unwrap();
@@ -1491,7 +1545,25 @@ mod live_snapshot {
             }
             std::thread::sleep(Duration::from_millis(16));
         }
-        assert_eq!(shot, 1, "never streamed: {:?}", prog.lock().step);
+        eprintln!("decoded {decoded} frames");
+        let expect_black = std::env::var_os("BROLINK_TEST_EXPECT_BLACK").is_some();
+        let mut restarted = !expect_black;
+        if expect_black && black == Some(true) {
+            use egui_kittest::kittest::Queryable;
+            let before = harness.state().live.lock().as_ref().unwrap().started;
+            harness.get_by_label("Restart stream").click();
+            let restart = Instant::now();
+            while restart.elapsed() < Duration::from_secs(25) {
+                harness.run_steps(1);
+                if let Some(live) = harness.state().live.lock().as_ref() {
+                    if live.started > before && live.session.connected() && live.frames.seq() > 30 {
+                        restarted = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         harness.state_mut().disconnect();
         let t = Instant::now();
         while harness.state().live.lock().is_some() && t.elapsed() < Duration::from_secs(8) {
@@ -1499,5 +1571,23 @@ mod live_snapshot {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(harness.state().live.lock().is_none(), "stream did not stop");
+        assert_eq!(shot, 1, "never decoded video: {:?}", prog.lock().step);
+        assert!(decoded > 60, "too few decoded frames: {decoded}");
+        if expect_black {
+            assert_eq!(black, Some(true));
+            assert!(problem
+                .as_deref()
+                .is_some_and(|p| p.contains("black picture")));
+            assert!(
+                restarted,
+                "Restart stream did not establish a new video session"
+            );
+        } else {
+            assert_eq!(
+                black,
+                Some(false),
+                "the host supplied no visible picture: {problem:?}"
+            );
+        }
     }
 }

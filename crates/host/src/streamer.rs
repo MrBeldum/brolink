@@ -141,6 +141,53 @@ pub struct Api<'a> {
 }
 
 impl Api<'_> {
+    /// Only display-related settings are exposed; the Sunshine login stays
+    /// on the PC. The log tail is useful when no picture can be captured.
+    pub fn display_diagnostics(&self) -> serde_json::Value {
+        let mut result = serde_json::Map::new();
+        match self.call("GET", "/api/config", None) {
+            Ok(config) => {
+                for key in [
+                    "output_name",
+                    "adapter_name",
+                    "capture",
+                    "encoder",
+                    "hevc_mode",
+                    "dd_configuration_option",
+                    "dd_resolution_option",
+                    "dd_refresh_rate_option",
+                ] {
+                    if let Some(value) = config.get(key) {
+                        result.insert(key.into(), value.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                result.insert("config_error".into(), e.to_string().into());
+            }
+        }
+        match self.call("GET", "/api/logs", None) {
+            Ok(log) => {
+                if let Some(log) = log.get("logs").and_then(|l| l.as_str()) {
+                    let tail = log
+                        .lines()
+                        .rev()
+                        .take(100)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    result.insert("log".into(), tail.into());
+                }
+            }
+            Err(e) => {
+                result.insert("log_error".into(), e.to_string().into());
+            }
+        }
+        result.into()
+    }
+
     fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value> {
         let mut c = Command::new("curl.exe");
         c.args([

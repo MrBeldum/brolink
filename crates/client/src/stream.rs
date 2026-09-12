@@ -26,6 +26,7 @@ const TOAST_FOR: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Disconnect,
+    RestartStream,
     Power(PowerAction),
     Fullscreen(bool),
     ToggleCmd,
@@ -230,7 +231,11 @@ impl View {
                     ui.painter().text(
                         c + Vec2::new(0.0, 36.0),
                         egui::Align2::CENTER_CENTER,
-                        format!("Connecting to {}…", live.pc),
+                        if live.session.connected() {
+                            format!("Waiting for video from {}…", live.pc)
+                        } else {
+                            format!("Connecting to {}…", live.pc)
+                        },
                         egui::FontId::proportional(15.0),
                         P.muted,
                     );
@@ -250,7 +255,14 @@ impl View {
         if let Some(rect) = bar_rect {
             self.toolbar(ctx, rect, floating, env, &mut actions);
         }
-        self.toasts(ctx, screen, bar_rect, env);
+        self.toasts(
+            ctx,
+            screen,
+            bar_rect,
+            env,
+            stats.video_problem.as_deref(),
+            &mut actions,
+        );
 
         self.input(ctx, live, env.cfg, video, bar_rect);
         actions
@@ -287,9 +299,10 @@ impl View {
                     ui.set_min_height(rect.height());
                     ui.horizontal_centered(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
+                        let s = live.session.stats();
                         let tone = if !live.session.connected() {
                             Tone::Accent
-                        } else if self.poor {
+                        } else if self.poor || s.video_problem.is_some() {
                             Tone::Danger
                         } else {
                             Tone::Success
@@ -300,7 +313,6 @@ impl View {
                                 .font(brolink_ui::theme::medium(13.5))
                                 .color(P.text),
                         );
-                        let s = live.session.stats();
                         let (w, h) = if s.width > 0 {
                             (s.width, s.height)
                         } else {
@@ -586,7 +598,15 @@ impl View {
     }
 
     /// Short notices under the toolbar: clipboard, connection, an install.
-    fn toasts(&mut self, ctx: &egui::Context, screen: Rect, bar: Option<Rect>, env: &Env<'_>) {
+    fn toasts(
+        &mut self,
+        ctx: &egui::Context,
+        screen: Rect,
+        bar: Option<Rect>,
+        env: &Env<'_>,
+        video_problem: Option<&str>,
+        actions: &mut Vec<Action>,
+    ) {
         self.toasts.retain(|t| t.at.elapsed() < TOAST_FOR);
         let mut lines: Vec<(Tone, String)> = self
             .toasts
@@ -599,7 +619,7 @@ impl View {
         if let Some(n) = env.live.clipboard.note() {
             lines.push((Tone::Neutral, n));
         }
-        if lines.is_empty() {
+        if lines.is_empty() && video_problem.is_none() {
             return;
         }
         ctx.request_repaint_after(Duration::from_millis(500));
@@ -607,9 +627,18 @@ impl View {
         egui::Area::new(Id::new("stream-toasts"))
             .fixed_pos(Pos2::new(screen.center().x - 260.0, top))
             .order(egui::Order::Foreground)
-            .interactable(false)
+            .interactable(video_problem.is_some())
             .show(ctx, |ui| {
                 ui.set_width(520.0);
+                if let Some(problem) = video_problem {
+                    ui::overlay_frame().show(ui, |ui| {
+                        ui.set_width(496.0);
+                        ui.label(RichText::new(problem).color(P.text));
+                        if ui::ghost_button(ui, "Restart stream").clicked() {
+                            actions.push(Action::RestartStream);
+                        }
+                    });
+                }
                 for (tone, text) in lines {
                     ui::overlay_frame().show(ui, |ui| {
                         ui.set_width(496.0);
@@ -706,7 +735,15 @@ impl View {
         let popup = ctx.memory(|m| m.any_popup_open());
         let overlay = self.confirm.is_some() || self.confirm_install;
         let over_bar = pointer.is_some_and(|p| bar.is_some_and(|b| b.contains(p)));
-        let over_video = pointer.is_some_and(|p| video.contains(p)) && !over_bar && !popup;
+        let over_overlay = pointer.is_some_and(|p| {
+            ctx.layer_id_at(p)
+                .is_some_and(|layer| layer.order > egui::Order::Background)
+        });
+        let over_video = pointer.is_some_and(|p| video.contains(p))
+            && !over_bar
+            && !popup
+            && !overlay
+            && !over_overlay;
         let keys_to_pc =
             focused && !ctx.wants_keyboard_input() && !popup && !overlay && input.connected();
         let ppp = ctx.pixels_per_point();

@@ -350,3 +350,58 @@ pub fn install(render_state: &egui_wgpu::RenderState) {
     let res = Resources::new(&render_state.device, render_state.target_format);
     render_state.renderer.write().callback_resources.insert(res);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn decoded_frame_reaches_the_render_target() {
+        struct TestApp(Arc<FrameSlot>);
+        impl eframe::App for TestApp {
+            fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                    .show(ctx, |ui| {
+                        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                            ui.max_rect(),
+                            Paint {
+                                frames: self.0.clone(),
+                            },
+                        ));
+                    });
+            }
+        }
+        let frames = Arc::new(FrameSlot::default());
+        frames.publish(brolink_stream::Frame {
+            width: 64,
+            height: 64,
+            y: (0..64)
+                .flat_map(|row| vec![if row < 32 { 235 } else { 16 }; 64])
+                .collect(),
+            y_stride: 64,
+            uv: vec![128; 64 * 32],
+            uv_stride: 64,
+            full_range: false,
+        });
+        let mut harness = egui_kittest::Harness::builder()
+            .wgpu()
+            .with_size(egui::vec2(128.0, 128.0))
+            .build_eframe(move |cc| {
+                install(cc.wgpu_render_state.as_ref().unwrap());
+                TestApp(frames)
+            });
+        harness.run_steps(2);
+        for _ in 0..2 {
+            let image = harness.render().unwrap();
+            let top = image.get_pixel(64, 32);
+            let bottom = image.get_pixel(64, 96);
+            assert!(top.0[..3].iter().all(|&c| c >= 250), "white half: {top:?}");
+            assert!(
+                bottom.0[..3].iter().all(|&c| c <= 5),
+                "black half: {bottom:?}"
+            );
+        }
+    }
+}

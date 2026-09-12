@@ -316,8 +316,15 @@ impl Drop for VideoToolbox {
     }
 }
 
-/// Runs inside `VTDecompressionSessionDecodeFrame`; copies the picture out
-/// into the `Option<Frame>` passed as the frame refcon.
+#[derive(Default)]
+struct Decoded {
+    frame: Option<Frame>,
+    status: OSStatus,
+    error: Option<&'static str>,
+}
+
+/// Runs inside `VTDecompressionSessionDecodeFrame`. The callback has its
+/// own status: successful submission does not guarantee successful decode.
 unsafe extern "C" fn output(
     _decoder_refcon: *mut c_void,
     frame_refcon: *mut c_void,
@@ -327,14 +334,23 @@ unsafe extern "C" fn output(
     _pts: CMTime,
     _duration: CMTime,
 ) {
-    if status != 0 || image.is_null() || frame_refcon.is_null() {
+    if frame_refcon.is_null() {
         return;
     }
-    let out = &mut *(frame_refcon as *mut Option<Frame>);
-    if CVPixelBufferGetPlaneCount(image) < 2 {
+    let out = &mut *(frame_refcon as *mut Decoded);
+    out.status = status;
+    if status != 0 || image.is_null() {
+        return;
+    }
+    let format = CVPixelBufferGetPixelFormatType(image);
+    if CVPixelBufferGetPlaneCount(image) != 2
+        || !matches!(format, K_CV_PIXEL_FORMAT_420V | K_CV_PIXEL_FORMAT_420F)
+    {
+        out.error = Some("VideoToolbox returned a non-NV12 picture");
         return;
     }
     if CVPixelBufferLockBaseAddress(image, K_CV_LOCK_READ_ONLY) != 0 {
+        out.error = Some("VideoToolbox picture could not be read");
         return;
     }
     let w = CVPixelBufferGetWidthOfPlane(image, 0);
@@ -347,15 +363,17 @@ unsafe extern "C" fn output(
     if !yp.is_null() && !uvp.is_null() {
         let y = std::slice::from_raw_parts(yp, ys * h).to_vec();
         let uv = std::slice::from_raw_parts(uvp, uvs * uvh).to_vec();
-        *out = Some(Frame {
+        out.frame = Some(Frame {
             width: w as u32,
             height: h as u32,
             y,
             y_stride: ys,
             uv,
             uv_stride: uvs,
-            full_range: CVPixelBufferGetPixelFormatType(image) == K_CV_PIXEL_FORMAT_420F,
+            full_range: format == K_CV_PIXEL_FORMAT_420F,
         });
+    } else {
+        out.error = Some("VideoToolbox picture has no pixel data");
     }
     CVPixelBufferUnlockBaseAddress(image, K_CV_LOCK_READ_ONLY);
 }
@@ -385,7 +403,7 @@ impl Decoder for VideoToolbox {
             return Ok(None);
         }
         let len = self.avcc.len();
-        let mut frame: Option<Frame> = None;
+        let mut decoded = Decoded::default();
         unsafe {
             let mut block: CMBlockBufferRef = ptr::null();
             let status = CMBlockBufferCreateWithMemoryBlock(
@@ -428,10 +446,11 @@ impl Decoder for VideoToolbox {
                 self.session,
                 sample,
                 0,
-                &mut frame as *mut Option<Frame> as *mut c_void,
+                &mut decoded as *mut Decoded as *mut c_void,
                 ptr::null_mut(),
             );
             CFRelease(sample);
+            let status = if status != 0 { status } else { decoded.status };
             if status != 0 {
                 // -12903 kVTInvalidSessionErr, -12911 kVTVideoDecoderMalfunctionErr
                 if status == -12903 || status == -12911 {
@@ -443,7 +462,10 @@ impl Decoder for VideoToolbox {
                 return Err(anyhow!("decode failed ({status})"));
             }
         }
-        Ok(frame)
+        if let Some(error) = decoded.error {
+            bail!("{error}");
+        }
+        Ok(decoded.frame)
     }
 
     fn name(&self) -> &'static str {
@@ -452,5 +474,49 @@ impl Decoder for VideoToolbox {
         } else {
             "VideoToolbox H.264"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_visible_pixels_from_h264() {
+        // 64x64, white top half and black bottom half, generated with OpenH264.
+        let encoded = include_bytes!("../../tests/fixtures/gray-bars.h264");
+        let mut decoder = VideoToolbox::new(crate::ffi::VIDEO_FORMAT_H264, 64, 64).unwrap();
+        let frame = decoder
+            .decode(encoded, true)
+            .unwrap()
+            .expect("decoded picture");
+        assert_eq!((frame.width, frame.height), (64, 64));
+        assert!(!frame.is_black());
+        assert!(frame.y[16 * frame.y_stride + 32] >= 230);
+        assert!(frame.y[48 * frame.y_stride + 32] <= 20);
+    }
+
+    #[test]
+    fn preserves_callback_errors_when_no_picture_is_returned() {
+        let mut decoded = Decoded::default();
+        let time = CMTime {
+            value: 0,
+            timescale: 1,
+            flags: 1,
+            epoch: 0,
+        };
+        unsafe {
+            output(
+                ptr::null_mut(),
+                &mut decoded as *mut Decoded as *mut c_void,
+                -12911,
+                0,
+                ptr::null(),
+                time,
+                time,
+            );
+        }
+        assert_eq!(decoded.status, -12911);
+        assert!(decoded.frame.is_none());
     }
 }

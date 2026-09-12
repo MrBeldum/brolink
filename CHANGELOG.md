@@ -4,6 +4,22 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- A connected stream that remains black now explains that the PC is sending
+  a black picture and needs an active physical or virtual display. Missing
+  video, frozen video, and decoder failures have separate persistent notices.
+- The notice offers **Restart stream**, which starts a fresh Desktop capture
+  instead of resuming the same broken capture. Failure to stop Sunshine's
+  previous session is reported instead of silently resuming the wrong app.
+- Frame rate and bitrate no longer remain frozen at their last good values
+  when video stops. Stream overlays no longer pass clicks through to the PC.
+- VideoToolbox callback errors now request a recovery frame and recreate
+  failed decoder sessions, just like synchronous decode errors.
+- The live video test now checks for a visible picture, with a separate
+  mode that verifies the black-picture notice and restart action. Synthetic
+  video tests cover the Mac decoder and GPU renderer.
+
 ## 3.1.1 (2026-09-09)
 
 A hardening release: both apps parse the network more strictly, update
