@@ -12,7 +12,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 static CONNECTION: Mutex<()> = Mutex::new(());
 
@@ -79,6 +79,49 @@ pub struct Stats {
     /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
     /// not; empty until the first second of video.
     pub audio: String,
+    /// Persistent video diagnosis, even while the transport is connected.
+    pub video_problem: Option<String>,
+}
+
+#[derive(Default)]
+struct VideoHealth {
+    connected_at: Option<Instant>,
+    last_frame: Option<Instant>,
+    black_since: Option<Instant>,
+    last_error: Option<String>,
+}
+
+impl VideoHealth {
+    fn frame(&mut self, now: Instant, black: bool) {
+        self.last_frame = Some(now);
+        self.last_error = None;
+        if black {
+            self.black_since.get_or_insert(now);
+        } else {
+            self.black_since = None;
+        }
+    }
+
+    fn problem(&self, now: Instant) -> Option<String> {
+        let connected = self.connected_at?;
+        if now.duration_since(self.last_frame.unwrap_or(connected)) >= Duration::from_secs(5) {
+            return Some(if let Some(error) = &self.last_error {
+                format!("Video cannot be decoded: {error}. Try restarting the stream or selecting H.264 in Settings.")
+            } else if self.last_frame.is_some() {
+                "Video stopped arriving from the PC. Try restarting the stream or lowering Quality."
+                    .into()
+            } else {
+                "Connected, but no video has arrived from the PC. Check its display and Sunshine, or restart the stream.".into()
+            });
+        }
+        if self
+            .black_since
+            .is_some_and(|since| now.duration_since(since) >= Duration::from_secs(5))
+        {
+            return Some("The PC is sending a black picture. Turn on its monitor or enable a virtual display on the PC, then check Sunshine’s selected display. You can also try restarting the stream.".into());
+        }
+        None
+    }
 }
 
 #[derive(Default)]
@@ -104,6 +147,7 @@ struct Inner {
     audio_warned: AtomicBool,
     window: Mutex<Window>,
     stats: Mutex<Stats>,
+    video_health: Mutex<VideoHealth>,
     connected: AtomicBool,
     finished: AtomicBool,
     /// Set when the connection ended or a stop was asked for.
@@ -245,6 +289,7 @@ impl Session {
             audio_warned: AtomicBool::new(false),
             window: Mutex::new(Window::default()),
             stats: Mutex::new(Stats::default()),
+            video_health: Mutex::new(VideoHealth::default()),
             connected: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             done: Mutex::new(false),
@@ -277,7 +322,20 @@ impl Session {
     }
 
     pub fn stats(&self) -> Stats {
-        self.inner.stats.lock().clone()
+        let mut stats = self.inner.stats.lock().clone();
+        let health = self.inner.video_health.lock();
+        let now = Instant::now();
+        if health
+            .last_frame
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(2))
+        {
+            stats.fps = 0.0;
+            stats.mbps = 0.0;
+        }
+        if self.connected() {
+            stats.video_problem = health.problem(now);
+        }
+        stats
     }
 
     /// A handle for sending input from other threads.
@@ -451,6 +509,10 @@ unsafe extern "C" fn video_frame(
     drop(guard);
     match result {
         Ok(Some(frame)) => {
+            inner
+                .video_health
+                .lock()
+                .frame(Instant::now(), frame.is_black());
             inner.frames.publish(frame);
             account(inner, len as u64, decode_us, host_latency);
             (inner.wake)();
@@ -458,7 +520,12 @@ unsafe extern "C" fn video_frame(
         }
         Ok(None) => ffi::DR_OK,
         Err(e) => {
-            tracing::warn!("decode: {e:#}");
+            let error = format!("{e:#}");
+            let mut health = inner.video_health.lock();
+            if health.last_error.as_ref() != Some(&error) {
+                tracing::warn!("decode: {error}");
+            }
+            health.last_error = Some(error);
             ffi::DR_NEED_IDR
         }
     }
@@ -632,6 +699,7 @@ unsafe extern "C" fn stage(p: *mut c_void, stage: c_int, state: c_int, error: c_
 
 unsafe extern "C" fn connected(p: *mut c_void) {
     let inner = ctx(p);
+    inner.video_health.lock().connected_at = Some(Instant::now());
     inner.connected.store(true, Ordering::Release);
     inner.emit(Event::Connected);
 }
@@ -679,6 +747,32 @@ pub fn termination_message(code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_health_distinguishes_missing_black_frozen_and_recovered_video() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let mut h = VideoHealth::default();
+        assert!(
+            h.problem(at(20)).is_none(),
+            "connection setup has no video deadline"
+        );
+        h.connected_at = Some(start);
+        assert!(h.problem(at(4)).is_none());
+        assert!(h.problem(at(5)).unwrap().contains("no video"));
+        h.frame(at(5), true);
+        h.frame(at(9), true);
+        assert!(h.problem(at(9)).is_none());
+        assert!(h.problem(at(10)).unwrap().contains("black picture"));
+        h.frame(at(11), false);
+        assert!(h.problem(at(11)).is_none());
+        assert!(h.problem(at(16)).unwrap().contains("stopped arriving"));
+        h.last_error = Some("decode failed (-12911)".into());
+        assert!(h.problem(at(17)).unwrap().contains("-12911"));
+        h.frame(at(18), false);
+        assert!(h.problem(at(18)).is_none());
+        assert!(h.last_error.is_none());
+    }
 
     #[test]
     fn text_is_typed_in_small_pieces_between_characters() {

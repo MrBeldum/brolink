@@ -12,6 +12,7 @@
 mod app;
 mod clipboard;
 mod config;
+mod display;
 mod power;
 mod service;
 mod setup;

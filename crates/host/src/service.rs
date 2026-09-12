@@ -464,6 +464,20 @@ impl Service {
         let local = peer.ip().is_loopback();
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
+            ("GET", "/v1/display") => {
+                let cfg = self.cfg.lock().clone();
+                let windows = crate::display::probe()
+                    .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+                let sunshine = Api {
+                    user: &cfg.sunshine_user,
+                    pass: &cfg.sunshine_pass,
+                }
+                .display_diagnostics();
+                Response::json(
+                    200,
+                    &serde_json::json!({"windows": windows, "sunshine": sunshine}),
+                )
+            }
             ("POST", "/v1/pin") => self.pin(req),
             ("POST", "/v1/power") => self.power(req),
             ("POST", p) if p == UPDATE_PATH => self.update(req),

@@ -71,6 +71,7 @@ pub fn probe() -> WakeInfo {
 
 /// Parse `mac|adapter|description|ip|*WakeOnMagicPacket|armed|HiberbootEnabled`,
 /// where the keyword is `1`, `0`, or missing.
+#[cfg(any(windows, test))]
 fn parse_probe(line: &str) -> WakeInfo {
     let mut f = line.trim().split('|').map(str::trim);
     let mac = f

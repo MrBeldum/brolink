@@ -178,6 +178,20 @@ a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
 - Nothing else. BroLink captures no screen and reads the keyboard and
   mouse only in its own window.
 
+## Connected, but the picture is black
+
+A connection can carry valid video that contains only black pixels.
+BroLink now detects this after five seconds and shows a persistent message
+instead of presenting the stream as healthy. **Restart stream** reconnects
+and, for Desktop, resets Sunshine's capture session. If no video arrives or
+decoding fails, the message distinguishes those problems too.
+
+Sunshine needs an active display on the PC. For a PC without a monitor,
+enable a virtual display in Windows or attach an HDMI/DisplayPort dummy
+plug; select that display in Sunshine. Reconnecting the Mac cannot create
+a missing Windows display. See Sunshine's
+[display requirements](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2getting__started.html#considerations).
+
 ## Updates
 
 The app checks GitHub for a new release about every six hours and twenty
@@ -221,4 +235,3 @@ it says what happened last. A copy that is not running from an app bundle
   the certificate from pairing. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.
-

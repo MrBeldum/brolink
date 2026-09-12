@@ -248,6 +248,7 @@ pub fn starts_with_windows() -> bool {
     false
 }
 
+#[cfg(any(windows, test))]
 pub fn run_value(exe: &Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
