@@ -186,10 +186,26 @@ instead of presenting the stream as healthy. **Restart stream** reconnects
 and, for Desktop, resets Sunshine's capture session. If no video arrives or
 decoding fails, the message distinguishes those problems too.
 
-Sunshine needs an active display on the PC. For a PC without a monitor,
-enable a virtual display in Windows or attach an HDMI/DisplayPort dummy
-plug; select that display in Sunshine. Reconnecting the Mac cannot create
-a missing Windows display. See Sunshine's
+The notice then asks the PC what it can see and says which cause it is.
+
+On a PC with no monitor attached, it is usually the colour mode. Windows
+carries on composing the desktop in HDR or wide colour, as the monitor
+that is now gone once asked for, on a placeholder display that reports no
+luminance at all. Anything converting that desktop to an ordinary picture
+turns every frame black, even though the PC's own desktop draws perfectly
+normally — which is why the stream looks broken and the PC does not.
+
+Where that mode is one the display supports, the notice offers **Turn off
+HDR on the PC**, which does exactly that over the control API and starts a
+fresh capture. Where Windows is enforcing it on a placeholder display it
+refuses every switch away from it: the mode is a consequence of having no
+display rather than a setting, and only giving the PC a display clears it.
+Attach a monitor, plug in an HDMI/DisplayPort dummy plug, or install a
+virtual display driver on the PC, and select that display in Sunshine.
+
+The notice names the other causes too — a desktop that is genuinely black
+because the display is asleep, a lock screen Sunshine cannot capture, or a
+capture failing while the desktop plainly has a picture. See Sunshine's
 [display requirements](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2getting__started.html#considerations).
 
 ## Updates

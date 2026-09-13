@@ -118,7 +118,7 @@ impl VideoHealth {
             .black_since
             .is_some_and(|since| now.duration_since(since) >= Duration::from_secs(5))
         {
-            return Some("The PC is sending a black picture. Turn on its monitor or enable a virtual display on the PC, then check Sunshine’s selected display. You can also try restarting the stream.".into());
+            return Some("The PC is sending a black picture: the connection and the video are healthy, but every frame is blank. Asking the PC why…".into());
         }
         None
     }

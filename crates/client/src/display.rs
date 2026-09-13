@@ -48,6 +48,19 @@ pub fn hdr_is_on(report: &Value) -> bool {
     displays(report).any(|d| d["enabled"] == Value::Bool(true))
 }
 
+/// Whether turning it off is a switch anyone can throw. Windows enforces
+/// the mode on a display with no monitor behind it — neither supported nor
+/// switched on by anyone — and then refuses every switch that would leave
+/// it. Offering a button for that would be offering a button that fails.
+fn can_be_turned_off(report: &Value) -> bool {
+    displays(report).any(|d| {
+        d["enabled"] == Value::Bool(true)
+            && (d["supported"] == Value::Bool(true)
+                || d["hdr_on"] == Value::Bool(true)
+                || d["wide_color_on"] == Value::Bool(true))
+    })
+}
+
 fn displays(report: &Value) -> impl Iterator<Item = &Value> {
     report["advanced_color"]["displays"]
         .as_array()
@@ -58,13 +71,18 @@ fn displays(report: &Value) -> impl Iterator<Item = &Value> {
 /// What Windows calls the mode it is in. A PC that has lost its monitor
 /// usually ends up in wide colour rather than HDR proper, and the two are
 /// different switches in the PC's own settings.
-fn colour_mode(report: &Value) -> &'static str {
+fn colour_mode(report: &Value) -> String {
+    // Windows 11 names the running mode outright; older ones only say
+    // whether wide colour is being enforced.
+    if let Some(mode) = displays(report).find_map(|d| d["mode"].as_str()) {
+        return mode.to_string();
+    }
     if displays(report)
         .any(|d| d["enabled"] == Value::Bool(true) && d["wide_color_enforced"] == Value::Bool(true))
     {
-        "wide colour"
+        "wide colour".into()
     } else {
-        "HDR"
+        "HDR".into()
     }
 }
 
@@ -88,29 +106,45 @@ pub fn verdict(report: &Value) -> Help {
     let hdr = hdr_is_on(report);
     let dark = desktop_brightness(report).is_some_and(|max| max <= 16);
     let headless = no_monitor(report);
-    let message = if hdr && headless {
+    let mode = colour_mode(report);
+    let switchable = can_be_turned_off(report);
+    let message = if hdr && !switchable {
+        // Windows will not leave this one while the PC has no display.
+        return Help {
+            message: format!(
+                "Windows is composing the PC's desktop in {mode} on a \
+                 placeholder display, because no monitor is attached. With \
+                 no display to describe the brightness, the capture turns \
+                 every frame black — and Windows will not leave that mode \
+                 until the PC has a display. Attach a monitor or an \
+                 HDMI/DisplayPort dummy plug, or install a virtual display \
+                 driver on the PC."
+            ),
+            hdr_is_on: false,
+            mode,
+            busy: false,
+        };
+    } else if hdr && headless {
         return Help {
             message: format!(
                 "The PC has no monitor attached, but Windows is still \
-                 composing its desktop in {}. With no display left to \
+                 composing its desktop in {mode}. With no display left to \
                  describe the brightness, the capture converts every frame \
-                 to black.",
-                colour_mode(report)
+                 to black."
             ),
             hdr_is_on: true,
-            mode: colour_mode(report).into(),
+            mode,
             busy: false,
         };
     } else if hdr {
         return Help {
             message: format!(
-                "The PC's desktop is composed in {}. The capture converts \
-                 it to an ordinary picture, and on this PC that conversion \
-                 is coming out black.",
-                colour_mode(report)
+                "The PC's desktop is composed in {mode}. The capture \
+                 converts it to an ordinary picture, and on this PC that \
+                 conversion is coming out black."
             ),
             hdr_is_on: true,
-            mode: colour_mode(report).into(),
+            mode,
             busy: false,
         };
     } else if dark && headless {
@@ -160,29 +194,61 @@ mod tests {
 
     #[test]
     fn an_hdr_desktop_without_a_monitor_is_named_and_offered_a_fix() {
-        let h = verdict(&report(true, false, 255, false));
+        let mut r = report(true, false, 255, false);
+        r["advanced_color"]["displays"][0]["supported"] = Value::Bool(true);
+        let h = verdict(&r);
         assert!(h.message.contains("no monitor"), "{}", h.message);
         assert!(h.message.contains("HDR"), "{}", h.message);
         assert!(h.hdr_is_on);
     }
 
+    /// Exactly what a PC that has lost its monitor answers: Windows runs
+    /// wide colour on a placeholder display that supports neither mode and
+    /// that nobody switched on, and refuses every switch away from it.
     #[test]
-    fn a_desktop_windows_forces_into_wide_colour_is_named_as_such() {
+    fn a_mode_windows_enforces_is_explained_rather_than_offered_a_switch() {
         let mut r = report(true, false, 255, false);
-        r["advanced_color"]["displays"][0]["wide_color_enforced"] = Value::Bool(true);
-        r["advanced_color"]["displays"][0]["supported"] = Value::Bool(false);
+        r["advanced_color"]["displays"][0] = serde_json::json!({
+            "display": "\\\\.\\DISPLAY1",
+            "supported": false, "enabled": true, "wide_color_enforced": true,
+            "force_disabled": false, "bits_per_color": 10, "color_encoding": 0,
+            "sdr_white_level": 1000, "mode": "wide colour", "active": true,
+            "hdr_supported": false, "hdr_on": false,
+            "wide_color_supported": false, "wide_color_on": false,
+            "limited_by_policy": false,
+        });
         let h = verdict(&r);
         assert!(h.message.contains("wide colour"), "{}", h.message);
+        assert!(
+            h.message.contains("no monitor is attached"),
+            "{}",
+            h.message
+        );
+        assert!(h.message.contains("dummy plug"), "{}", h.message);
         assert_eq!(h.mode, "wide colour");
         assert!(
-            h.hdr_is_on,
-            "an unsupported display still has it switched on"
+            !h.hdr_is_on,
+            "no switch may be offered for a mode Windows refuses to leave"
         );
+    }
+
+    /// The same mode, but switched on by whoever owns the PC: a button can
+    /// turn that one off.
+    #[test]
+    fn a_mode_someone_turned_on_keeps_its_switch() {
+        let mut r = report(true, true, 255, false);
+        r["advanced_color"]["displays"][0]["mode"] = "HDR".into();
+        r["advanced_color"]["displays"][0]["hdr_on"] = Value::Bool(true);
+        let h = verdict(&r);
+        assert!(h.hdr_is_on, "{}", h.message);
+        assert_eq!(h.mode, "HDR");
     }
 
     #[test]
     fn hdr_with_a_monitor_still_offers_the_switch() {
-        let h = verdict(&report(true, true, 255, false));
+        let mut r = report(true, true, 255, false);
+        r["advanced_color"]["displays"][0]["supported"] = Value::Bool(true);
+        let h = verdict(&r);
         assert!(h.message.contains("HDR"), "{}", h.message);
         assert_eq!(h.mode, "HDR");
         assert!(h.hdr_is_on);
