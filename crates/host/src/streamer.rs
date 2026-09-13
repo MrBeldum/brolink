@@ -297,9 +297,11 @@ fn pending_pairings(reply: Option<serde_json::Value>) -> Vec<Option<String>> {
 /// Display diagnostics travel to the Mac, so those keys never leave the PC.
 fn is_secret(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
-    ["pass", "user", "salt", "token", "key", "cert", "secret", "pin"]
-        .iter()
-        .any(|needle| k.contains(needle))
+    [
+        "pass", "user", "salt", "token", "key", "cert", "secret", "pin",
+    ]
+    .iter()
+    .any(|needle| k.contains(needle))
 }
 
 /// The last `lines` lines: a capture failure is at the end of the log.
@@ -445,7 +447,10 @@ mod tests {
 
     #[test]
     fn the_log_tail_is_the_end_of_the_log() {
-        let log = (1..=200).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let log = (1..=200)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let cut = tail(&log, 150);
         assert!(cut.starts_with("51\n52\n"), "{}", &cut[..8]);
         assert!(cut.ends_with("\n200"));

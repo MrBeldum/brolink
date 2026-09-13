@@ -181,6 +181,12 @@ pub struct PowerRequest {
     pub action: PowerAction,
 }
 
+/// Asking a PC to turn its HDR desktop off, or back on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayRequest {
+    pub advanced_color: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ack {
