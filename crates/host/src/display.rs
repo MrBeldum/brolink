@@ -78,9 +78,10 @@ mod win {
     use windows::Win32::Devices::Display::{
         DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
         QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-        DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_DEVICE_INFO_TYPE,
-        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
+        DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SDR_WHITE_LEVEL,
         DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS,
     };
 
@@ -248,6 +249,24 @@ mod win {
         unsafe { DisplayConfigSetDeviceInfo(&packet.header) }
     }
 
+    /// How bright the display says plain white is, in thousandths of the
+    /// usual 80 nits. A capture converting an HDR desktop down to an
+    /// ordinary picture scales by this; a display that has no answer
+    /// leaves it at zero, and everything scales to black.
+    fn sdr_white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Option<u32> {
+        let mut level = DISPLAYCONFIG_SDR_WHITE_LEVEL {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                size: size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        (unsafe { DisplayConfigGetDeviceInfo(&mut level.header) } == 0)
+            .then_some(level.SDRWhiteLevel)
+    }
+
     pub fn report() -> Result<Value> {
         let mut displays = Vec::new();
         for path in paths()? {
@@ -269,6 +288,9 @@ mod win {
             };
             // Windows 11 says which of the two modes is actually running,
             // which is what decides the switch that can turn it off.
+            if let Some(level) = sdr_white_level(&path) {
+                entry["sdr_white_level"] = level.into();
+            }
             if let Ok(two) = color_info_2(&path) {
                 entry["mode"] = mode_name(two.active_color_mode).into();
                 entry["active"] = (two.value & ACTIVE_2 != 0).into();
