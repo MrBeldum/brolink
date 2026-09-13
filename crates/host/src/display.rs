@@ -199,7 +199,10 @@ mod win {
                 continue;
             };
             let bits = unsafe { info.Anonymous.value };
-            if bits & SUPPORTED == 0 || (bits & ENABLED != 0) == on {
+            // A display whose monitor is gone reports advanced colour as
+            // unsupported while Windows carries on composing in it — the
+            // very state worth undoing. Only what it is now decides.
+            if (bits & ENABLED != 0) == on {
                 continue;
             }
             let mut set = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE {
