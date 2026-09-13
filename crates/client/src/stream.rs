@@ -27,6 +27,8 @@ const TOAST_FOR: Duration = Duration::from_secs(5);
 pub enum Action {
     Disconnect,
     RestartStream,
+    /// Ask the PC to leave HDR, which is what a black capture usually is.
+    TurnOffHdr,
     Power(PowerAction),
     Fullscreen(bool),
     ToggleCmd,
@@ -54,6 +56,8 @@ pub struct Env<'a> {
     pub old_host: Option<(Version, Option<Version>)>,
     /// An install through the stream, its status line.
     pub handover: Option<String>,
+    /// What the PC said about a black picture, once it has answered.
+    pub video_help: Option<crate::display::Help>,
 }
 
 struct Toast {
@@ -634,9 +638,35 @@ impl View {
                     ui::overlay_frame().show(ui, |ui| {
                         ui.set_width(496.0);
                         ui.label(RichText::new(problem).color(P.text));
-                        if ui::ghost_button(ui, "Restart stream").clicked() {
-                            actions.push(Action::RestartStream);
+                        // The PC's own answer, once it has given one.
+                        if let Some(help) = env.video_help.as_ref() {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(&help.message).color(P.muted));
                         }
+                        ui.horizontal(|ui| {
+                            if ui::ghost_button(ui, "Restart stream").clicked() {
+                                actions.push(Action::RestartStream);
+                            }
+                            let Some(help) = env.video_help.as_ref() else {
+                                return;
+                            };
+                            if !help.hdr_is_on {
+                                return;
+                            }
+                            if help.busy {
+                                ui.label(
+                                    RichText::new(format!("Turning {} off…", help.mode))
+                                        .color(P.muted),
+                                );
+                            } else if ui::ghost_button(
+                                ui,
+                                &format!("Turn off {} on the PC", help.mode),
+                            )
+                            .clicked()
+                            {
+                                actions.push(Action::TurnOffHdr);
+                            }
+                        });
                     });
                 }
                 for (tone, text) in lines {

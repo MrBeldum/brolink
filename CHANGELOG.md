@@ -21,6 +21,9 @@ GitHub release notes, so each version gets a heading of the form
   PC's own desktop is (as sampled numbers, never an image), and Sunshine's
   full capture settings and log tail. Each part reports its own failure
   rather than losing the whole report.
+- The stream's black-picture notice now asks the PC what it can see and
+  says which of those causes it is, with the switch to fix the one that
+  can be fixed from here.
 - A PC whose monitor is gone keeps the HDR desktop that monitor asked for.
   Windows then composes in half-float but no longer knows any luminance, so
   a capture converting to SDR scales by nothing and every frame is black.

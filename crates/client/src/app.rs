@@ -47,6 +47,10 @@ pub struct ClientApp {
     /// Connect again as soon as the current stream has stopped.
     reconnect: Option<Pc>,
     restart_capture: bool,
+    /// What the PC said about its black picture, and whether a fix is on
+    /// its way. Asked for once per stream, by the thread that answers.
+    video_help: Arc<Mutex<Option<crate::display::Help>>>,
+    asked_about_video: bool,
     /// An install of BroLink Host through the stream, while it runs and a
     /// little after.
     handover: Option<Handover>,
@@ -97,6 +101,8 @@ impl ClientApp {
             last_pc: None,
             reconnect: None,
             restart_capture: false,
+            video_help: Arc::default(),
+            asked_about_video: false,
             handover: None,
         }
     }
@@ -126,6 +132,8 @@ impl ClientApp {
         self.ended_seen = false;
         self.offer_sleep = None;
         self.last_pc = Some(pc.clone());
+        self.asked_about_video = false;
+        *self.video_help.lock() = None;
         session::connect(Connect {
             target,
             settings: self.cfg.stream.clone(),
@@ -150,6 +158,69 @@ impl ClientApp {
         let out = notice.clone();
         std::thread::spawn(move || *out.lock() = Some(job()));
         self.pending_notice = Some(notice);
+    }
+
+    /// The first time a connected stream diagnoses its own picture as
+    /// broken, ask the PC what it can see. One question per stream: the
+    /// answer does not change while the same capture keeps failing.
+    fn ask_why_black(&mut self, ctx: &egui::Context, live: &Live) {
+        if self.asked_about_video
+            || live.session.stats().video_problem.is_none()
+            || !live.session.connected()
+        {
+            return;
+        }
+        self.asked_about_video = true;
+        let (ip, help, ctx) = (live.ip, self.video_help.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let answer = match crate::display::ask(ip) {
+                Ok(report) => crate::display::verdict(&report),
+                Err(e) => {
+                    tracing::warn!("display report: {e:#}");
+                    return;
+                }
+            };
+            if !answer.message.is_empty() {
+                *help.lock() = Some(answer);
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Turn the PC's HDR desktop off, then start a fresh capture: the old
+    /// one keeps producing the black frames it was already producing.
+    fn turn_off_hdr(&mut self, _ctx: &egui::Context, ip: std::net::Ipv4Addr) {
+        let help = self.video_help.clone();
+        if help.lock().as_ref().is_some_and(|h| h.busy) {
+            return;
+        }
+        if let Some(h) = help.lock().as_mut() {
+            h.busy = true;
+        }
+        self.notify_later(move || {
+            let told = match crate::display::set_hdr(ip, false) {
+                Ok(state) => {
+                    if crate::display::hdr_is_on(&serde_json::json!({"advanced_color": state})) {
+                        (Tone::Danger, "The PC kept its HDR desktop on.".to_string())
+                    } else {
+                        (
+                            Tone::Success,
+                            "HDR is off on the PC. Starting a fresh capture…".to_string(),
+                        )
+                    }
+                }
+                Err(e) => (Tone::Danger, format!("Could not turn HDR off: {e}")),
+            };
+            if let Some(h) = help.lock().as_mut() {
+                h.busy = false;
+                h.hdr_is_on = told.0 != Tone::Success;
+            }
+            told
+        });
+        // The picture cannot recover on the capture that is already black.
+        self.restart_capture = true;
+        self.reconnect = self.last_pc.clone();
+        self.disconnect();
     }
 
     fn power(&mut self, ip: std::net::Ipv4Addr, name: &str, action: PowerAction) {
@@ -297,6 +368,8 @@ impl eframe::App for ClientApp {
                     .and_then(|p| p.host.as_ref())
                     .and_then(|h| stream::old_host(&h.version, latest.as_ref()));
                 self.tend_handover(pc_now, &l.pc);
+                self.ask_why_black(ctx, l);
+                let help = self.video_help.lock().clone();
                 let env = Env {
                     live: l,
                     cfg: &self.cfg,
@@ -304,6 +377,7 @@ impl eframe::App for ClientApp {
                     path: pc_now.map(|p| p.path.clone()),
                     old_host,
                     handover: self.handover.as_ref().map(|h| h.status(&l.pc)),
+                    video_help: help,
                 };
                 let actions = self.view.show(ctx, &env);
                 let (ip, name, input) = (l.ip, l.pc.clone(), l.input.clone());
@@ -335,6 +409,7 @@ impl eframe::App for ClientApp {
                             self.reconnect = self.last_pc.clone();
                             self.disconnect();
                         }
+                        Action::TurnOffHdr => self.turn_off_hdr(ctx, ip),
                         Action::InstallHost => {
                             self.start_handover(ctx, ip, &name, input.clone(), &disc)
                         }

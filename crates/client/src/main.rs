@@ -3,6 +3,7 @@
 mod app;
 mod clipboard;
 mod config;
+mod display;
 mod handover;
 mod input;
 mod path;
