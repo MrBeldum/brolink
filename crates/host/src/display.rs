@@ -38,11 +38,18 @@ pub fn probe() -> Result<Value> {
 /// Windows' "advanced colour" — HDR — for every display path, and the
 /// power to turn it off.
 ///
-/// A PC whose monitor is gone keeps the desktop its monitor last asked
-/// for. If that was an HDR desktop, Windows still composes in half-float
-/// but no longer knows the display's luminance, so a capture that converts
-/// to SDR has nothing to scale by and every frame comes out black. Turning
-/// advanced colour off restores an 8-bit desktop that captures normally.
+/// A PC whose monitor is gone keeps composing in the colour mode that
+/// monitor asked for — half-float, ten bits a channel — while the
+/// placeholder display left behind reports no luminance at all. A capture
+/// converting that to an ordinary picture has nothing to describe the
+/// brightness with, and every frame comes out black even though the PC's
+/// own desktop draws normally.
+///
+/// Where the mode is one the display supports, turning it off restores an
+/// eight-bit desktop that captures normally. Where Windows is enforcing it
+/// on a placeholder display, it refuses every switch with
+/// ERROR_NOT_SUPPORTED: the mode is a consequence of having no display,
+/// not a setting, and only attaching one clears it.
 pub fn advanced_color() -> Result<Value> {
     #[cfg(windows)]
     {
@@ -250,9 +257,9 @@ mod win {
     }
 
     /// How bright the display says plain white is, in thousandths of the
-    /// usual 80 nits. A capture converting an HDR desktop down to an
-    /// ordinary picture scales by this; a display that has no answer
-    /// leaves it at zero, and everything scales to black.
+    /// usual 80 nits: the scale an HDR or wide-colour desktop is converted
+    /// down by. Worth reading next to the colour mode, because a normal
+    /// white level rules this out as the reason a capture is black.
     fn sdr_white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Option<u32> {
         let mut level = DISPLAYCONFIG_SDR_WHITE_LEVEL {
             header: DISPLAYCONFIG_DEVICE_INFO_HEADER {

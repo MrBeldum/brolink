@@ -6,9 +6,9 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
-- A connected stream that remains black now explains that the PC is sending
-  a black picture and needs an active physical or virtual display. Missing
-  video, frozen video, and decoder failures have separate persistent notices.
+- A connected stream that remains black now says so and asks the PC why,
+  instead of presenting a healthy-looking stream. Missing video, frozen
+  video, and decoder failures have separate persistent notices.
 - The notice offers **Restart stream**, which starts a fresh Desktop capture
   instead of resuming the same broken capture. Failure to stop Sunshine's
   previous session is reported instead of silently resuming the wrong app.
@@ -18,23 +18,26 @@ GitHub release notes, so each version gets a heading of the form
   failed decoder sessions, just like synchronous decode errors.
 - The PC's display report now answers why a capture is black: whether any
   monitor hardware is present, whether the session is locked, how bright the
-  PC's own desktop is (as sampled numbers, never an image), and Sunshine's
-  full capture settings and log tail. Each part reports its own failure
-  rather than losing the whole report.
-- The stream's black-picture notice now asks the PC what it can see and
-  says which of those causes it is, with the switch to fix the one that
-  can be fixed from here.
-- Windows 11 split that switch into HDR and wide colour, and refuses the
-  older single one on a display that no longer claims to support it. The
-  PC now reports which mode is actually running and tries each switch in
-  turn, believing what the display says afterwards rather than the return
-  code.
-- A PC whose monitor is gone keeps the HDR desktop that monitor asked for.
-  Windows then composes in half-float but no longer knows any luminance, so
-  a capture converting to SDR scales by nothing and every frame is black.
-  The PC now reports that state, and the Mac can turn the HDR desktop off
-  over the control API — the one display setting it can change, because the
-  picture is the thing that is broken.
+  PC's own desktop is (as sampled numbers, never an image), which colour
+  mode Windows is composing in, and Sunshine's capture settings and log
+  tail. Each part reports its own failure rather than losing the whole
+  report.
+- A PC whose monitor is gone keeps composing in the colour mode that
+  monitor asked for — half-float, ten bits a channel — on a placeholder
+  display that reports no luminance at all. A capture converting that to an
+  ordinary picture turns every frame black while the PC's own desktop draws
+  normally. The stream's notice now says so, in place of blaming a missing
+  display for a desktop that is plainly there.
+- Where that mode is one the display supports, the notice offers to turn it
+  off and the Mac does so over the control API, then starts a fresh
+  capture. Windows 11 splits that switch into HDR and wide colour, so each
+  is tried in turn and the display is read back afterwards rather than the
+  return code believed.
+- Where Windows is enforcing the mode on a placeholder display it refuses
+  every switch with ERROR_NOT_SUPPORTED — the mode is a consequence of
+  having no display, not a setting. The notice says that plainly and asks
+  for a monitor, a dummy plug or a virtual display driver instead of
+  offering a button that cannot work.
 - The live video test now checks for a visible picture, with a separate
   mode that verifies the black-picture notice and restart action. Synthetic
   video tests cover the Mac decoder and GPU renderer.
