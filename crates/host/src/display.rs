@@ -78,11 +78,60 @@ mod win {
     use windows::Win32::Devices::Display::{
         DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
         QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-        DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
-        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_DEVICE_INFO_TYPE,
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
         DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS,
     };
+
+    /// Windows 11 replaced the single "advanced colour" switch with two —
+    /// HDR and wide colour — and a mode that says which is active. The
+    /// bindings in use predate them, so the three packets are declared
+    /// here; each is the standard header and one bitfield, and Windows
+    /// checks `size` against the type, so an older Windows answers
+    /// ERROR_INVALID_PARAMETER rather than acting on the wrong packet.
+    /// See wingdi.h: GET_ADVANCED_COLOR_INFO_2 = 15, SET_HDR_STATE = 16,
+    /// SET_WCG_STATE = 17.
+    const GET_ADVANCED_COLOR_INFO_2: DISPLAYCONFIG_DEVICE_INFO_TYPE =
+        DISPLAYCONFIG_DEVICE_INFO_TYPE(15);
+    const SET_HDR_STATE: DISPLAYCONFIG_DEVICE_INFO_TYPE = DISPLAYCONFIG_DEVICE_INFO_TYPE(16);
+    const SET_WCG_STATE: DISPLAYCONFIG_DEVICE_INFO_TYPE = DISPLAYCONFIG_DEVICE_INFO_TYPE(17);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct AdvancedColorInfo2 {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        value: u32,
+        color_encoding: u32,
+        bits_per_color_channel: u32,
+        active_color_mode: u32,
+    }
+
+    /// The payload of both setters: one bit, then padding.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct SetColorState {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        value: u32,
+    }
+
+    // DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2's bits.
+    const ACTIVE_2: u32 = 1 << 1;
+    const LIMITED_BY_POLICY_2: u32 = 1 << 3;
+    const HDR_SUPPORTED_2: u32 = 1 << 4;
+    const HDR_USER_ENABLED_2: u32 = 1 << 5;
+    const WIDE_SUPPORTED_2: u32 = 1 << 6;
+    const WIDE_USER_ENABLED_2: u32 = 1 << 7;
+
+    /// 0 SDR, 1 wide colour, 2 HDR.
+    fn mode_name(mode: u32) -> &'static str {
+        match mode {
+            0 => "SDR",
+            1 => "wide colour",
+            2 => "HDR",
+            _ => "unknown",
+        }
+    }
 
     const SUPPORTED: u32 = 1 << 0;
     const ENABLED: u32 = 1 << 1;
@@ -131,7 +180,7 @@ mod win {
     /// `\\.\DISPLAY1`, to line the state up with the screens Windows lists.
     fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
         let mut name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
-            header: windows::Win32::Devices::Display::DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                 r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
                 size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
                 adapterId: path.sourceInfo.adapterId,
@@ -152,7 +201,7 @@ mod win {
 
     fn color_info(path: &DISPLAYCONFIG_PATH_INFO) -> Result<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO> {
         let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
-            header: windows::Win32::Devices::Display::DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                 r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
                 size: size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
                 adapterId: path.targetInfo.adapterId,
@@ -165,14 +214,48 @@ mod win {
         Ok(info)
     }
 
+    /// The Windows 11 view, when this Windows has one.
+    fn color_info_2(path: &DISPLAYCONFIG_PATH_INFO) -> Result<AdvancedColorInfo2> {
+        let mut info = AdvancedColorInfo2 {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: GET_ADVANCED_COLOR_INFO_2,
+                size: size_of::<AdvancedColorInfo2>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        let rc = unsafe { DisplayConfigGetDeviceInfo(&mut info.header) };
+        ensure!(rc == 0, "this Windows has no colour mode to report ({rc})");
+        Ok(info)
+    }
+
+    /// Ask one display to leave, or take up, a colour mode.
+    fn write_state(
+        path: &DISPLAYCONFIG_PATH_INFO,
+        kind: DISPLAYCONFIG_DEVICE_INFO_TYPE,
+        on: bool,
+    ) -> i32 {
+        let packet = SetColorState {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: kind,
+                size: size_of::<SetColorState>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            value: u32::from(on),
+        };
+        unsafe { DisplayConfigSetDeviceInfo(&packet.header) }
+    }
+
     pub fn report() -> Result<Value> {
         let mut displays = Vec::new();
         for path in paths()? {
             let name = source_name(&path);
-            match color_info(&path) {
+            let mut entry = match color_info(&path) {
                 Ok(info) => {
                     let bits = unsafe { info.Anonymous.value };
-                    displays.push(serde_json::json!({
+                    serde_json::json!({
                         "display": name,
                         "supported": bits & SUPPORTED != 0,
                         "enabled": bits & ENABLED != 0,
@@ -180,19 +263,28 @@ mod win {
                         "force_disabled": bits & FORCE_DISABLED != 0,
                         "bits_per_color": info.bitsPerColorChannel,
                         "color_encoding": info.colorEncoding.0,
-                    }));
+                    })
                 }
-                Err(e) => displays.push(serde_json::json!({
-                    "display": name,
-                    "error": e.to_string(),
-                })),
+                Err(e) => serde_json::json!({"display": name, "error": e.to_string()}),
+            };
+            // Windows 11 says which of the two modes is actually running,
+            // which is what decides the switch that can turn it off.
+            if let Ok(two) = color_info_2(&path) {
+                entry["mode"] = mode_name(two.active_color_mode).into();
+                entry["active"] = (two.value & ACTIVE_2 != 0).into();
+                entry["hdr_supported"] = (two.value & HDR_SUPPORTED_2 != 0).into();
+                entry["hdr_on"] = (two.value & HDR_USER_ENABLED_2 != 0).into();
+                entry["wide_color_supported"] = (two.value & WIDE_SUPPORTED_2 != 0).into();
+                entry["wide_color_on"] = (two.value & WIDE_USER_ENABLED_2 != 0).into();
+                entry["limited_by_policy"] = (two.value & LIMITED_BY_POLICY_2 != 0).into();
             }
+            displays.push(entry);
         }
         Ok(serde_json::json!({"supported": true, "displays": displays}))
     }
 
     pub fn set(on: bool) -> Result<()> {
-        let mut refused = None;
+        let mut refused = Vec::new();
         let mut touched = 0;
         for path in paths()? {
             let Ok(info) = color_info(&path) else {
@@ -205,28 +297,62 @@ mod win {
             if (bits & ENABLED != 0) == on {
                 continue;
             }
-            let mut set = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE {
-                header: windows::Win32::Devices::Display::DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                    r#type: DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
-                    size: size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32,
-                    adapterId: path.targetInfo.adapterId,
-                    id: path.targetInfo.id,
-                },
-                ..Default::default()
-            };
-            set.Anonymous.value = u32::from(on);
-            let rc = unsafe { DisplayConfigSetDeviceInfo(&set.header) };
-            if rc == 0 {
+            // Windows 11 refuses the old single switch on a display that
+            // does not claim to support HDR, even while it composes in
+            // wide colour; its own two switches are the way out. Try the
+            // one the display says is on, then the other, then the old
+            // one, and stop at the first Windows accepts.
+            let two = color_info_2(&path).ok();
+            let mut order: Vec<DISPLAYCONFIG_DEVICE_INFO_TYPE> = Vec::new();
+            if let Some(two) = two {
+                if two.value & WIDE_USER_ENABLED_2 != 0 || two.active_color_mode == 1 {
+                    order.push(SET_WCG_STATE);
+                }
+                if two.value & HDR_USER_ENABLED_2 != 0 || two.active_color_mode == 2 {
+                    order.push(SET_HDR_STATE);
+                }
+                order.push(SET_WCG_STATE);
+                order.push(SET_HDR_STATE);
+            }
+            order.push(DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE);
+            let mut tried: Vec<i32> = Vec::new();
+            order.retain(|k| {
+                tried.iter().all(|&t| t != k.0) && {
+                    tried.push(k.0);
+                    true
+                }
+            });
+
+            let mut codes = Vec::new();
+            let mut done = false;
+            for kind in order {
+                let rc = write_state(&path, kind, on);
+                codes.push(format!("{}→{rc}", kind.0));
+                if rc == 0 {
+                    // Believe the display, not the return code.
+                    let still_on = color_info(&path)
+                        .map(|i| unsafe { i.Anonymous.value } & ENABLED != 0)
+                        .unwrap_or(!on);
+                    if still_on == on {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if done {
                 touched += 1;
             } else {
-                refused = Some(format!("Windows refused the change ({rc})"));
+                refused.push(format!(
+                    "{}: Windows refused every switch ({})",
+                    source_name(&path).unwrap_or_else(|| "a display".into()),
+                    codes.join(", ")
+                ));
             }
         }
-        match refused {
-            // Nothing to do is success: the displays already read as asked.
-            Some(e) if touched == 0 => bail!(e),
-            _ => Ok(()),
+        if touched == 0 && !refused.is_empty() {
+            bail!(refused.join("; "));
         }
+        Ok(())
     }
 }
 

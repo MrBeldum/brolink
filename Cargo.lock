@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-client"
-version = "3.1.2-rc.4"
+version = "3.1.2-rc.5"
 dependencies = [
  "anyhow",
  "brolink-core",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-core"
-version = "3.1.2-rc.4"
+version = "3.1.2-rc.5"
 dependencies = [
  "anyhow",
  "directories",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-host"
-version = "3.1.2-rc.4"
+version = "3.1.2-rc.5"
 dependencies = [
  "anyhow",
  "brolink-core",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-stream"
-version = "3.1.2-rc.4"
+version = "3.1.2-rc.5"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "brolink-ui"
-version = "3.1.2-rc.4"
+version = "3.1.2-rc.5"
 dependencies = [
  "brolink-core",
  "egui",

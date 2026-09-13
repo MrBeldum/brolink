@@ -24,6 +24,11 @@ GitHub release notes, so each version gets a heading of the form
 - The stream's black-picture notice now asks the PC what it can see and
   says which of those causes it is, with the switch to fix the one that
   can be fixed from here.
+- Windows 11 split that switch into HDR and wide colour, and refuses the
+  older single one on a display that no longer claims to support it. The
+  PC now reports which mode is actually running and tries each switch in
+  turn, believing what the display says afterwards rather than the return
+  code.
 - A PC whose monitor is gone keeps the HDR desktop that monitor asked for.
   Windows then composes in half-float but no longer knows any luminance, so
   a capture converting to SDR scales by nothing and every frame is black.
