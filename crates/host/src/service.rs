@@ -12,8 +12,8 @@ use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use brolink_core::api::{
-    Ack, Clipboard, NatReport, PinRequest, PowerRequest, Status, Streamer, CLIPBOARD_PATH,
-    UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerRequest, Status, Streamer,
+    CLIPBOARD_PATH, UPDATE_PATH,
 };
 use brolink_core::http::{self, Request, Response};
 use brolink_core::{tailscale, CONTROL_PORT};
@@ -464,20 +464,8 @@ impl Service {
         let local = peer.ip().is_loopback();
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
-            ("GET", "/v1/display") => {
-                let cfg = self.cfg.lock().clone();
-                let windows = crate::display::probe()
-                    .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
-                let sunshine = Api {
-                    user: &cfg.sunshine_user,
-                    pass: &cfg.sunshine_pass,
-                }
-                .display_diagnostics();
-                Response::json(
-                    200,
-                    &serde_json::json!({"windows": windows, "sunshine": sunshine}),
-                )
-            }
+            ("GET", "/v1/display") => Response::json(200, &self.display()),
+            ("POST", "/v1/display") => self.set_display(req),
             ("POST", "/v1/pin") => self.pin(req),
             ("POST", "/v1/power") => self.power(req),
             ("POST", p) if p == UPDATE_PATH => self.update(req),
@@ -573,6 +561,45 @@ impl Service {
                 self.log(format!("PIN from \"{}\" refused: {e:#}", p.name));
                 Response::json(502, &Ack::err(e.to_string()))
             }
+        }
+    }
+
+    /// Everything that decides whether a capture can see the desktop.
+    fn display(&self) -> serde_json::Value {
+        let cfg = self.cfg.lock().clone();
+        let windows =
+            crate::display::probe().unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+        let color = crate::display::advanced_color()
+            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+        let sunshine = Api {
+            user: &cfg.sunshine_user,
+            pass: &cfg.sunshine_pass,
+        }
+        .display_diagnostics();
+        serde_json::json!({
+            "windows": windows,
+            "advanced_color": color,
+            "sunshine": sunshine,
+        })
+    }
+
+    /// Turn the PC's HDR desktop off (or back on). This is the one display
+    /// setting the Mac can change: an HDR desktop on a PC with no monitor
+    /// captures as black, and nobody can reach the PC's settings to fix it
+    /// when the picture is the thing that is broken.
+    fn set_display(&self, req: &Request) -> Response {
+        let Ok(want) = req.json::<DisplayRequest>() else {
+            return Response::json(400, &Ack::err("expected {\"advanced_color\": true|false}"));
+        };
+        match crate::display::set_advanced_color(want.advanced_color) {
+            Ok(state) => {
+                self.log(format!(
+                    "the Mac turned the HDR desktop {}",
+                    if want.advanced_color { "on" } else { "off" }
+                ));
+                Response::json(200, &state)
+            }
+            Err(e) => Response::json(500, &Ack::err(format!("advanced colour: {e:#}"))),
         }
     }
 

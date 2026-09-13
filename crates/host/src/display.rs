@@ -35,6 +35,198 @@ pub fn probe() -> Result<Value> {
     }
 }
 
+/// Windows' "advanced colour" — HDR — for every display path, and the
+/// power to turn it off.
+///
+/// A PC whose monitor is gone keeps the desktop its monitor last asked
+/// for. If that was an HDR desktop, Windows still composes in half-float
+/// but no longer knows the display's luminance, so a capture that converts
+/// to SDR has nothing to scale by and every frame comes out black. Turning
+/// advanced colour off restores an 8-bit desktop that captures normally.
+pub fn advanced_color() -> Result<Value> {
+    #[cfg(windows)]
+    {
+        win::report()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(serde_json::json!({"supported": false}))
+    }
+}
+
+/// Turn advanced colour on or off wherever the display supports it, and
+/// report what the displays say afterwards. Reversible, and never touches
+/// a display that is already as asked.
+pub fn set_advanced_color(on: bool) -> Result<Value> {
+    #[cfg(windows)]
+    {
+        win::set(on)?;
+        win::report()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on;
+        anyhow::bail!("only a Windows PC has advanced colour to turn off")
+    }
+}
+
+#[cfg(windows)]
+mod win {
+    use anyhow::{bail, ensure, Result};
+    use serde_json::Value;
+    use std::mem::size_of;
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
+        QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS,
+    };
+
+    const SUPPORTED: u32 = 1 << 0;
+    const ENABLED: u32 = 1 << 1;
+    const WIDE_COLOR_ENFORCED: u32 = 1 << 2;
+    const FORCE_DISABLED: u32 = 1 << 3;
+
+    /// What Windows is driving, or — when a PC has lost its monitor and
+    /// drives nothing — every path it still knows about.
+    fn paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>> {
+        let mut last = None;
+        for flags in [QDC_ONLY_ACTIVE_PATHS, QDC_ALL_PATHS] {
+            let (mut n_paths, mut n_modes) = (0u32, 0u32);
+            let rc = unsafe { GetDisplayConfigBufferSizes(flags, &mut n_paths, &mut n_modes) };
+            if rc.0 != 0 {
+                last = Some(format!("display paths could not be counted ({})", rc.0));
+                continue;
+            }
+            if n_paths == 0 {
+                last = Some("Windows is driving no display".into());
+                continue;
+            }
+            let mut ps = vec![DISPLAYCONFIG_PATH_INFO::default(); n_paths as usize];
+            let mut ms = vec![DISPLAYCONFIG_MODE_INFO::default(); n_modes as usize];
+            let rc = unsafe {
+                QueryDisplayConfig(
+                    flags,
+                    &mut n_paths,
+                    ps.as_mut_ptr(),
+                    &mut n_modes,
+                    ms.as_mut_ptr(),
+                    None,
+                )
+            };
+            if rc.0 != 0 {
+                last = Some(format!("display paths could not be read ({})", rc.0));
+                continue;
+            }
+            ps.truncate(n_paths as usize);
+            if !ps.is_empty() {
+                return Ok(ps);
+            }
+        }
+        bail!(last.unwrap_or_else(|| "Windows lists no display".into()))
+    }
+
+    /// `\\.\DISPLAY1`, to line the state up with the screens Windows lists.
+    fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+        let mut name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: windows::Win32::Devices::Display::DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut name.header) } != 0 {
+            return None;
+        }
+        let end = name
+            .viewGdiDeviceName
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(name.viewGdiDeviceName.len());
+        Some(String::from_utf16_lossy(&name.viewGdiDeviceName[..end]))
+    }
+
+    fn color_info(path: &DISPLAYCONFIG_PATH_INFO) -> Result<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO> {
+        let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+            header: windows::Win32::Devices::Display::DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                size: size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        let rc = unsafe { DisplayConfigGetDeviceInfo(&mut info.header) };
+        ensure!(rc == 0, "advanced colour state unavailable ({rc})");
+        Ok(info)
+    }
+
+    pub fn report() -> Result<Value> {
+        let mut displays = Vec::new();
+        for path in paths()? {
+            let name = source_name(&path);
+            match color_info(&path) {
+                Ok(info) => {
+                    let bits = unsafe { info.Anonymous.value };
+                    displays.push(serde_json::json!({
+                        "display": name,
+                        "supported": bits & SUPPORTED != 0,
+                        "enabled": bits & ENABLED != 0,
+                        "wide_color_enforced": bits & WIDE_COLOR_ENFORCED != 0,
+                        "force_disabled": bits & FORCE_DISABLED != 0,
+                        "bits_per_color": info.bitsPerColorChannel,
+                        "color_encoding": info.colorEncoding.0,
+                    }));
+                }
+                Err(e) => displays.push(serde_json::json!({
+                    "display": name,
+                    "error": e.to_string(),
+                })),
+            }
+        }
+        Ok(serde_json::json!({"supported": true, "displays": displays}))
+    }
+
+    pub fn set(on: bool) -> Result<()> {
+        let mut refused = None;
+        let mut touched = 0;
+        for path in paths()? {
+            let Ok(info) = color_info(&path) else {
+                continue;
+            };
+            let bits = unsafe { info.Anonymous.value };
+            if bits & SUPPORTED == 0 || (bits & ENABLED != 0) == on {
+                continue;
+            }
+            let mut set = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE {
+                header: windows::Win32::Devices::Display::DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
+                    size: size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32,
+                    adapterId: path.targetInfo.adapterId,
+                    id: path.targetInfo.id,
+                },
+                ..Default::default()
+            };
+            set.Anonymous.value = u32::from(on);
+            let rc = unsafe { DisplayConfigSetDeviceInfo(&set.header) };
+            if rc == 0 {
+                touched += 1;
+            } else {
+                refused = Some(format!("Windows refused the change ({rc})"));
+            }
+        }
+        match refused {
+            // Nothing to do is success: the displays already read as asked.
+            Some(e) if touched == 0 => bail!(e),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     #[test]
@@ -57,6 +249,25 @@ mod tests {
             desktop.is_null() || desktop["max"].is_number(),
             "desktop brightness: {desktop}"
         );
+    }
+
+    /// Reading the state must never change it: a runner with no display
+    /// says so, and one with a display answers for each of them.
+    #[test]
+    fn advanced_colour_is_reported_per_display() {
+        let Ok(state) = super::advanced_color() else {
+            return;
+        };
+        assert_eq!(state["supported"], true);
+        let displays = state["displays"].as_array().expect("displays");
+        for d in displays {
+            if d.get("error").is_some() {
+                continue;
+            }
+            assert!(d["supported"].is_boolean(), "{d}");
+            assert!(d["enabled"].is_boolean(), "{d}");
+            assert!(d["bits_per_color"].is_number(), "{d}");
+        }
     }
 }
 

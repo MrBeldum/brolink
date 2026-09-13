@@ -21,6 +21,12 @@ GitHub release notes, so each version gets a heading of the form
   PC's own desktop is (as sampled numbers, never an image), and Sunshine's
   full capture settings and log tail. Each part reports its own failure
   rather than losing the whole report.
+- A PC whose monitor is gone keeps the HDR desktop that monitor asked for.
+  Windows then composes in half-float but no longer knows any luminance, so
+  a capture converting to SDR scales by nothing and every frame is black.
+  The PC now reports that state, and the Mac can turn the HDR desktop off
+  over the control API — the one display setting it can change, because the
+  picture is the thing that is broken.
 - The live video test now checks for a visible picture, with a separate
   mode that verifies the black-picture notice and restart action. Synthetic
   video tests cover the Mac decoder and GPU renderer.
