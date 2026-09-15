@@ -999,7 +999,14 @@ system_tray = enabled
             .find("the new engine did not start listening")
             .expect("prove");
         let uninstall = mig.find("msiexec").expect("uninstall");
+        let cleanup = mig
+            .find("Removing what the old installer left behind")
+            .expect("cleanup");
         assert!(copy < verify && verify < start && start < prove && prove < uninstall);
+        assert!(
+            uninstall < cleanup,
+            "the old folder goes only after the MSI:\n{mig}"
+        );
         assert!(mig.contains(crate::migrate::PRODUCT_CODE), "{mig}");
         assert!(mig.contains("/x"), "{mig}");
         assert!(
@@ -1011,6 +1018,10 @@ system_tray = enabled
         assert!(
             !dry.contains("msiexec"),
             "dry-run must never call msiexec:\n{dry}"
+        );
+        assert!(
+            !dry.contains("Removing what the old installer left behind"),
+            "dry-run must not delete anything:\n{dry}"
         );
         assert!(dry.contains("Copy-EngineState"), "{dry}");
         assert!(dry.contains("Assert-EngineState"), "{dry}");

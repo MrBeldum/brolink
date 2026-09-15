@@ -121,6 +121,18 @@ if (-not $ok) {{ throw "the new engine did not start listening" }}
 Step "Removing the old streaming installer"
 $p = Start-Process msiexec -Wait -PassThru -ArgumentList @('/x','{code}','/qn')
 if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 1605) {{ throw "msiexec /x failed: $($p.ExitCode)" }}
+Step "Removing what the old installer left behind"
+# The uninstaller keeps the config folder as user data. Its contents are in
+# config.bak beside the new engine, so once the old engine's exe is gone the
+# folder is only a name on disk. An engine that is still installed (a
+# different product) keeps its folder.
+$oldRoot = Split-Path -Parent $src
+if (-not (Test-Path -LiteralPath (Join-Path $oldRoot 'sunshine.exe'))) {{
+    Remove-Item -LiteralPath $src -Recurse -Force -ErrorAction SilentlyContinue
+    if ((Test-Path -LiteralPath $oldRoot) -and -not (Get-ChildItem -LiteralPath $oldRoot -Force | Select-Object -First 1)) {{
+        Remove-Item -LiteralPath $oldRoot -Force -ErrorAction SilentlyContinue
+    }}
+}}
 "#,
         port = brolink_core::SUNSHINE_PORT,
         code = PRODUCT_CODE,
@@ -145,6 +157,31 @@ mod tests {
         assert!(after_start_ps(false).contains("msiexec"));
         assert!(after_start_ps(false).contains(PRODUCT_CODE));
         assert!(!after_start_ps(false).contains("/i"));
+    }
+
+    #[test]
+    fn old_folder_goes_only_after_the_msi_and_only_when_its_exe_is_gone() {
+        let s = after_start_ps(false);
+        let uninstall = s.find("msiexec").expect("uninstall");
+        let cleanup = s
+            .find("Removing what the old installer left behind")
+            .expect("cleanup");
+        assert!(uninstall < cleanup, "{s}");
+        // Guarded on the old engine's exe: a product that is still installed
+        // keeps its folder.
+        assert!(
+            s.contains("if (-not (Test-Path -LiteralPath (Join-Path $oldRoot 'sunshine.exe')))"),
+            "{s}"
+        );
+        // Only the folder the state was copied from, never the new engine.
+        for line in s.lines().filter(|l| l.contains("Remove-Item")) {
+            assert!(
+                line.contains("-LiteralPath $src") || line.contains("-LiteralPath $oldRoot"),
+                "{line}"
+            );
+        }
+        assert!(!s.contains("BroLink\\engine"), "{s}");
+        assert!(after_start_ps(true).is_empty());
     }
 
     #[test]

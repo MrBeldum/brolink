@@ -22,7 +22,8 @@ GitHub release notes, so each version gets a heading of the form
   Firewall rules are named "BroLink". An engine installed earlier by an
   MSI is migrated in order — copy state, verify, start, prove it listens,
   then uninstall the MSI — and keeps its pairing and web login; a
-  `config.bak` is left beside it. The host offers **Update this PC** after
+  `config.bak` is left beside it and the old install folder is removed
+  once the MSI is gone. The host offers **Update this PC** after
   an exe-only update and refuses a self-update while a stream is running.
 - A PC whose engine certificate changed asks to pair again instead of a
   generic TLS error, and the old pin is forgotten.
@@ -41,6 +42,8 @@ GitHub release notes, so each version gets a heading of the form
   previous session is reported instead of silently resuming the wrong app.
 - Frame rate and bitrate no longer remain frozen at their last good values
   when video stops. Stream overlays no longer pass clicks through to the PC.
+- The stream's audio line says when the output device is taking no sound,
+  instead of naming a device that is silent.
 - VideoToolbox callback errors now request a recovery frame and recreate
   failed decoder sessions, just like synchronous decode errors.
 - The PC's display report now answers why a capture is black: whether any
