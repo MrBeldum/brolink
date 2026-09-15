@@ -339,6 +339,13 @@ impl Service {
                 "BroLink has no working login for {}.",
                 streamer.kind
             ));
+        } else if streamer.kind == "BroLink"
+            && !crate::brand::is_branded_cached(std::path::Path::new(crate::streamer::ENGINE_DIR))
+        {
+            setup.push(
+                "The streaming engine still shows its upstream name and icon in Task Manager."
+                    .into(),
+            );
         }
         if wake.magic_packet == Some(false) {
             setup.push(format!("Wake-on-LAN is off on {}.", wake.adapter));

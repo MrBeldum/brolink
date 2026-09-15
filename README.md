@@ -180,4 +180,6 @@ scripts/        installers and the macOS bundle
 
 GPL-3.0-or-later; see [LICENSE](LICENSE). BroLink compiles in
 moonlight-common-c (GPL-3.0) and ships Sunshine's Windows lite archive
-(GPL-3.0) unmodified. Third-party notices are in [NOTICE](NOTICE).
+(GPL-3.0) unmodified; on the PC, setup gives the unpacked executables
+BroLink's name and icon and keeps their copyright and licence strings.
+Third-party notices are in [NOTICE](NOTICE).

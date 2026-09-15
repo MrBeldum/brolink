@@ -21,7 +21,9 @@ streaming.
 2. Click **Set up this PC**. One UAC prompt runs a script that:
    - unpacks the bundled engine archive into
      `%ProgramFiles%\BroLink\engine` (downloads that pinned release if the
-     archive is not beside the exe);
+     archive is not beside the exe), and gives its executables BroLink's
+     name and icon so Task Manager and the volume mixer show "BroLink
+     Streaming" (their copyright and licence strings are kept);
    - gives BroLink a login to the engine and restarts the engine service;
    - adds firewall rules: TCP 47850 inbound from `100.64.0.0/10` only, UDP 9
      for the wake-packet listener, and the streaming ports from the tailnet;
