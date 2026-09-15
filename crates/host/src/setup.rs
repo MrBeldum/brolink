@@ -267,7 +267,7 @@ pub fn script(p: &Plan<'_>) -> String {
     }}
     $dir = '{engine}'
     {migrate_copy}Write-EngineConf $dir
-    {stop_old}Step "Registering the {display} service"
+    {brand_new}{stop_old}Step "Registering the {display} service"
     # The engine's service wrapper is SERVICE_WIN32_OWN_PROCESS, so Windows
     # ignores the name it hands StartServiceCtrlDispatcher and '{service}'
     # should dispatch fine. That is proven here rather than assumed: if the
@@ -308,11 +308,26 @@ pub fn script(p: &Plan<'_>) -> String {
             display = SERVICE_DISPLAY,
             repo = crate::streamer::REPO,
             migrate_copy = migrate_copy,
+            brand_new = if p.dry_run {
+                ""
+            } else {
+                "Brand-Engine $dir\n    "
+            },
             stop_old = stop_old,
             after_start = after_start,
         )
     } else {
         String::new()
+    };
+    // Only the engine BroLink installed is ever branded: an engine someone
+    // else put in Program Files is theirs. A dry run changes no files.
+    let brand_existing = if p.dry_run {
+        String::new()
+    } else {
+        format!(
+            "if ($dir -eq '{}') {{ Brand-Engine $dir }}\n        ",
+            crate::streamer::ENGINE_DIR
+        )
     };
     let adapter = if p.adapter.is_empty() {
         "Step \"Wake-on-LAN: adapter unknown, skipped\"\n".to_string()
@@ -367,6 +382,34 @@ try {{ powercfg /deviceenablewake '{desc}' | Out-Null }} catch {{ Write-Output "
         r#"# BroLink setup. Generated; re-run "Set up this PC" in BroLink Host rather than editing.
 $ErrorActionPreference = 'Continue'
 function Step($m) {{ Write-Output "[$(Get-Date -Format HH:mm:ss)] $m" }}
+function Brand-Engine($d) {{
+    # Task Manager, the volume mixer and a firewall prompt show a program's
+    # version block and icon. The engine's executables get BroLink's, in
+    # place, with their copyright and licence strings kept; the archive they
+    # were unpacked from is untouched. The engine has to be stopped for the
+    # rewrite, so only services whose binary is inside this directory are
+    # paused, and they come back whatever happens. A failure here is
+    # cosmetic: streaming works either way, so it is reported, not thrown.
+    $exe = Join-Path $d 'sunshine.exe'
+    if ((Get-Item -LiteralPath $exe -ErrorAction SilentlyContinue).VersionInfo.FileDescription -eq '{description}') {{ return }}
+    Step "Giving the engine BroLink's name and icon"
+    $held = @()
+    try {{
+        $held = @(Get-CimInstance Win32_Service | Where-Object {{ $_.State -eq 'Running' -and $_.PathName -like ('*' + $d + '*') }} | ForEach-Object {{ $_.Name }})
+        foreach ($s in $held) {{ Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }}
+        $errFile = Join-Path $env:TEMP ('brolink-brand-' + [guid]::NewGuid().ToString('N') + '.txt')
+        $p = Start-Process -FilePath '{host_exe}' -ArgumentList @('--brand-engine', ('"' + $d + '"')) -Wait -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
+        if ($p.ExitCode -ne 0) {{
+            $why = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
+            Write-Output "  the engine keeps its upstream name: exit $($p.ExitCode) $why"
+        }}
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }} catch {{
+        Write-Output "  the engine keeps its upstream name: $_"
+    }} finally {{
+        foreach ($s in $held) {{ Start-Service -Name $s -ErrorAction SilentlyContinue }}
+    }}
+}}
 {conceal}
 Step "BroLink setup started"
 $migrate = {migrate_flag}
@@ -380,7 +423,7 @@ $keepEAP = $ErrorActionPreference
 try {{
 {install}
     if ($dir) {{
-        Write-EngineConf $dir
+        {brand_existing}Write-EngineConf $dir
 {creds}    }} else {{
         Step "The streaming engine is not installed and was not requested"
     }}
@@ -427,6 +470,9 @@ exit 0
 "#,
         dirs = dirs,
         conceal = conceal_ps(),
+        description = crate::brand::DESCRIPTION,
+        host_exe = q(&p.exe.display().to_string()),
+        brand_existing = brand_existing,
         install = install,
         migrate_flag = if p.migrate { "$true" } else { "$false" },
         creds = creds,
@@ -555,6 +601,13 @@ mod tests {
 
     /// The script with its comments stripped: a "must not appear" check has
     /// to be about what the script does, not about what it explains.
+    /// Position of `needle` after the preamble's function definitions, so
+    /// an ordering test reads the steps as they run, not the helpers.
+    fn find_in_body(s: &str, needle: &str) -> Option<usize> {
+        let at = s.find("BroLink setup started")?;
+        s[at..].find(needle).map(|i| i + at)
+    }
+
     fn code(s: &str) -> String {
         s.lines()
             .filter(|l| !l.trim_start().starts_with('#'))
@@ -914,7 +967,7 @@ system_tray = enabled
         let write = s
             .find("Write-EngineConf $dir")
             .expect("conf write is called");
-        let start = s.find("Start-Service").expect("service start");
+        let start = find_in_body(&s, "Start-Service").expect("service start");
         assert!(
             write < start,
             "conf must land before the first Start-Service or the tray flashes:\n{s}"
@@ -952,7 +1005,7 @@ system_tray = enabled
         let disable = s
             .find("StartupType Disabled")
             .expect("old service is disabled");
-        let start = s.find("Start-Service").expect("new service starts");
+        let start = find_in_body(&s, "Start-Service").expect("new service starts");
         assert!(
             disable < start,
             "the old engine must be down before 47984 is taken:\n{s}"
@@ -994,7 +1047,7 @@ system_tray = enabled
         let mig = script(&migrate_plan(&exe, false));
         let copy = mig.find("Copy-EngineState").expect("copy");
         let verify = mig.find("Assert-EngineState").expect("verify");
-        let start = mig.find("Start-Service").expect("start");
+        let start = find_in_body(&mig, "Start-Service").expect("start");
         let prove = mig
             .find("the new engine did not start listening")
             .expect("prove");
@@ -1025,6 +1078,50 @@ system_tray = enabled
         );
         assert!(dry.contains("Copy-EngineState"), "{dry}");
         assert!(dry.contains("Assert-EngineState"), "{dry}");
+    }
+
+    #[test]
+    fn branding_follows_the_copy_touches_only_brolinks_engine_and_skips_dry_runs() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let fresh = code(&script(&plan(&exe, true)));
+        let copied = fresh
+            .find("the engine did not copy to")
+            .expect("copy check");
+        let brand = fresh.find("Brand-Engine $dir").expect("brand call");
+        let register = fresh.find("Registering the").expect("register");
+        assert!(copied < brand && brand < register, "{fresh}");
+        assert!(
+            fresh
+                .contains(r"if ($dir -eq 'C:\Program Files\BroLink\engine') { Brand-Engine $dir }"),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains(".VersionInfo.FileDescription -eq 'BroLink Streaming'"),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains(r"-FilePath 'C:\x\brolink-host.exe'"),
+            "{fresh}"
+        );
+        assert!(fresh.contains("'--brand-engine'"), "{fresh}");
+        // Only services running out of the engine directory are paused.
+        assert!(
+            fresh.contains("$_.PathName -like ('*' + $d + '*')"),
+            "{fresh}"
+        );
+        assert!(fresh.contains("finally"), "{fresh}");
+
+        let existing = code(&script(&plan(&exe, false)));
+        assert!(existing.contains("{ Brand-Engine $dir }"), "{existing}");
+        assert!(!existing.contains("Registering the"), "{existing}");
+
+        let dry = code(&script(&migrate_plan(&exe, true)));
+        assert!(
+            !dry.contains("Brand-Engine $dir"),
+            "dry run must not brand:\n{dry}"
+        );
+        let wet = code(&script(&migrate_plan(&exe, false)));
+        assert!(wet.contains("Brand-Engine $dir"), "{wet}");
     }
 
     /// The seam the PowerShell syntax gate runs through: the generated script

@@ -23,7 +23,11 @@ GitHub release notes, so each version gets a heading of the form
   MSI is migrated in order — copy state, verify, start, prove it listens,
   then uninstall the MSI — and keeps its pairing and web login; a
   `config.bak` is left beside it and the old install folder is removed
-  once the MSI is gone. The host offers **Update this PC** after
+  once the MSI is gone. The engine's processes appear as "BroLink
+  Streaming" with BroLink's icon in Task Manager, the volume mixer and
+  firewall prompts: setup rewrites their version block and icon in place
+  and keeps their copyright and licence strings. The host offers
+  **Update this PC** after
   an exe-only update and refuses a self-update while a stream is running.
 - A PC whose engine certificate changed asks to pair again instead of a
   generic TLS error, and the old pin is forgotten.
