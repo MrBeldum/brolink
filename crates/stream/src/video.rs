@@ -21,6 +21,40 @@ pub struct Frame {
     pub full_range: bool,
 }
 
+impl Frame {
+    /// Check visible NV12 pixels, excluding row padding. A completely black
+    /// capture can still be a valid, successfully decoded video stream.
+    pub fn is_black(&self) -> bool {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let chroma_width = width.div_ceil(2) * 2;
+        let chroma_height = height.div_ceil(2);
+        if width == 0
+            || height == 0
+            || self.y_stride < width
+            || self.uv_stride < chroma_width
+            || self.y.len() < self.y_stride.saturating_mul(height)
+            || self.uv.len() < self.uv_stride.saturating_mul(chroma_height)
+        {
+            return false;
+        }
+        let black = if self.full_range { 1 } else { 17 };
+        self.y
+            .chunks(self.y_stride)
+            .take(height)
+            .all(|row| row[..width].iter().all(|&v| v <= black))
+            && self
+                .uv
+                .chunks(self.uv_stride)
+                .take(chroma_height)
+                .all(|row| {
+                    row[..chroma_width]
+                        .iter()
+                        .all(|&v| (127..=129).contains(&v))
+                })
+    }
+}
+
 /// The newest decoded frame, replaced rather than queued: a renderer that
 /// falls behind shows the latest picture instead of catching up on old ones.
 #[derive(Default)]
@@ -151,6 +185,34 @@ pub fn interleave_uv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn black_detection_checks_visible_pixels_and_both_ranges() {
+        let mut frame = Frame {
+            width: 2,
+            height: 2,
+            y: vec![16, 16, 255, 16, 16, 255],
+            y_stride: 3,
+            uv: vec![128, 128, 255, 255],
+            uv_stride: 4,
+            full_range: false,
+        };
+        assert!(frame.is_black(), "padding is not picture data");
+        frame.y[4] = 235;
+        assert!(!frame.is_black(), "even a small visible detail counts");
+        frame.y[4] = 16;
+        frame.full_range = true;
+        assert!(!frame.is_black());
+        frame.y = vec![0, 0, 255, 0, 0, 255];
+        assert!(frame.is_black());
+        frame.uv[0] = 70;
+        assert!(!frame.is_black(), "colored video is not a blank capture");
+        frame.uv.clear();
+        assert!(
+            !frame.is_black(),
+            "an invalid frame must not be diagnosed as black"
+        );
+    }
 
     #[test]
     fn nal_units_are_split_on_both_start_code_lengths() {

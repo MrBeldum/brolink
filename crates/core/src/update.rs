@@ -418,6 +418,19 @@ mod tests {
     }
 
     #[test]
+    fn is_newer_than_offers_3_2_0_over_3_1_2_rc_5_and_not_equals() {
+        let release = Release {
+            version: Version::new(3, 2, 0),
+            tag: "v3.2.0".into(),
+            prerelease: false,
+            assets: vec![],
+        };
+        assert!(release.is_newer_than(&Version::parse("3.1.2-rc.5").unwrap()));
+        assert!(!release.is_newer_than(&Version::new(3, 2, 0)));
+        assert_eq!(current(), Version::new(3, 2, 0));
+    }
+
+    #[test]
     fn urls_split_and_headers_are_case_insensitive() {
         assert_eq!(
             split_url("https://api.github.com/repos/a/b?x=1").unwrap(),

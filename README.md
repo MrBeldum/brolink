@@ -5,12 +5,11 @@ hardware decode. Leave the PC on (or asleep on its own network) and
 Tailscale is the path.
 
 BroLink is two programs. **BroLink Host** runs on the Windows PC. **BroLink**
-runs on the Mac and contains the whole streaming client: Moonlight's
-GameStream library is compiled in, frames are decoded with VideoToolbox and
-drawn in BroLink's own window. Nothing else has to be installed on the Mac.
-On the PC, BroLink Host installs the [Sunshine](https://github.com/LizardByte/Sunshine)
-streaming server that ships in its zip and configures it, so the PC needs
-no download either.
+runs on the Mac and contains the whole streaming client: BroLink's stream
+protocol is compiled in, frames are decoded with VideoToolbox and drawn in
+BroLink's own window. Nothing else has to be installed on the Mac. On the
+PC, BroLink Host installs the streaming engine that ships in its zip and
+configures it, so the PC needs no download either.
 
 [Tailscale](https://tailscale.com) connects the two. It carries the stream
 through any NAT and it is the identity check: the host answers only a Mac
@@ -22,7 +21,7 @@ signed in to the same Tailscale account as the PC.
    listed with what each one can do right now.
 2. Click **Connect**. If the PC is asleep, BroLink wakes it and waits. The
    first time, it pairs with the PC by itself: the PIN goes to BroLink Host
-   over Tailscale, which enters it in Sunshine.
+   over Tailscale, which enters it for you.
 3. The desktop appears, full screen by default. A toolbar above the picture
    has the stream details, whether the path is direct or relayed, a
    **Quality** menu (Auto picks from the path), mouse capture, a **Keys**
@@ -45,13 +44,12 @@ signed in to the same Tailscale account as the PC.
    and unzip it. Run `brolink-host.exe`, or `install-host.ps1` for
    shortcuts and start-at-logon.
 3. Click **Set up this PC**. One administrator prompt installs the bundled
-   Sunshine as a Windows service (if none is installed), gives BroLink a
-   login to it, opens the control port to your tailnet only, turns Fast
-   Startup off and arms the network card for Wake-on-LAN.
+   streaming engine as a Windows service (if none is installed), gives
+   BroLink a login to it, opens the control port to your tailnet only,
+   turns Fast Startup off and arms the network card for Wake-on-LAN.
 
-Sunshine's own settings (encoder, display, HDR, audio device) stay at
-`https://localhost:47990`; the login is shown in the BroLink Host window.
-Details in [docs/WINDOWS.md](docs/WINDOWS.md).
+Advanced engine settings are not exposed; BroLink configures the engine
+itself. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Mac (Apple Silicon)
 
@@ -84,9 +82,12 @@ GitHub publishes and its own code signature, swapped into `/Applications`
 once no stream is running, and relaunched. A newer BroLink Host is sent
 from the Mac to every PC whose host reports an older version, over the same
 Tailscale-authenticated control API that can put the PC to sleep; the host
-verifies the digest, replaces its executable and restarts. A PC that is
-asleep gets the update the next time the Mac sees it. Nothing is downloaded
-on the PC, and no GitHub login is needed there.
+verifies the digest, replaces its executable and restarts. That path
+updates only `brolink-host.exe`. The Windows zip on GitHub also contains
+the pinned engine archive for first-time **Set up this PC**; a host update
+does not install or migrate the engine. A PC that is asleep gets the host
+update the next time the Mac sees it. Nothing is downloaded on the PC, and
+no GitHub login is needed there.
 
 Public releases need no GitHub login. If the repository is private, the Mac
 uses the GitHub token git has stored for github.com,
@@ -99,8 +100,9 @@ after which updates are automatic.
 
 A PC nobody can get to in person stays reachable when three things hold.
 BroLink Host starts with Windows by default and turns this back on at every
-start unless the owner switches it off in the host window. Sunshine runs as
-a Windows service, so streaming works even before anyone logs in. And the
+start unless the owner switches it off in the host window. The streaming
+engine runs as a Windows service, so streaming works even before anyone
+logs in. And the
 PC's Tailscale node key must not expire: Tailscale keys expire after 180
 days unless key expiry is disabled for that machine in the
 [admin console](https://login.tailscale.com/admin/machines), and an expired
@@ -133,10 +135,10 @@ Ethernet is strongly preferred; most Wi-Fi adapters cannot wake a PC.
   loopback and Tailscale addresses that `tailscale whois` attributes to the
   account the PC is signed in as. Everyone else gets a 403. The firewall
   rule setup adds is scoped to `100.64.0.0/10`.
-- The stream is Sunshine's GameStream protocol over Tailscale (WireGuard),
-  with Sunshine's certificate pairing on top; BroLink pins the PC's
-  certificate after the first pairing.
-- No BroLink account or password exists. The Sunshine login BroLink
+- The stream is BroLink's stream protocol over Tailscale (WireGuard), with
+  certificate pairing on top; BroLink pins the PC's certificate after the
+  first pairing.
+- No BroLink account or password exists. The engine login BroLink
   generates stays on the PC.
 - Remote power actions can be turned off in the host window.
 
@@ -159,13 +161,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the UI snapshots and the tests
-that run against a real Sunshine.
+that run against a real engine.
 
 ## Layout
 
 ```
 crates/core     control API types, small HTTP, Tailscale CLI, wake packets, config
-crates/stream   the GameStream client: pairing, launch, moonlight-common-c, decode, audio
+crates/stream   the stream client: pairing, launch, protocol, decode, audio
 crates/host     Windows: background control service, control panel, setup script, self-update
 crates/client   macOS: PC list, wake, pair, stream window and toolbar, updater
 crates/ui       theme and widgets shared by both windows
@@ -177,5 +179,7 @@ scripts/        installers and the macOS bundle
 ## License
 
 GPL-3.0-or-later; see [LICENSE](LICENSE). BroLink compiles in
-moonlight-common-c (GPL-3.0) and ships Sunshine's installer (GPL-3.0)
-unmodified. Third-party notices are in [NOTICE](NOTICE).
+moonlight-common-c (GPL-3.0) and ships Sunshine's Windows lite archive
+(GPL-3.0) unmodified; on the PC, setup gives the unpacked executables
+BroLink's name and icon and keeps their copyright and licence strings.
+Third-party notices are in [NOTICE](NOTICE).

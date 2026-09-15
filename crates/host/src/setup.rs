@@ -17,7 +17,11 @@ use std::path::{Path, PathBuf};
 
 pub struct Plan<'a> {
     pub exe: &'a Path,
-    pub install_sunshine: bool,
+    pub install_engine: bool,
+    /// Copy old engine state, skip `--creds`, uninstall the MSI after prove.
+    pub migrate: bool,
+    /// Copy+verify only; never msiexec.
+    pub dry_run: bool,
     pub sunshine_user: &'a str,
     pub sunshine_pass: &'a str,
     /// Adapter name and interface description from the wake probe; empty
@@ -31,45 +35,299 @@ pub fn log_path() -> Option<PathBuf> {
     data_dir().ok().map(|d| d.join("setup.log"))
 }
 
-/// The Sunshine installer shipped beside `brolink-host.exe`.
-pub const SUNSHINE_MSI: &str = "Sunshine-Windows-AMD64-installer.msi";
+/// The engine archive shipped beside `brolink-host.exe`. The lite archive
+/// is a plain zip: no Add/Remove Programs entry, no Start Menu shortcut and
+/// no service or firewall rule of its own, so BroLink names all three.
+pub const ENGINE_ZIP: &str = "Sunshine-Windows-AMD64-lite.zip";
 
-pub fn bundled_sunshine(exe: &Path) -> bool {
-    exe.parent().is_some_and(|d| d.join(SUNSHINE_MSI).exists())
+/// The upstream release the engine is pinned to, and the SHA-256 GitHub
+/// publishes for `ENGINE_ZIP` on it. Both the bundled copy and a download
+/// are checked against this digest before anything is unpacked.
+pub const ENGINE_TAG: &str = "v2026.906.222525";
+pub const ENGINE_SHA256: &str = "50f4123dd15a6817513589c912581260c34cc4a58e9a5f3071ebac3d92c94c15";
+
+/// The single folder every path in `ENGINE_ZIP` sits under.
+pub const ENGINE_ZIP_ROOT: &str = "Sunshine";
+
+/// What a usable engine directory must contain, relative to its root. The
+/// list is checked twice: once on the unpacked staging tree, and again on
+/// the copy in `ENGINE_DIR`, because the copy is what the service points at.
+pub const ENGINE_REQUIRED: [&str; 2] = ["sunshine.exe", r"tools\sunshinesvc.exe"];
+
+/// The service BroLink registers, and the name it shows under. The engine's
+/// service wrapper is `SERVICE_WIN32_OWN_PROCESS`, for which Windows ignores
+/// the name the process passes to `StartServiceCtrlDispatcher`, so the SCM
+/// name is BroLink's to pick. `UPSTREAM_SERVICE` is the name that wrapper
+/// was compiled with, kept only as the name the script falls back *to*
+/// after proving `SERVICE` will not start.
+pub const SERVICE: &str = "BroLinkStream";
+pub const SERVICE_DISPLAY: &str = "BroLink Streaming";
+pub const UPSTREAM_SERVICE: &str = "SunshineService";
+
+pub const TCP_RULE: &str = "BroLink Streaming TCP";
+pub const UDP_RULE: &str = "BroLink Streaming UDP";
+
+/// Keys written into `config\sunshine.conf` before the engine first starts.
+/// From Sunshine v2026.906.222525 (`cb72dff`): `system_tray` is the tray
+/// *and* desktop toasts (there is no separate toast key); `origin_web_ui_allowed
+/// = pc` is localhost-only Web UI. `bind_address` is not set: it binds every
+/// socket, including GameStream.
+pub const ENGINE_CONF: &[(&str, &str)] =
+    &[("system_tray", "disabled"), ("origin_web_ui_allowed", "pc")];
+
+#[cfg(test)]
+fn conf_key(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let (k, _) = line.split_once('=')?;
+    let k = k.trim();
+    (!k.is_empty()).then_some(k)
+}
+
+/// Upsert `ENGINE_CONF` into an existing sunshine.conf. Known keys are
+/// replaced in place (first occurrence wins, later copies of those keys
+/// dropped); everything else is kept. Sunshine's parser uses `emplace`, so
+/// a naive append would leave an old `system_tray = enabled` in force.
+#[cfg(test)]
+fn conceal_conf(existing: &str) -> String {
+    let existing = existing.strip_prefix('\u{feff}').unwrap_or(existing);
+    let mut seen = [false; ENGINE_CONF.len()];
+    let mut out = String::new();
+    if !existing.trim().is_empty() {
+        for line in existing.lines() {
+            match conf_key(line).and_then(|k| ENGINE_CONF.iter().position(|(n, _)| *n == k)) {
+                Some(i) if seen[i] => continue,
+                Some(i) => {
+                    seen[i] = true;
+                    let (n, v) = ENGINE_CONF[i];
+                    out.push_str(n);
+                    out.push_str(" = ");
+                    out.push_str(v);
+                    out.push('\n');
+                }
+                None => {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    for (i, (n, v)) in ENGINE_CONF.iter().enumerate() {
+        if !seen[i] {
+            out.push_str(n);
+            out.push_str(" = ");
+            out.push_str(v);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn conceal_ps() -> String {
+    let pairs = ENGINE_CONF
+        .iter()
+        .map(|(k, v)| format!("        '{k}' = '{v}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"function Write-EngineConf($dir) {{
+    Step "Hiding the engine tray and restricting the web UI to this PC"
+    $confDir = Join-Path $dir 'config'
+    New-Item -ItemType Directory -Force -Path $confDir | Out-Null
+    $conf = Join-Path $confDir 'sunshine.conf'
+    $raw = ''
+    if (Test-Path -LiteralPath $conf) {{ $raw = [IO.File]::ReadAllText($conf) }}
+    if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) {{ $raw = $raw.Substring(1) }}
+    $want = [ordered]@{{
+{pairs}
+    }}
+    $seen = @{{}}
+    $out = @()
+    $lines = @()
+    if ($raw.Trim().Length -gt 0) {{ $lines = $raw -split '\r?\n' }}
+    if ($lines.Count -gt 0 -and $lines[-1] -eq '') {{
+        if ($lines.Count -eq 1) {{ $lines = @() }} else {{ $lines = $lines[0..($lines.Count-2)] }}
+    }}
+    foreach ($line in $lines) {{
+        if ($line -match '^\s*#' -or $line -match '^\s*$') {{ $out += $line; continue }}
+        $eq = $line.IndexOf('=')
+        if ($eq -lt 1) {{ $out += $line; continue }}
+        $k = $line.Substring(0, $eq).Trim()
+        if ($want.Contains($k)) {{
+            if ($seen.Contains($k)) {{ continue }}
+            $seen[$k] = $true
+            $out += "$k = $($want[$k])"
+            continue
+        }}
+        $out += $line
+    }}
+    foreach ($k in @($want.Keys)) {{
+        if (-not $seen.Contains($k)) {{ $out += "$k = $($want[$k])" }}
+    }}
+    $text = ($out -join "`n") + "`n"
+    [IO.File]::WriteAllText($conf, $text, (New-Object System.Text.UTF8Encoding $false))
+}}
+"#
+    )
+}
+
+pub fn bundled_engine(exe: &Path) -> bool {
+    exe.parent().is_some_and(|d| d.join(ENGINE_ZIP).exists())
+}
+
+/// Directory the exe sits in, split on either slash so a Windows path
+/// dumped from a Mac test still points at the bundled archive.
+fn win_dir(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.rsplit_once(['\\', '/'])
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_else(|| s.into_owned())
 }
 
 pub fn script(p: &Plan<'_>) -> String {
     let q = |s: &str| s.replace('\'', "''");
-    let exe_dir = p.exe.parent().unwrap_or(p.exe).display().to_string();
-    let install = if p.install_sunshine {
+    let exe_dir = win_dir(p.exe);
+    let dirs = crate::streamer::INSTALL_DIRS
+        .iter()
+        .map(|(_, d)| format!("'{d}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let required = ENGINE_REQUIRED
+        .iter()
+        .map(|f| format!("'{f}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let migrate_copy = if p.migrate {
+        crate::migrate::copy_ps(crate::streamer::ENGINE_DIR)
+    } else {
+        String::new()
+    };
+    let stop_old = if p.install_engine {
+        crate::migrate::stop_old_ps()
+    } else {
+        String::new()
+    };
+    let after_start = if p.migrate {
+        crate::migrate::after_start_ps(p.dry_run)
+    } else {
+        String::new()
+    };
+    let install = if p.install_engine {
         format!(
-            r#"if (-not $dir) {{
-    $msi = Join-Path '{exe_dir}' '{msi}'
-    $downloaded = $false
-    if (Test-Path $msi) {{
-        Step "Installing the Sunshine that ships with BroLink (silent)"
+            r#"if (-not $dir -or $dir -ne '{engine}') {{
+    # Every mutating step below is critical: a half-installed engine that the
+    # service points at is worse than no engine. 'Stop' turns the cmdlets that
+    # report failure as a NON-terminating error - Expand-Archive, Copy-Item,
+    # New-Item, New-Service - into throws the catch below can see. It is
+    # restored in the finally so the best-effort steps after the engine (wake,
+    # firewall) keep their own carry-on behaviour.
+    $ErrorActionPreference = 'Stop'
+    # Owned by this run alone. A fixed name under a TEMP that is shared
+    # (LocalSystem's TEMP is C:\Windows\Temp) would let one run delete another
+    # run's staging, and -Recurse -Force on a guessable shared path is a
+    # footgun even when nothing else is running.
+    $staging = Join-Path $env:TEMP ('brolink-engine-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    $zip = Join-Path '{exe_dir}' '{zip}'
+    if (Test-Path $zip) {{
+        Step "Installing the streaming engine that ships with BroLink"
     }} else {{
-        Step "Downloading Sunshine"
-        $api = curl.exe -sSL -A brolink https://api.github.com/repos/{repo}/releases/latest | ConvertFrom-Json
-        $asset = $api.assets | Where-Object {{ $_.name -like '*Windows-AMD64-installer.msi' }} | Select-Object -First 1
-        if (-not $asset) {{ throw "no Windows installer in the latest Sunshine release" }}
-        $msi = Join-Path $env:TEMP 'Sunshine-installer.msi'
-        curl.exe -sSL -A brolink -o $msi $asset.browser_download_url
-        $downloaded = $true
-        Step "Installing Sunshine $($api.tag_name) (silent)"
+        Step "Downloading the streaming engine {tag}"
+        $json = curl.exe -sSL -A brolink https://api.github.com/repos/{repo}/releases/tags/{tag}
+        if ($LASTEXITCODE -ne 0) {{ throw "could not reach GitHub for engine release {tag} (curl exit $LASTEXITCODE)" }}
+        $asset = ($json | ConvertFrom-Json).assets | Where-Object {{ $_.name -like '*lite.zip' }} | Select-Object -First 1
+        if (-not $asset) {{ throw "no lite archive in engine release {tag}" }}
+        $zip = Join-Path $staging 'engine.zip'
+        curl.exe -sSL -A brolink -o $zip $asset.browser_download_url
+        if ($LASTEXITCODE -ne 0) {{ throw "downloading the engine archive failed (curl exit $LASTEXITCODE)" }}
     }}
-    $r = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/quiet', '/norestart') -Wait -PassThru
-    if ($r.ExitCode -ne 0) {{ throw "msiexec exited with $($r.ExitCode)" }}
-    $dir = 'C:\Program Files\Sunshine'
-    if ($downloaded) {{ Remove-Item $msi -ErrorAction SilentlyContinue }}
-}}
+    if (-not (Test-Path $zip)) {{ throw "the engine archive is missing: $zip" }}
+    # An archive that is not byte-for-byte the pinned release is never
+    # unpacked, whether it shipped beside the exe or was just downloaded.
+    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
+    if ($got -ne '{sha}') {{ throw "engine archive is not {tag}: expected {sha}, got $got" }}
+    Step "Unpacking the engine to {engine}"
+    $unpack = Join-Path $staging 'unpack'
+    Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force
+    $root = Join-Path $unpack '{root}'
+    foreach ($need in {required}) {{
+        if (-not (Test-Path (Join-Path $root $need))) {{ throw "the engine archive did not unpack: {root}\$need is missing" }}
+    }}
+    New-Item -ItemType Directory -Force -Path '{engine}' | Out-Null
+    # The archive has no config directory, so -Force overwrites program files
+    # and leaves an existing engine config in place on a re-run.
+    Copy-Item (Join-Path $root '*') '{engine}' -Recurse -Force
+    # The DESTINATION is what the service will point at, so the destination is
+    # what has to be checked. A copy that failed part way leaves a directory
+    # that exists and a service binary that does not.
+    foreach ($need in {required}) {{
+        if (-not (Test-Path (Join-Path '{engine}' $need))) {{ throw "the engine did not copy to {engine}: $need is missing" }}
+    }}
+    $dir = '{engine}'
+    {migrate_copy}Write-EngineConf $dir
+    {brand_new}{stop_old}Step "Registering the {display} service"
+    # The engine's service wrapper is SERVICE_WIN32_OWN_PROCESS, so Windows
+    # ignores the name it hands StartServiceCtrlDispatcher and '{service}'
+    # should dispatch fine. That is proven here rather than assumed: if the
+    # service will not reach Running it is removed and re-registered under
+    # '{upstream}', the name the wrapper was built with, still displayed as
+    # "{display}". An existing '{upstream}' belongs to an engine BroLink did
+    # not install and is never touched - migrating that one is a later step.
+    $svcBin = '"' + (Join-Path $dir 'tools\sunshinesvc.exe') + '"'
+    $svc = '{service}'
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {{
+        sc.exe delete $svc | Out-Null
+        if ($LASTEXITCODE -ne 0) {{ throw "could not remove the existing $svc service (sc exit $LASTEXITCODE)" }}
+        Start-Sleep -Milliseconds 500
+    }}
+    New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to BroLink.' | Out-Null
+    Start-Service -Name $svc -ErrorAction SilentlyContinue
+    if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).Status -ne 'Running') {{
+        Step "  '{service}' would not start; re-registering under the engine's own service name"
+        sc.exe delete $svc | Out-Null
+        Start-Sleep -Milliseconds 500
+        if (Get-Service -Name '{upstream}' -ErrorAction SilentlyContinue) {{ throw "'{service}' would not start and '{upstream}' already exists; leaving that engine alone" }}
+        $svc = '{upstream}'
+        New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to BroLink.' | Out-Null
+        Start-Service -Name $svc -ErrorAction SilentlyContinue
+    }}
+    if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).Status -ne 'Running') {{ throw "the {display} service did not start" }}
+    {after_start}}}
 "#,
             exe_dir = q(&exe_dir),
-            msi = SUNSHINE_MSI,
-            repo = crate::streamer::REPO
+            zip = ENGINE_ZIP,
+            tag = ENGINE_TAG,
+            sha = ENGINE_SHA256,
+            root = ENGINE_ZIP_ROOT,
+            required = required,
+            engine = crate::streamer::ENGINE_DIR,
+            service = SERVICE,
+            upstream = UPSTREAM_SERVICE,
+            display = SERVICE_DISPLAY,
+            repo = crate::streamer::REPO,
+            migrate_copy = migrate_copy,
+            brand_new = if p.dry_run {
+                ""
+            } else {
+                "Brand-Engine $dir\n    "
+            },
+            stop_old = stop_old,
+            after_start = after_start,
         )
     } else {
         String::new()
+    };
+    // Only the engine BroLink installed is ever branded: an engine someone
+    // else put in Program Files is theirs. A dry run changes no files.
+    let brand_existing = if p.dry_run {
+        String::new()
+    } else {
+        format!(
+            "if ($dir -eq '{}') {{ Brand-Engine $dir }}\n        ",
+            crate::streamer::ENGINE_DIR
+        )
     };
     let adapter = if p.adapter.is_empty() {
         "Step \"Wake-on-LAN: adapter unknown, skipped\"\n".to_string()
@@ -101,25 +359,84 @@ try {{ powercfg /deviceenablewake '{desc}' | Out-Null }} catch {{ Write-Output "
             desc = q(p.adapter_description)
         )
     };
+    // A migrated PC keeps the web login it already has: rotating it would
+    // orphan the credentials the Mac side stored, so the script never even
+    // contains the `--creds` line (nor the password) in that case.
+    let creds = if p.migrate {
+        "        Step \"Keeping the migrated web login\"\n".to_string()
+    } else {
+        format!(
+            r#"        Step "Setting the engine login BroLink uses"
+        Push-Location $dir
+        & (Join-Path $dir 'sunshine.exe') --creds '{user}' '{pass}' 2>&1 | Out-Null
+        Pop-Location
+        Step "Restarting the streaming service"
+        Get-Service | Where-Object {{ $_.Name -match '{service_match}' }} | Restart-Service -ErrorAction SilentlyContinue
+"#,
+            user = q(p.sunshine_user),
+            pass = q(p.sunshine_pass),
+            service_match = crate::migrate::SERVICE_MATCH,
+        )
+    };
     format!(
         r#"# BroLink setup. Generated; re-run "Set up this PC" in BroLink Host rather than editing.
 $ErrorActionPreference = 'Continue'
 function Step($m) {{ Write-Output "[$(Get-Date -Format HH:mm:ss)] $m" }}
+function Brand-Engine($d) {{
+    # Task Manager, the volume mixer and a firewall prompt show a program's
+    # version block and icon. The engine's executables get BroLink's, in
+    # place, with their copyright and licence strings kept; the archive they
+    # were unpacked from is untouched. The engine has to be stopped for the
+    # rewrite, so only services whose binary is inside this directory are
+    # paused, and they come back whatever happens. A failure here is
+    # cosmetic: streaming works either way, so it is reported, not thrown.
+    $exe = Join-Path $d 'sunshine.exe'
+    if ((Get-Item -LiteralPath $exe -ErrorAction SilentlyContinue).VersionInfo.FileDescription -eq '{description}') {{ return }}
+    Step "Giving the engine BroLink's name and icon"
+    $held = @()
+    try {{
+        $held = @(Get-CimInstance Win32_Service | Where-Object {{ $_.State -eq 'Running' -and $_.PathName -like ('*' + $d + '*') }} | ForEach-Object {{ $_.Name }})
+        foreach ($s in $held) {{ Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }}
+        $errFile = Join-Path $env:TEMP ('brolink-brand-' + [guid]::NewGuid().ToString('N') + '.txt')
+        $p = Start-Process -FilePath '{host_exe}' -ArgumentList @('--brand-engine', ('"' + $d + '"')) -Wait -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
+        if ($p.ExitCode -ne 0) {{
+            $why = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
+            Write-Output "  the engine keeps its upstream name: exit $($p.ExitCode) $why"
+        }}
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }} catch {{
+        Write-Output "  the engine keeps its upstream name: $_"
+    }} finally {{
+        foreach ($s in $held) {{ Start-Service -Name $s -ErrorAction SilentlyContinue }}
+    }}
+}}
+{conceal}
 Step "BroLink setup started"
-$dir = @('C:\Program Files\Sunshine', 'C:\Program Files\Apollo') | Where-Object {{ Test-Path (Join-Path $_ 'sunshine.exe') }} | Select-Object -First 1
+$migrate = {migrate_flag}
+$dir = @({dirs}) | Where-Object {{ Test-Path (Join-Path $_ 'sunshine.exe') }} | Select-Object -First 1
+# Set when the engine step fails. The wake and host-firewall steps below are
+# independent and still run, but the script exits non-zero at the end so the
+# caller does not report a successful setup over a broken engine.
+$engineError = $null
+$staging = $null
+$keepEAP = $ErrorActionPreference
 try {{
 {install}
     if ($dir) {{
-        Step "Setting the Sunshine web login BroLink uses"
-        Push-Location $dir
-        & (Join-Path $dir 'sunshine.exe') --creds '{user}' '{pass}' 2>&1 | Out-Null
-        Pop-Location
-        Step "Restarting the Sunshine service"
-        Get-Service | Where-Object {{ $_.Name -match 'Sunshine|Apollo' }} | Restart-Service -ErrorAction SilentlyContinue
-    }} else {{
-        Step "Sunshine is not installed and was not requested"
+        {brand_existing}Write-EngineConf $dir
+{creds}    }} else {{
+        Step "The streaming engine is not installed and was not requested"
     }}
-}} catch {{ Write-Output "  sunshine: $_" }}
+}} catch {{
+    $engineError = "$_"
+    Write-Output "  engine: $_"
+    # A failed install leaves no engine worth pointing a firewall rule at, and
+    # $dir may name a directory that only half exists.
+    $dir = $null
+}} finally {{
+    $ErrorActionPreference = $keepEAP
+    if ($staging -and (Test-Path $staging)) {{ Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue }}
+}}
 Step "Opening TCP {port} to the tailnet for BroLink Host"
 netsh advfirewall firewall delete rule name="BroLink Host" | Out-Null
 netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program="{exe}" | Out-Null
@@ -127,26 +444,42 @@ Step "Opening UDP 9 so a Mac can check its wake path while this PC is awake"
 netsh advfirewall firewall delete rule name="BroLink wake" | Out-Null
 netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program="{exe}" | Out-Null
 if ($dir) {{
-    # Sunshine's installer adds its own rules; these make sure the tailnet
-    # can reach it even if that step was skipped or the rules were removed.
-    Step "Opening Sunshine's ports to the tailnet"
-    netsh advfirewall firewall delete rule name="BroLink Sunshine TCP" | Out-Null
-    netsh advfirewall firewall delete rule name="BroLink Sunshine UDP" | Out-Null
-    netsh advfirewall firewall add rule name="BroLink Sunshine TCP" dir=in action=allow protocol=TCP localport=47984-48010 remoteip=100.64.0.0/10 | Out-Null
-    netsh advfirewall firewall add rule name="BroLink Sunshine UDP" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 | Out-Null
+    # BroLink names and scopes these itself rather than running the engine's
+    # own add-firewall-rule script, which opens every TCP and UDP port under
+    # the name "Sunshine". The engine web UI port is deliberately absent: it
+    # is reachable on loopback only.
+    Step "Opening the streaming ports to the tailnet"
+    foreach ($old in 'BroLink Sunshine TCP', 'BroLink Sunshine UDP', '{tcp_rule}', '{udp_rule}') {{
+        netsh advfirewall firewall delete rule name="$old" | Out-Null
+    }}
+    $engineExe = Join-Path $dir 'sunshine.exe'
+    netsh advfirewall firewall add rule name="{tcp_rule}" dir=in action=allow protocol=TCP localport=47984,47989,48010 remoteip=100.64.0.0/10 program="$engineExe" | Out-Null
+    netsh advfirewall firewall add rule name="{udp_rule}" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 program="$engineExe" | Out-Null
 }}
 Step "Turning Fast Startup off: a PC shut down with it on cannot be woken"
 Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord
 Step "Never idle-sleep when plugged in, so Tailscale stays up from anywhere"
 powercfg /change standby-timeout-ac 0
 powercfg /change hibernate-timeout-ac 0
-{adapter}Step "BroLink setup finished"
+{adapter}if ($engineError) {{
+    Step "BroLink setup FAILED: $engineError"
+    exit 1
+}}
+Step "BroLink setup finished"
+exit 0
 "#,
+        dirs = dirs,
+        conceal = conceal_ps(),
+        description = crate::brand::DESCRIPTION,
+        host_exe = q(&p.exe.display().to_string()),
+        brand_existing = brand_existing,
         install = install,
-        user = q(p.sunshine_user),
-        pass = q(p.sunshine_pass),
+        migrate_flag = if p.migrate { "$true" } else { "$false" },
+        creds = creds,
         port = CONTROL_PORT,
         exe = p.exe.display(),
+        tcp_rule = TCP_RULE,
+        udp_rule = UDP_RULE,
         adapter = adapter,
     )
 }
@@ -169,7 +502,7 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         let file = path.display().to_string().replace('\'', "''");
         let logq = log.display().to_string().replace('\'', "''");
         let launch = format!(
-            "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','& ''{file}'' *>&1 | Out-File -Encoding utf8 ''{logq}'''); exit $p.ExitCode"
+            "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','& ''{file}'' *>&1 | Out-File -Encoding utf8 ''{logq}''; exit $LASTEXITCODE'); exit $p.ExitCode"
         );
         let status = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
@@ -248,6 +581,7 @@ pub fn starts_with_windows() -> bool {
     false
 }
 
+#[cfg(any(windows, test))]
 pub fn run_value(exe: &Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
@@ -265,19 +599,47 @@ mod tests {
         );
     }
 
+    /// The script with its comments stripped: a "must not appear" check has
+    /// to be about what the script does, not about what it explains.
+    /// Position of `needle` after the preamble's function definitions, so
+    /// an ordering test reads the steps as they run, not the helpers.
+    fn find_in_body(s: &str, needle: &str) -> Option<usize> {
+        let at = s.find("BroLink setup started")?;
+        s[at..].find(needle).map(|i| i + at)
+    }
+
+    fn code(s: &str) -> String {
+        s.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn plan<'a>(exe: &'a Path, install_engine: bool) -> Plan<'a> {
+        Plan {
+            exe,
+            install_engine,
+            migrate: false,
+            dry_run: false,
+            sunshine_user: "u",
+            sunshine_pass: "p",
+            adapter: "",
+            adapter_description: "",
+        }
+    }
+
     #[test]
     fn script_escapes_quotes_and_skips_what_is_not_wanted() {
         let exe = PathBuf::from(r"C:\x\brolink-host.exe");
         let s = script(&Plan {
-            exe: &exe,
-            install_sunshine: false,
             sunshine_user: "brolink",
             sunshine_pass: "p'w",
             adapter: "Ethernet",
             adapter_description: "Realtek PCIe GbE",
+            ..plan(&exe, false)
         });
         assert!(s.contains("--creds 'brolink' 'p''w'"), "{s}");
-        assert!(!s.contains("Downloading Sunshine"));
+        assert!(!s.contains("Downloading the streaming engine"));
         assert!(s.contains("Set-NetAdapterPowerManagement -Name 'Ethernet'"));
         assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
         assert!(s.contains("'S5WakeOnLan'"));
@@ -285,28 +647,505 @@ mod tests {
         assert!(s.contains("powercfg /change standby-timeout-ac 0"));
         assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
         assert!(s.contains("protocol=UDP localport=9 program=\"C:\\x\\brolink-host.exe\""));
-        assert!(s.contains("localport=47984-48010 remoteip=100.64.0.0/10"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
         assert!(s.contains(
             "localport=47850 remoteip=100.64.0.0/10 program=\"C:\\x\\brolink-host.exe\""
         ));
 
-        let s = script(&Plan {
-            exe: &exe,
-            install_sunshine: true,
-            sunshine_user: "u",
-            sunshine_pass: "p",
-            adapter: "",
-            adapter_description: "",
-        });
-        assert!(s.contains("Downloading Sunshine"));
-        assert!(s.contains("Sunshine-Windows-AMD64-installer.msi"));
-        assert!(s.contains("Join-Path"));
-        assert!(
-            s.contains(r#"@('/i', "`"$msi`"", '/quiet', '/norestart')"#),
-            "{s}"
-        );
+        let s = script(&plan(&exe, true));
+        assert!(s.contains("Downloading the streaming engine"));
         assert!(s.contains("adapter unknown, skipped"));
         assert!(!s.contains("Set-NetAdapterPowerManagement"));
+    }
+
+    #[test]
+    fn a_fresh_install_unpacks_the_pinned_lite_archive_and_leaves_no_upstream_traces() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+
+        assert!(s.contains(ENGINE_ZIP), "{s}");
+        assert!(
+            s.contains(r"Join-Path 'C:\x' 'Sunshine-Windows-AMD64-lite.zip'"),
+            "the bundled archive is next to the exe even when this is dumped on a Mac:\n{s}"
+        );
+        assert!(s.contains(&format!("releases/tags/{ENGINE_TAG}")), "{s}");
+        assert!(s.contains("$_.name -like '*lite.zip'"), "{s}");
+        assert!(s.contains("Expand-Archive -LiteralPath $zip"), "{s}");
+        assert!(s.contains(crate::streamer::ENGINE_DIR), "{s}");
+        assert!(s.contains(r"tools\sunshinesvc.exe"), "{s}");
+
+        let code = code(&s);
+        for gone in [
+            "Sunshine-Windows-AMD64-installer.msi",
+            "msiexec",
+            "releases/latest",
+            ".bat",
+            "Start Menu",
+            "Uninstall",
+        ] {
+            assert!(!code.contains(gone), "{gone} should be gone:\n{s}");
+        }
+    }
+
+    #[test]
+    fn a_missing_or_wrong_archive_throws_before_anything_is_unpacked() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+
+        let missing = s
+            .find(r#"throw "the engine archive is missing"#)
+            .expect("missing-archive guard");
+        let digest = s
+            .find("Get-FileHash -Algorithm SHA256")
+            .expect("digest check");
+        let mismatch = s
+            .find(&format!(r#"throw "engine archive is not {ENGINE_TAG}"#))
+            .expect("digest guard");
+        let expand = s.find("Expand-Archive").expect("expand");
+
+        assert!(missing < expand, "the missing-archive guard runs first");
+        assert!(
+            digest < expand,
+            "the archive is hashed before it is unpacked"
+        );
+        assert!(
+            mismatch < expand,
+            "a digest mismatch throws before unpacking"
+        );
+        assert!(
+            s.contains(ENGINE_SHA256),
+            "the pinned digest is in the script"
+        );
+        assert_eq!(ENGINE_SHA256.len(), 64, "sha256 is 64 hex characters");
+        assert!(ENGINE_SHA256
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn a_failed_extract_throws_before_the_service_is_registered() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+
+        assert!(
+            s.contains(&format!("$root = Join-Path $unpack '{ENGINE_ZIP_ROOT}'")),
+            "the archive root folder is named, not guessed:\n{s}"
+        );
+        let guard = s
+            .find(r#"throw "the engine archive did not unpack"#)
+            .expect("unpack guard");
+        let register = s.find("New-Service").expect("service registration");
+        assert!(guard < register, "a bad unpack throws before New-Service");
+        let listed = ENGINE_REQUIRED
+            .iter()
+            .map(|f| format!("'{f}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            s.contains(&format!("foreach ($need in {listed})")),
+            "both checks use ENGINE_REQUIRED:\n{s}"
+        );
+        assert_eq!(
+            s.matches(&format!("foreach ($need in {listed})")).count(),
+            2,
+            "unpack AND copy are both checked:\n{s}"
+        );
+    }
+
+    #[test]
+    fn the_service_is_brolinks_and_the_fallback_is_proven_not_assumed() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+
+        assert_eq!(SERVICE, "BroLinkStream");
+        assert_eq!(SERVICE_DISPLAY, "BroLink Streaming");
+        assert!(s.contains(&format!("$svc = '{SERVICE}'")), "{s}");
+        assert_eq!(
+            s.matches(&format!("-DisplayName '{SERVICE_DISPLAY}'"))
+                .count(),
+            2,
+            "both registrations show the BroLink name:\n{s}"
+        );
+        assert!(!code(&s).contains("Sunshine Service"), "{s}");
+
+        let create = s.find("New-Service -Name $svc").expect("create");
+        let probe = s.find("Start-Service -Name $svc").expect("start probe");
+        let fallback = s
+            .find(&format!("$svc = '{UPSTREAM_SERVICE}'"))
+            .expect("fallback");
+        assert!(create < probe, "the service is created before it is probed");
+        assert!(
+            probe < fallback,
+            "the fallback is reached only after a real start attempt:\n{s}"
+        );
+        assert!(
+            s.contains(&format!(
+                r#"if (Get-Service -Name '{UPSTREAM_SERVICE}' -ErrorAction SilentlyContinue) {{ throw"#
+            )),
+            "an existing upstream service is refused, never reused:\n{s}"
+        );
+        assert!(
+            s.contains(&format!(
+                r#"throw "the {SERVICE_DISPLAY} service did not start""#
+            )),
+            "a service that never runs is an error, not a silent success:\n{s}"
+        );
+    }
+
+    #[test]
+    fn firewall_rules_are_named_for_brolink_and_leave_the_web_ui_on_loopback() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, false));
+
+        assert!(s.contains(&format!(r#"name="{TCP_RULE}" dir=in action=allow protocol=TCP localport=47984,47989,48010 remoteip=100.64.0.0/10 program="$engineExe""#)), "{s}");
+        assert!(s.contains(&format!(r#"name="{UDP_RULE}" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 program="$engineExe""#)), "{s}");
+
+        let code = code(&s);
+        assert!(
+            !code.contains("47990"),
+            "the web UI port stays off the tailnet:\n{s}"
+        );
+        assert!(
+            !code.contains("localport=47984-48010"),
+            "the old range included the web UI port:\n{s}"
+        );
+        assert!(
+            s.contains("'BroLink Sunshine TCP', 'BroLink Sunshine UDP'"),
+            "the rules this replaces are cleaned up:\n{s}"
+        );
+    }
+
+    #[test]
+    fn setup_looks_for_brolinks_own_engine_before_any_other() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, false));
+        let line = s
+            .lines()
+            .find(|l| l.starts_with("$dir = @("))
+            .expect("install dir probe");
+        assert_eq!(
+            line,
+            format!(
+                r"$dir = @('{}', 'C:\Program Files\Sunshine', 'C:\Program Files\Apollo') | Where-Object {{ Test-Path (Join-Path $_ 'sunshine.exe') }} | Select-Object -First 1",
+                crate::streamer::ENGINE_DIR
+            )
+        );
+    }
+
+    #[test]
+    fn a_failed_copy_is_checked_on_the_destination_before_the_service_is_registered() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+        let dest = s
+            .find(r#"throw "the engine did not copy to"#)
+            .expect("destination check");
+        let register = s.find("New-Service").expect("service registration");
+        assert!(
+            dest < register,
+            "a partial copy must not become a service:\n{s}"
+        );
+        assert!(
+            s.contains(&format!(
+                "if (-not (Test-Path (Join-Path '{}' $need)))",
+                crate::streamer::ENGINE_DIR
+            )),
+            "the check is on ENGINE_DIR, not the staging tree:\n{s}"
+        );
+    }
+
+    #[test]
+    fn engine_failures_are_terminating_and_reported_as_nonzero_exit() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+
+        let stop = s
+            .find("$ErrorActionPreference = 'Stop'")
+            .expect("engine scope is terminating");
+        let restore = s
+            .find("$ErrorActionPreference = $keepEAP")
+            .expect("preference is restored");
+        let expand = s.find("Expand-Archive").expect("expand");
+        let copy = s.find("Copy-Item").expect("copy");
+        let create = s.find("New-Service").expect("create");
+        assert!(stop < expand && stop < copy && stop < create);
+        assert!(restore > create, "restore is in finally, after the engine");
+
+        assert!(s.contains("$engineError = $null"));
+        assert!(s.contains(r#"$engineError = "$_""#));
+        assert!(s.contains("$dir = $null"), "a failed install is not reused");
+
+        let wake = s.find("HiberbootEnabled").expect("wake still runs");
+        let fail = s
+            .find("if ($engineError)")
+            .expect("failure is reported at the end");
+        let exit1 = s.find("exit 1").expect("nonzero exit");
+        assert!(wake < fail, "unrelated safe steps still run");
+        assert!(fail < exit1);
+        assert!(s.contains("exit 0"), "success is an explicit zero");
+    }
+
+    #[test]
+    fn staging_is_unique_per_run_and_cleaned_in_finally() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+        assert!(s.contains("[guid]::NewGuid()"), "{s}");
+        assert!(
+            !code(&s).contains("brolink-engine-unpack"),
+            "fixed staging name is gone:\n{s}"
+        );
+        assert!(
+            !code(&s).contains("brolink-engine.zip"),
+            "fixed download name is gone:\n{s}"
+        );
+        assert!(
+            s.contains("Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue"),
+            "finally cleans the owned folder:\n{s}"
+        );
+    }
+
+    #[test]
+    fn native_command_failures_are_checked() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+        assert!(s.contains("if ($LASTEXITCODE -ne 0) { throw \"could not reach GitHub"));
+        assert!(
+            s.contains("if ($LASTEXITCODE -ne 0) { throw \"downloading the engine archive failed")
+        );
+        assert!(s.contains(
+            "if ($LASTEXITCODE -ne 0) { throw \"could not remove the existing $svc service"
+        ));
+    }
+
+    fn key_hits(conf: &str, key: &str) -> usize {
+        conf.lines().filter(|l| conf_key(l) == Some(key)).count()
+    }
+
+    #[test]
+    fn conceal_conf_disables_the_tray_and_keeps_the_web_ui_on_this_pc() {
+        let got = conceal_conf("");
+        assert!(got.contains("system_tray = disabled"), "{got}");
+        assert!(got.contains("origin_web_ui_allowed = pc"), "{got}");
+        assert_eq!(key_hits(&got, "system_tray"), 1);
+        assert_eq!(key_hits(&got, "origin_web_ui_allowed"), 1);
+        assert!(!got.contains("bind_address"), "{got}");
+        assert_eq!(conceal_conf(&got), got, "a second run must be a no-op");
+    }
+
+    #[test]
+    fn conceal_conf_preserves_unrelated_settings_and_does_not_duplicate_keys() {
+        let existing = "\
+# user encoder
+encoder = nvenc
+system_tray = enabled
+origin_web_ui_allowed = wan
+resolution = 1920x1080
+system_tray = enabled
+";
+        let got = conceal_conf(existing);
+        assert!(got.contains("# user encoder"), "{got}");
+        assert!(got.contains("encoder = nvenc"), "{got}");
+        assert!(got.contains("resolution = 1920x1080"), "{got}");
+        assert!(got.contains("system_tray = disabled"), "{got}");
+        assert!(got.contains("origin_web_ui_allowed = pc"), "{got}");
+        assert!(!got.contains("system_tray = enabled"), "{got}");
+        assert!(!got.contains("origin_web_ui_allowed = wan"), "{got}");
+        assert_eq!(key_hits(&got, "system_tray"), 1, "{got}");
+        assert_eq!(key_hits(&got, "origin_web_ui_allowed"), 1, "{got}");
+        assert_eq!(conceal_conf(&got), got);
+    }
+
+    #[test]
+    fn the_engine_conf_is_written_before_the_service_starts() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+        for (k, v) in ENGINE_CONF {
+            assert!(
+                s.contains(&format!("'{k}' = '{v}'")),
+                "generated script must ship {k} = {v}:\n{s}"
+            );
+        }
+        let write = s
+            .find("Write-EngineConf $dir")
+            .expect("conf write is called");
+        let start = find_in_body(&s, "Start-Service").expect("service start");
+        assert!(
+            write < start,
+            "conf must land before the first Start-Service or the tray flashes:\n{s}"
+        );
+        assert_eq!(
+            s.matches("Write-EngineConf $dir").count(),
+            2,
+            "fresh install and a re-run on an existing dir both write:\n{s}"
+        );
+    }
+
+    #[test]
+    fn the_script_does_not_bind_the_engine_to_loopback() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+        assert!(
+            !s.contains("bind_address"),
+            "bind_address would take GameStream down with the web UI:\n{s}"
+        );
+        assert!(!s.contains("127.0.0.1"), "{s}");
+    }
+
+    fn migrate_plan<'a>(exe: &'a Path, dry_run: bool) -> Plan<'a> {
+        Plan {
+            migrate: true,
+            dry_run,
+            ..plan(exe, true)
+        }
+    }
+
+    #[test]
+    fn old_engine_is_disabled_before_the_new_one_starts() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+        let disable = s
+            .find("StartupType Disabled")
+            .expect("old service is disabled");
+        let start = find_in_body(&s, "Start-Service").expect("new service starts");
+        assert!(
+            disable < start,
+            "the old engine must be down before 47984 is taken:\n{s}"
+        );
+        assert!(
+            s.contains("-match 'Sunshine|Apollo' } | ForEach-Object"),
+            "disable matches only upstream engines:\n{s}"
+        );
+        let restart = s
+            .lines()
+            .find(|l| l.contains("Restart-Service"))
+            .expect("creds restart");
+        assert!(
+            restart.contains(crate::migrate::SERVICE_MATCH),
+            "creds restart must see BroLinkStream:\n{restart}"
+        );
+    }
+
+    #[test]
+    fn migrate_skips_creds_and_fresh_install_still_sets_them() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let fresh = script(&plan(&exe, true));
+        assert!(fresh.contains("--creds 'u' 'p'"), "{fresh}");
+        assert!(fresh.contains("$migrate = $false"), "{fresh}");
+
+        let mig = script(&migrate_plan(&exe, false));
+        assert!(mig.contains("$migrate = $true"), "{mig}");
+        assert!(
+            !code(&mig).contains("--creds"),
+            "migrate must not rotate web creds:\n{mig}"
+        );
+        assert!(mig.contains("Keeping the migrated web login"), "{mig}");
+        assert!(fresh.contains("--creds"), "{fresh}");
+    }
+
+    #[test]
+    fn migrate_uninstalls_only_after_prove_and_dry_run_never_calls_msiexec() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let mig = script(&migrate_plan(&exe, false));
+        let copy = mig.find("Copy-EngineState").expect("copy");
+        let verify = mig.find("Assert-EngineState").expect("verify");
+        let start = find_in_body(&mig, "Start-Service").expect("start");
+        let prove = mig
+            .find("the new engine did not start listening")
+            .expect("prove");
+        let uninstall = mig.find("msiexec").expect("uninstall");
+        let cleanup = mig
+            .find("Removing what the old installer left behind")
+            .expect("cleanup");
+        assert!(copy < verify && verify < start && start < prove && prove < uninstall);
+        assert!(
+            uninstall < cleanup,
+            "the old folder goes only after the MSI:\n{mig}"
+        );
+        assert!(mig.contains(crate::migrate::PRODUCT_CODE), "{mig}");
+        assert!(mig.contains("/x"), "{mig}");
+        assert!(
+            mig.contains("if (-not $dir -or $dir -ne '"),
+            "Sunshine already installed must still unpack BroLink:\n{mig}"
+        );
+
+        let dry = code(&script(&migrate_plan(&exe, true)));
+        assert!(
+            !dry.contains("msiexec"),
+            "dry-run must never call msiexec:\n{dry}"
+        );
+        assert!(
+            !dry.contains("Removing what the old installer left behind"),
+            "dry-run must not delete anything:\n{dry}"
+        );
+        assert!(dry.contains("Copy-EngineState"), "{dry}");
+        assert!(dry.contains("Assert-EngineState"), "{dry}");
+    }
+
+    #[test]
+    fn branding_follows_the_copy_touches_only_brolinks_engine_and_skips_dry_runs() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let fresh = code(&script(&plan(&exe, true)));
+        let copied = fresh
+            .find("the engine did not copy to")
+            .expect("copy check");
+        let brand = fresh.find("Brand-Engine $dir").expect("brand call");
+        let register = fresh.find("Registering the").expect("register");
+        assert!(copied < brand && brand < register, "{fresh}");
+        assert!(
+            fresh
+                .contains(r"if ($dir -eq 'C:\Program Files\BroLink\engine') { Brand-Engine $dir }"),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains(".VersionInfo.FileDescription -eq 'BroLink Streaming'"),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains(r"-FilePath 'C:\x\brolink-host.exe'"),
+            "{fresh}"
+        );
+        assert!(fresh.contains("'--brand-engine'"), "{fresh}");
+        // Only services running out of the engine directory are paused.
+        assert!(
+            fresh.contains("$_.PathName -like ('*' + $d + '*')"),
+            "{fresh}"
+        );
+        assert!(fresh.contains("finally"), "{fresh}");
+
+        let existing = code(&script(&plan(&exe, false)));
+        assert!(existing.contains("{ Brand-Engine $dir }"), "{existing}");
+        assert!(!existing.contains("Registering the"), "{existing}");
+
+        let dry = code(&script(&migrate_plan(&exe, true)));
+        assert!(
+            !dry.contains("Brand-Engine $dir"),
+            "dry run must not brand:\n{dry}"
+        );
+        let wet = code(&script(&migrate_plan(&exe, false)));
+        assert!(wet.contains("Brand-Engine $dir"), "{wet}");
+    }
+
+    /// The seam the PowerShell syntax gate runs through: the generated script
+    /// is the real artefact, so it has to be obtainable off Windows.
+    #[test]
+    fn the_generated_script_can_be_dumped_for_a_syntax_check() {
+        let Ok(out) = std::env::var("BROLINK_DUMP_SETUP_SCRIPT") else {
+            return;
+        };
+        let var = |k: &str, default: &str| std::env::var(k).unwrap_or_else(|_| default.into());
+        let exe = PathBuf::from(var("BROLINK_DUMP_EXE", r"C:\x\brolink-host.exe"));
+        let user = var("BROLINK_DUMP_USER", "u");
+        let pass = var("BROLINK_DUMP_PASS", "p");
+        let adapter = var("BROLINK_DUMP_ADAPTER", "");
+        let desc = var("BROLINK_DUMP_ADAPTER_DESC", "");
+        let p = Plan {
+            migrate: var("BROLINK_DUMP_MIGRATE", "0") == "1",
+            dry_run: var("BROLINK_DUMP_DRY_RUN", "0") == "1",
+            sunshine_user: &user,
+            sunshine_pass: &pass,
+            adapter: &adapter,
+            adapter_description: &desc,
+            ..plan(&exe, true)
+        };
+        std::fs::write(out, script(&p)).expect("write the script");
     }
 }

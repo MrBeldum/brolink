@@ -19,9 +19,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 touch "$ROOT/dist/.metadata_never_index"
 cp "$BIN" "$APP/Contents/MacOS/BroLink"
 chmod +x "$APP/Contents/MacOS/BroLink"
-# The Finder/Dock icon: the same procedural icon the window uses
-# (brolink_core::icon::render), rendered once and checked in as .icns.
+# The Finder/Dock icon: crates/core/assets/logo-1024.png, the same logo the
+# window uses (brolink_core::icon::render), scaled with sips into an iconset
+# and checked in as .icns via iconutil.
 cp "$ROOT/crates/client/BroLink.icns" "$APP/Contents/Resources/BroLink.icns"
+cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

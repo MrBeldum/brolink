@@ -204,18 +204,27 @@ impl Player {
 
     /// One phrase for the stats line: where sound goes, or why it does not.
     pub fn describe(&self) -> String {
-        match &*self.output.lock() {
-            Output::Failed(e) => format!("no sound: {e}"),
-            Output::Opening => "audio: opening the output".into(),
-            Output::Playing { device, .. } => {
-                if self.packets == 0 {
-                    // Sunshine sends nothing while the PC is silent.
-                    "no audio from the PC yet".into()
-                } else if self.lost > 0 {
-                    format!("audio → {device} · {} lost", self.lost)
-                } else {
-                    format!("audio → {device}")
-                }
+        phrase(&self.output.lock(), self.packets, self.lost, self.pulled())
+    }
+}
+
+/// The stats-line phrase for an output state. `pulled` is the device's own
+/// count: a device that has opened but taken nothing is not playing, however
+/// many packets the PC sent.
+fn phrase(output: &Output, packets: u64, lost: u64, pulled: u64) -> String {
+    match output {
+        Output::Failed(e) => format!("no sound: {e}"),
+        Output::Opening => "audio: opening the output".into(),
+        Output::Playing { device, .. } => {
+            if packets == 0 {
+                // The PC sends nothing while it is silent.
+                "no audio from the PC yet".into()
+            } else if pulled == 0 {
+                format!("no sound: {device} is not taking audio")
+            } else if lost > 0 {
+                format!("audio → {device} · {lost} lost")
+            } else {
+                format!("audio → {device}")
             }
         }
     }
@@ -585,6 +594,33 @@ mod tests {
         assert!(desc.contains("audio") || desc.contains("sound"), "{desc}");
         assert!(Player::new(48_000, 0, 1, 0, 480, &[]).is_err());
         assert!(Player::new(48_000, 2, 1, 1, 480, &[0]).is_err());
+    }
+
+    #[test]
+    fn the_phrase_never_names_a_device_that_takes_nothing() {
+        let playing = Output::Playing {
+            device: "MacBook Pro Speakers".into(),
+            rate: 48_000,
+            channels: 2,
+        };
+        assert_eq!(phrase(&playing, 0, 0, 0), "no audio from the PC yet");
+        assert_eq!(
+            phrase(&playing, 120, 0, 0),
+            "no sound: MacBook Pro Speakers is not taking audio"
+        );
+        assert_eq!(phrase(&playing, 120, 0, 1), "audio → MacBook Pro Speakers");
+        assert_eq!(
+            phrase(&playing, 120, 3, 500),
+            "audio → MacBook Pro Speakers · 3 lost"
+        );
+        assert_eq!(
+            phrase(&Output::Opening, 120, 0, 0),
+            "audio: opening the output"
+        );
+        assert_eq!(
+            phrase(&Output::Failed("no output device".into()), 120, 0, 0),
+            "no sound: no output device"
+        );
     }
 
     #[test]

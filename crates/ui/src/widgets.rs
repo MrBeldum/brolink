@@ -246,9 +246,10 @@ pub fn display_digits(ui: &mut Ui, digits: &str) -> Response {
     )
 }
 
-/// Vertically centred, muted text for an empty list.
+/// Vertically centred, muted text for an empty list. Wraps: a line that
+/// ran past the card would widen everything laid out after it.
 pub fn empty_state(ui: &mut Ui, text: &str, busy: bool) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if busy {
             ui.add(egui::Spinner::new().size(14.0).color(P.faint));
         }
@@ -278,18 +279,30 @@ pub fn notice(ui: &mut Ui, tone: Tone, text: &str) -> Response {
 // Key / value
 // ---------------------------------------------------------------------------
 
-/// Aligned key/value rows.
-pub fn kv_grid(ui: &mut Ui, id: impl std::hash::Hash, rows: &[(&str, String)]) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing([18.0, 6.0])
-        .show(ui, |ui| {
-            for (k, v) in rows {
-                ui.label(RichText::new(*k).color(P.muted));
-                ui.label(RichText::new(v).color(P.text));
-                ui.end_row();
-            }
-        });
+/// Aligned key/value rows. A value wraps inside the card: an `egui::Grid`
+/// extends instead, and one row wider than the card widens every widget
+/// laid out after it (the card, the rows below, the toggles off-screen).
+pub fn kv_grid(ui: &mut Ui, rows: &[(&str, String)]) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let key_w = rows
+        .iter()
+        .map(|(k, _)| {
+            ui.painter()
+                .layout_no_wrap((*k).to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(18.0, 6.0);
+        for (k, v) in rows {
+            ui.horizontal_top(|ui| {
+                let key = ui.label(RichText::new(*k).color(P.muted));
+                ui.add_space((key_w - key.rect.width()).max(0.0));
+                ui.add(Label::new(RichText::new(v).color(P.text)).wrap());
+            });
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +346,7 @@ fn focus_ring(ui: &Ui, response: &Response, radius: u8) {
 
 /// The one accent-filled button on a screen.
 pub fn primary_button(ui: &mut Ui, label: &str) -> Response {
-    filled_button(ui, label, P.accent, P.on_accent)
+    filled_button(ui, label, P.accent_fill, P.on_accent)
 }
 
 /// A filled button in a tone other than the accent: red for the confirm
@@ -356,7 +369,7 @@ fn filled_button(ui: &mut Ui, label: &str, color: Color32, fg: Color32) -> Respo
             )
         } else if r.hovered() {
             (
-                lerp_color(color, Color32::WHITE, 0.10),
+                lerp_color(color, Color32::BLACK, 0.10),
                 Color32::TRANSPARENT,
                 fg,
             )
@@ -483,7 +496,7 @@ pub fn segmented<T: PartialEq + Copy>(
             se: if i + 1 == n { r } else { 0 },
         };
         let (fill, fg) = if on {
-            (P.accent, P.on_accent)
+            (P.accent_fill, P.on_accent)
         } else if resp.hovered() {
             (P.raised_hover, P.text)
         } else {
@@ -528,7 +541,7 @@ fn labelled_toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         } else {
             P.raised
         };
-        let mut track = lerp_color(off, P.accent, how_on);
+        let mut track = lerp_color(off, P.accent_fill, how_on);
         let mut knob = lerp_color(P.muted, P.on_accent, how_on);
         if !enabled {
             track = track.gamma_multiply(0.5);
@@ -566,7 +579,8 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 
 /// A row with text on the left and controls on the right. The controls are
 /// laid out first, so the text gets exactly the width they leave and wraps
-/// there instead of running underneath them.
+/// there instead of running underneath them. When they leave too little,
+/// the text takes the full width below the controls.
 fn split_row<R>(
     ui: &mut Ui,
     min_height: f32,
@@ -588,10 +602,15 @@ fn split_row<R>(
     } else {
         0.0
     };
-    let text_rect = Rect::from_min_size(
-        row.min,
-        Vec2::new((row.width() - taken).max(80.0), min_height),
-    );
+    let beside = row.width() - taken;
+    let text_rect = if beside >= MIN_TEXT_BESIDE_CONTROLS || taken == 0.0 {
+        Rect::from_min_size(row.min, Vec2::new(beside, min_height))
+    } else {
+        Rect::from_min_size(
+            egui::pos2(row.min.x, used.max.y + 6.0),
+            Vec2::new(row.width(), min_height),
+        )
+    };
     let mut left_ui = ui.new_child(
         UiBuilder::new()
             .max_rect(text_rect)
@@ -599,17 +618,21 @@ fn split_row<R>(
     );
     left_ui.spacing_mut().item_spacing.y = 1.0;
     left(&mut left_ui);
-    let height = left_ui
+    let bottom = left_ui
         .min_rect()
-        .height()
-        .max(used.height())
-        .max(min_height);
+        .max
+        .y
+        .max(used.max.y)
+        .max(row.min.y + min_height);
     ui.allocate_rect(
-        Rect::from_min_size(row.min, Vec2::new(row.width(), height)),
+        Rect::from_min_max(row.min, egui::pos2(row.max.x, bottom)),
         Sense::hover(),
     );
     r
 }
+
+/// Below this, the text goes under the controls instead of beside them.
+const MIN_TEXT_BESIDE_CONTROLS: f32 = 160.0;
 
 /// Label (and optional hint) on the left, a control on the right.
 pub fn setting_row<R>(
@@ -624,6 +647,48 @@ pub fn setting_row<R>(
             caption(ui, h);
         }
     })
+}
+
+/// Third-party notices, as bundled at build time. Both windows show these.
+pub const NOTICES: &str = include_str!("../../../NOTICE");
+
+/// The Settings "Open source" row: a button that unfolds [`NOTICES`] in a
+/// scrolling well beneath the row.
+pub fn open_source_row(ui: &mut Ui, open: &mut bool) {
+    setting_row(
+        ui,
+        "Open source",
+        Some("BroLink is GPL-3.0 and builds on other free software."),
+        |ui| {
+            if ghost_button(
+                ui,
+                if *open {
+                    "Hide notices"
+                } else {
+                    "Show notices"
+                },
+            )
+            .clicked()
+            {
+                *open = !*open;
+            }
+        },
+    );
+    if *open {
+        well(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("open_source_notices")
+                .min_scrolled_height(160.0)
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(NOTICES)
+                            .text_style(theme::caption())
+                            .color(P.muted),
+                    );
+                });
+        });
+    }
 }
 
 /// A [`setting_row`] whose control is a [`toggle`]. Returns true on change.
@@ -710,7 +775,7 @@ pub fn status_pill(ui: &mut Ui, label: &str, tone: Tone) -> Response {
 
 /// A small coloured dot followed by text, for inline status lines.
 pub fn dot_label(ui: &mut Ui, tone: Tone, text: &str) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new("●").size(9.0).color(tone.color()));
         ui.label(RichText::new(text).color(P.text));
@@ -749,5 +814,38 @@ impl Brand {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), right);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lin(c: u8) -> f64 {
+        let s = f64::from(c) / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn contrast(fg: Color32, bg: Color32) -> f64 {
+        let lum = |c: Color32| 0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b());
+        let (a, b) = (lum(fg), lum(bg));
+        let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn accent_button_text_meets_aa_in_all_states() {
+        let idle = P.accent_fill;
+        let hovered = lerp_color(idle, Color32::BLACK, 0.10);
+        let pressed = lerp_color(idle, Color32::BLACK, 0.12);
+        assert!(contrast(P.on_accent, idle) >= 4.5);
+        assert!(contrast(P.on_accent, hovered) >= 4.5);
+        assert!(contrast(P.on_accent, pressed) >= 4.5);
+        // Hover must darken, never lighten: lightening drops the ratio below AA.
+        assert!(contrast(P.on_accent, lerp_color(idle, Color32::WHITE, 0.10)) < 4.5);
     }
 }

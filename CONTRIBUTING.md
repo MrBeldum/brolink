@@ -63,3 +63,17 @@ trying the toolbar and input.
 
 The Windows client decodes with OpenH264 in software; that path exists for
 development only. The Mac path (VideoToolbox) is the one that ships.
+
+On a Mac, the snapshot test can use an already saved PC and its existing
+pairing. It verifies decoded video, renders the stream, and disconnects:
+
+```bash
+BROLINK_TEST_PC='Gaming-PC' cargo test -p brolink-client stream_snapshot -- --ignored --nocapture
+cargo test -p brolink-client decoded_frame_reaches -- --ignored
+```
+
+`BROLINK_TEST_CODEC=h264` or `hevc` selects the codec. A black capture fails
+the live test by default; `BROLINK_TEST_EXPECT_BLACK=1` instead verifies the
+persistent black-picture diagnosis when testing a PC without an active
+display. The GPU test uses a synthetic NV12 image to check that the picture
+is drawn with the correct orientation and range and retained between frames.

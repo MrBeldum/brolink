@@ -12,7 +12,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 static CONNECTION: Mutex<()> = Mutex::new(());
 
@@ -79,6 +79,49 @@ pub struct Stats {
     /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
     /// not; empty until the first second of video.
     pub audio: String,
+    /// Persistent video diagnosis, even while the transport is connected.
+    pub video_problem: Option<String>,
+}
+
+#[derive(Default)]
+struct VideoHealth {
+    connected_at: Option<Instant>,
+    last_frame: Option<Instant>,
+    black_since: Option<Instant>,
+    last_error: Option<String>,
+}
+
+impl VideoHealth {
+    fn frame(&mut self, now: Instant, black: bool) {
+        self.last_frame = Some(now);
+        self.last_error = None;
+        if black {
+            self.black_since.get_or_insert(now);
+        } else {
+            self.black_since = None;
+        }
+    }
+
+    fn problem(&self, now: Instant) -> Option<String> {
+        let connected = self.connected_at?;
+        if now.duration_since(self.last_frame.unwrap_or(connected)) >= Duration::from_secs(5) {
+            return Some(if let Some(error) = &self.last_error {
+                format!("Video cannot be decoded: {error}. Try restarting the stream or selecting H.264 in Settings.")
+            } else if self.last_frame.is_some() {
+                "Video stopped arriving from the PC. Try restarting the stream or lowering Quality."
+                    .into()
+            } else {
+                "Connected, but no video has arrived from the PC. Check its display, or restart the stream.".into()
+            });
+        }
+        if self
+            .black_since
+            .is_some_and(|since| now.duration_since(since) >= Duration::from_secs(5))
+        {
+            return Some("The PC is sending a black picture: the connection and the video are healthy, but every frame is blank. Asking the PC why…".into());
+        }
+        None
+    }
 }
 
 #[derive(Default)]
@@ -104,6 +147,7 @@ struct Inner {
     audio_warned: AtomicBool,
     window: Mutex<Window>,
     stats: Mutex<Stats>,
+    video_health: Mutex<VideoHealth>,
     connected: AtomicBool,
     finished: AtomicBool,
     /// Set when the connection ended or a stop was asked for.
@@ -245,6 +289,7 @@ impl Session {
             audio_warned: AtomicBool::new(false),
             window: Mutex::new(Window::default()),
             stats: Mutex::new(Stats::default()),
+            video_health: Mutex::new(VideoHealth::default()),
             connected: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             done: Mutex::new(false),
@@ -277,7 +322,20 @@ impl Session {
     }
 
     pub fn stats(&self) -> Stats {
-        self.inner.stats.lock().clone()
+        let mut stats = self.inner.stats.lock().clone();
+        let health = self.inner.video_health.lock();
+        let now = Instant::now();
+        if health
+            .last_frame
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(2))
+        {
+            stats.fps = 0.0;
+            stats.mbps = 0.0;
+        }
+        if self.connected() {
+            stats.video_problem = health.problem(now);
+        }
+        stats
     }
 
     /// A handle for sending input from other threads.
@@ -451,6 +509,10 @@ unsafe extern "C" fn video_frame(
     drop(guard);
     match result {
         Ok(Some(frame)) => {
+            inner
+                .video_health
+                .lock()
+                .frame(Instant::now(), frame.is_black());
             inner.frames.publish(frame);
             account(inner, len as u64, decode_us, host_latency);
             (inner.wake)();
@@ -458,7 +520,12 @@ unsafe extern "C" fn video_frame(
         }
         Ok(None) => ffi::DR_OK,
         Err(e) => {
-            tracing::warn!("decode: {e:#}");
+            let error = format!("{e:#}");
+            let mut health = inner.video_health.lock();
+            if health.last_error.as_ref() != Some(&error) {
+                tracing::warn!("decode: {error}");
+            }
+            health.last_error = Some(error);
             ffi::DR_NEED_IDR
         }
     }
@@ -632,6 +699,7 @@ unsafe extern "C" fn stage(p: *mut c_void, stage: c_int, state: c_int, error: c_
 
 unsafe extern "C" fn connected(p: *mut c_void) {
     let inner = ctx(p);
+    inner.video_health.lock().connected_at = Some(Instant::now());
     inner.connected.store(true, Ordering::Release);
     inner.emit(Event::Connected);
 }
@@ -679,6 +747,32 @@ pub fn termination_message(code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_health_distinguishes_missing_black_frozen_and_recovered_video() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let mut h = VideoHealth::default();
+        assert!(
+            h.problem(at(20)).is_none(),
+            "connection setup has no video deadline"
+        );
+        h.connected_at = Some(start);
+        assert!(h.problem(at(4)).is_none());
+        assert!(h.problem(at(5)).unwrap().contains("no video"));
+        h.frame(at(5), true);
+        h.frame(at(9), true);
+        assert!(h.problem(at(9)).is_none());
+        assert!(h.problem(at(10)).unwrap().contains("black picture"));
+        h.frame(at(11), false);
+        assert!(h.problem(at(11)).is_none());
+        assert!(h.problem(at(16)).unwrap().contains("stopped arriving"));
+        h.last_error = Some("decode failed (-12911)".into());
+        assert!(h.problem(at(17)).unwrap().contains("-12911"));
+        h.frame(at(18), false);
+        assert!(h.problem(at(18)).is_none());
+        assert!(h.last_error.is_none());
+    }
 
     #[test]
     fn text_is_typed_in_small_pieces_between_characters() {
@@ -736,12 +830,36 @@ mod real {
     #[test]
     #[ignore = "needs a paired Sunshine on this machine"]
     fn stream_real() {
-        let dir = std::env::temp_dir().join("brolink-pair-test");
+        let number = |name: &str, default: u32| {
+            std::env::var(name)
+                .map(|value| value.parse::<u32>().expect(name))
+                .unwrap_or(default)
+        };
+        let width = number("BROLINK_TEST_WIDTH", 1280);
+        let height = number("BROLINK_TEST_HEIGHT", 720);
+        let fps = number("BROLINK_TEST_FPS", 60);
+        let bitrate_kbps = number("BROLINK_TEST_BITRATE_KBPS", 10_000);
+        let seconds = number("BROLINK_TEST_SECONDS", 12);
+        let remote = std::env::var_os("BROLINK_TEST_REMOTE").is_some();
+        assert!(width > 0 && height > 0 && fps > 0 && bitrate_kbps > 0 && seconds >= 12);
+        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps remote={remote} duration={seconds}s");
+        let dir = std::env::var_os("BROLINK_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("brolink-pair-test"));
         let identity = crate::Identity::load_or_create(&dir).unwrap();
-        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let ip: std::net::IpAddr = std::env::var("BROLINK_TEST_IP")
+            .unwrap_or_else(|_| "127.0.0.1".into())
+            .parse()
+            .unwrap();
         let cert = std::fs::read(dir.join("server.der")).ok();
         let mut client = Client::new(&identity, ip, cert).unwrap();
         let mut info = client.server_info().unwrap();
+        if std::env::var_os("BROLINK_TEST_IP").is_some() {
+            assert!(
+                info.paired,
+                "a remote PC must be reached without pairing again"
+            );
+        }
         if !info.paired {
             let der = client
                 .pair("4321", "brolink-test", || {
@@ -768,7 +886,7 @@ mod real {
         ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
         let resume = info.current_game != 0;
         let rtsp = client
-            .launch(desktop.id, 1280, 720, 60, &ri_key, ri_id, resume)
+            .launch(desktop.id, width, height, fps, &ri_key, ri_id, resume)
             .unwrap();
         eprintln!("rtsp: {rtsp} (resume={resume})");
         let frames = Arc::new(FrameSlot::default());
@@ -782,12 +900,12 @@ mod real {
                 codec_mode_support: info.codec_mode_support,
             },
             Settings {
-                width: 1280,
-                height: 720,
-                fps: 60,
-                bitrate_kbps: 10_000,
+                width,
+                height,
+                fps,
+                bitrate_kbps,
                 hevc: false,
-                remote: false,
+                remote,
             },
             ri_key,
             ri_iv,
@@ -797,7 +915,8 @@ mod real {
         );
         let start = Instant::now();
         let mut connected = false;
-        while start.elapsed() < Duration::from_secs(12) {
+        let mut sampled_second = 0;
+        while start.elapsed() < Duration::from_secs(u64::from(seconds)) {
             while let Ok(ev) = rx.try_recv() {
                 eprintln!("{:>6.2}s {ev:?}", start.elapsed().as_secs_f32());
                 if ev == Event::Connected {
@@ -817,6 +936,11 @@ mod real {
                         frames.seq()
                     );
                 }
+            }
+            let second = start.elapsed().as_secs();
+            if connected && second > sampled_second {
+                sampled_second = second;
+                eprintln!("sample {second}s: {:?}", session.stats());
             }
             std::thread::sleep(Duration::from_millis(5));
         }
