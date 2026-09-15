@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 /// seconds and networks change when the Mac moves, not more often.
 const NETCHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 
+/// How often the debug command is polled for the granted relay set. It is a
+/// cheap local call; the ACL changes rarely, so 30 s is plenty.
+const PEER_RELAY_EVERY: Duration = Duration::from_secs(30);
+
 /// A Windows machine on the tailnet, as far as the client can tell.
 #[derive(Debug, Clone, Default)]
 pub struct Pc {
@@ -54,6 +58,27 @@ impl Pc {
     }
 }
 
+/// A tailnet node tagged `tag:relay`: a candidate peer relay, never a PC.
+#[derive(Debug, Clone, Default)]
+pub struct Relay {
+    pub name: String,
+    pub ip: Option<Ipv4Addr>,
+    pub online: bool,
+}
+
+/// The relay server set from `tailscale debug peer-relay-servers`. `Unknown`
+/// when the command could not run (CLI missing, timeout, garbage) — a failed
+/// debug probe proves nothing about the ACL. `Known` is a real answer: the
+/// IPs this node may use right now. Empty is not proof of ACL denial — the
+/// tagged node may simply not be configured as a relay. Non-empty is the
+/// permitted set, not a promise that a `tag:relay` node matches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PeerRelayServers {
+    #[default]
+    Unknown,
+    Known(Vec<String>),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Discovery {
     /// Why nothing can be probed, when Tailscale is down. The list then
@@ -68,6 +93,10 @@ pub struct Discovery {
     pub self_nat: Option<NatReport>,
     /// This Mac's own Tailscale address, the one a PC can reach.
     pub self_ip: Option<Ipv4Addr>,
+    /// Relay nodes on the tailnet, from `status --json`. Never streamable.
+    pub relays: Vec<Relay>,
+    /// Relay servers this device is granted to use, from the debug command.
+    pub peer_relay_servers: PeerRelayServers,
 }
 
 /// Rescan the tailnet every few seconds and remember what each PC needs to
@@ -75,6 +104,8 @@ pub struct Discovery {
 pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
     let nat: Arc<Mutex<Option<NatReport>>> = Arc::default();
     spawn_netcheck(nat.clone(), ctx.clone());
+    let servers: Arc<Mutex<PeerRelayServers>> = Arc::default();
+    spawn_peer_relay_probe(servers.clone(), ctx.clone());
     std::thread::spawn(move || {
         // Round trips per PC, newest last; the smallest of the last few is
         // the path's real round trip (a first connect also pays for the
@@ -94,6 +125,7 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
                 }
             }
             scan.self_nat = nat.lock().clone();
+            scan.peer_relay_servers = servers.lock().clone();
             learn(&cfg, &scan);
             *shared.lock() = scan;
             ctx.request_repaint();
@@ -113,6 +145,22 @@ fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, ctx: egui::Context) {
             Err(e) => tracing::info!("netcheck: {e}"),
         }
         std::thread::sleep(NETCHECK_EVERY);
+    });
+}
+
+/// `tailscale debug peer-relay-servers`, at most once every 30 s, on its own
+/// thread so the scan loop and UI never wait on it. The command itself is
+/// bounded (see `tailscale::PEER_RELAY_SERVERS_TIMEOUT`). Any failure leaves
+/// the result `Unknown`, never a denial.
+fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, ctx: egui::Context) {
+    std::thread::spawn(move || loop {
+        let result = match tailscale::peer_relay_servers() {
+            Ok(servers) => PeerRelayServers::Known(servers),
+            Err(_) => PeerRelayServers::Unknown,
+        };
+        *slot.lock() = result;
+        ctx.request_repaint();
+        std::thread::sleep(PEER_RELAY_EVERY);
     });
 }
 
@@ -214,9 +262,19 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
                 path: Path {
                     direct: n.direct(),
                     relay: n.relay.clone(),
+                    peer_relay: n.peer_relay.clone(),
                     rtt_ms,
                 },
             }
+        })
+        .collect();
+    let relays = st
+        .relay_peers()
+        .into_iter()
+        .map(|n| Relay {
+            name: n.host_name.clone(),
+            ip: n.ipv4(),
+            online: n.online,
         })
         .collect();
     Discovery {
@@ -227,6 +285,8 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         self_key_days: st.self_node.key_expiry_days(),
         self_nat: None,
         self_ip: st.self_node.ipv4(),
+        relays,
+        peer_relay_servers: PeerRelayServers::default(),
     }
 }
 
@@ -275,6 +335,7 @@ fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
     let mut p = prior.clone();
     if let Ok(st) = tailscale::status() {
         if let Some(n) = st.peer.values().find(|n| n.id == node_id) {
+            p.peer_relay = n.peer_relay.clone();
             if let Some(d) = n.direct() {
                 p.direct = Some(d);
                 p.relay = n.relay.clone();
@@ -536,11 +597,17 @@ fn run(c: &Connect) -> Result<()> {
     let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
     let mut info = match client.server_info() {
         Ok(i) => i,
-        Err(e) if e.to_string().contains("certificate changed") => {
-            // Sunshine was reinstalled; the saved cert is the old one.
+        Err(e) if brolink_stream::nvhttp::is_pin_mismatch(&e) => {
+            // The engine was reinstalled; the saved cert is the old one.
             // Forget it and pair again so the user does not have to edit
             // client.toml.
             tracing::warn!("{}: {e:#}; pairing again", t.name);
+            let mut cfg = ClientConfig::load();
+            if cfg.forget_pin_on_mismatch(&t.node_id, &e) {
+                if let Err(e) = cfg.save() {
+                    tracing::warn!("could not forget the PC's old certificate: {e:#}");
+                }
+            }
             client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
             retry(8, || client.server_info())?
         }
@@ -581,7 +648,7 @@ fn run(c: &Connect) -> Result<()> {
         .find(|a| a.title.eq_ignore_ascii_case(&settings.app))
         .or_else(|| apps.iter().find(|a| a.title == "Desktop"))
         .or_else(|| apps.first())
-        .ok_or_else(|| anyhow!("Sunshine on {} offers nothing to stream", t.name))?;
+        .ok_or_else(|| anyhow!("{} offers nothing to stream", t.name))?;
     if info.current_game != 0
         && (info.current_game != app.id
             || (c.restart_capture && app.title.eq_ignore_ascii_case("Desktop")))
@@ -598,7 +665,7 @@ fn run(c: &Connect) -> Result<()> {
             }
             if stopped.elapsed() >= Duration::from_secs(10) {
                 bail!(
-                    "Sunshine did not stop the previous stream. Check Sunshine on {}.",
+                    "{} did not stop the previous stream. Check BroLink Host there.",
                     t.name
                 );
             }
@@ -699,7 +766,7 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
             Err(e) => {
                 tracing::info!("BroLink Host did not take the PIN: {e}");
                 progress.lock().detail =
-                    "BroLink Host is not answering on the PC. Enter the PIN in Sunshine's web page (https://<pc>:47990) to pair.".into();
+                    "BroLink Host is not answering on the PC. Open BroLink Host there and run setup, then try again.".into();
             }
         }
         std::thread::sleep(Duration::from_millis(800));

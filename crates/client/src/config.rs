@@ -215,6 +215,16 @@ impl ClientConfig {
     pub fn save(&self) -> anyhow::Result<()> {
         brolink_core::config::save(FILE, self)
     }
+
+    pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
+        if !brolink_stream::nvhttp::is_pin_mismatch(err) {
+            return false;
+        }
+        if let Some(pc) = self.pcs.get_mut(node_id) {
+            pc.server_cert = None;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -274,5 +284,26 @@ mod tests {
         assert_eq!(c.stream.bitrate_kbps, 2_000);
         assert_eq!(c.stream.fps, 30);
         assert_eq!(c.stream.app, "Desktop");
+    }
+
+    #[test]
+    fn pin_mismatch_clears_the_stored_server_cert() {
+        let mut c = ClientConfig::default();
+        c.pcs.insert(
+            "n".into(),
+            KnownPc {
+                name: "Gaming-PC".into(),
+                server_cert: Some("3082".into()),
+                ..Default::default()
+            },
+        );
+        let mismatch = anyhow::Error::from(brolink_stream::nvhttp::PinMismatch);
+        assert!(c.forget_pin_on_mismatch("n", &mismatch));
+        assert_eq!(c.pcs["n"].server_cert, None);
+
+        c.pcs.get_mut("n").unwrap().server_cert = Some("3082".into());
+        let generic = anyhow::anyhow!("invalid peer certificate: expired");
+        assert!(!c.forget_pin_on_mismatch("n", &generic));
+        assert_eq!(c.pcs["n"].server_cert.as_deref(), Some("3082"));
     }
 }

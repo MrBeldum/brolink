@@ -4,7 +4,9 @@
 use crate::config::{ClientConfig, Codec, Quality, Resolution};
 use crate::handover::{self, Handover};
 use crate::path;
-use crate::session::{self, Connect, Discovery, Live, Pc, Progress, Step, Target};
+use crate::session::{
+    self, Connect, Discovery, Live, Pc, PeerRelayServers, Progress, Step, Target,
+};
 use crate::stream::{self, Action, Env, QualityChoice};
 use crate::update;
 use brolink_core::api::PowerAction;
@@ -18,6 +20,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const COLUMN_WIDTH: f32 = 560.0;
+
+const RELAY_NONE: &str = "No relay on this network. Streams use Tailscale's default relay if a direct path is not available. You can run your own relay with the deploy kit.";
+const RELAY_READY: &str = "Using your network relay when a direct path is not available.";
+const RELAY_OFFLINE: &str = "A relay is on this network but it is offline. Streams use Tailscale's default relay until it comes back.";
+const RELAY_CHECKING: &str = "A relay is on this network. BroLink could not tell whether this device may use it — that is not a denial. Peer relay needs Tailscale 1.86 or later on every device.";
+const RELAY_UNAVAILABLE: &str = "A relay is on this network but it is not available to this device yet. That is not a denial. Confirm the relay is configured, and paste this grant into the tailnet policy if it is missing.";
+#[cfg(test)]
+const RELAY_UNGRANTED: &str = "A relay node is online but this device is not granted access.";
+const RELAY_GRANT: &str = "{\n  \"src\": [\"autogroup:member\"],\n  \"dst\": [\"tag:relay\"],\n  \"app\": {\n    \"tailscale.com/cap/relay\": []\n  }\n}";
+const RELAY_DOCS: &str = "https://tailscale.com/docs/features/peer-relay";
 
 /// A one-line result, filled in by a worker thread.
 type Notice = Arc<Mutex<Option<(Tone, String)>>>;
@@ -33,6 +45,7 @@ pub struct ClientApp {
     tailscale_checked: Instant,
     brand: ui::Brand,
     settings_open: bool,
+    notices_open: bool,
     fullscreen: bool,
     /// A restart or shutdown waits for a second click.
     confirm: Option<(String, PowerAction)>,
@@ -91,6 +104,7 @@ impl ClientApp {
             tailscale_checked: Instant::now(),
             brand: ui::Brand::new(&cc.egui_ctx),
             settings_open: false,
+            notices_open: false,
             fullscreen: false,
             confirm: None,
             notice: None,
@@ -293,7 +307,7 @@ impl ClientApp {
                             self.view.toast(
                                 Tone::Danger,
                                 format!(
-                                    "{} has no sound to send: Sunshine reports “{problem}”. See the host window.",
+                                    "{} has no sound to send: the PC reports “{problem}”. See the host window.",
                                     live.pc
                                 ),
                             );
@@ -475,21 +489,23 @@ impl eframe::App for ClientApp {
         });
 
         ui::bottom_bar(ctx, "bottom", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
-                if !disc.login.is_empty() {
-                    ui.label("·");
-                    ui.label(format!("Tailscale as {}", disc.login));
+            // The button first, so a long login is cut rather than pushing
+            // it out of the window.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if self.settings_open {
+                    "Close settings"
+                } else {
+                    "Settings"
+                };
+                if ui::ghost_button(ui, label).clicked() {
+                    self.settings_open = !self.settings_open;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.settings_open {
-                        "Close settings"
-                    } else {
-                        "Settings"
-                    };
-                    if ui::ghost_button(ui, label).clicked() {
-                        self.settings_open = !self.settings_open;
-                    }
+                let mut line = format!("v{}", env!("CARGO_PKG_VERSION"));
+                if !disc.login.is_empty() {
+                    line.push_str(&format!(" · Tailscale as {}", disc.login));
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(line).truncate());
                 });
             });
         });
@@ -517,6 +533,7 @@ impl eframe::App for ClientApp {
                         self.path_notices(ui, &disc);
                         self.key_expiry_notices(ui, &disc);
                         if self.settings_open {
+                            self.relay_card(ui, &disc);
                             self.settings_card(ui, ctx, &prog);
                         }
                         ui.add_space(10.0);
@@ -758,7 +775,7 @@ impl ClientApp {
             match &prog.step {
                 Step::Pairing { pin } => {
                     ui.label(format!(
-                        "First time with {}. BroLink Host on the PC enters this PIN in Sunshine for you.",
+                        "First time with {}. BroLink Host on the PC enters this PIN for you.",
                         prog.pc
                     ));
                     ui::display_digits(ui, pin);
@@ -892,7 +909,7 @@ impl ClientApp {
                     ui::setting_row(
                         ui,
                         "Bitrate",
-                        Some("Higher is sharper; lower survives a slow uplink. A relayed path carries a few Mbps at best."),
+                        Some("Higher is sharper; lower survives a slow uplink. Tailscale's default relay carries a few Mbps at best."),
                         |ui| {
                             let mut mbps = s.bitrate_kbps / 1000;
                             if ui
@@ -933,7 +950,7 @@ impl ClientApp {
                 ui::setting_row(
                     ui,
                     "App",
-                    Some("What Sunshine starts. “Desktop” is the whole PC."),
+                    Some("What the PC starts. “Desktop” is the whole PC."),
                     |ui| {
                         let mut app = s.app.clone();
                         let mut changed = false;
@@ -1003,8 +1020,124 @@ impl ClientApp {
                         self.updates.lock().check_now = true;
                     }
                 });
+                ui::row_separator(ui);
+                ui::open_source_row(ui, &mut self.notices_open);
             },
         );
+    }
+
+    fn relay_card(&mut self, ui: &mut egui::Ui, disc: &Discovery) {
+        let state = relay_state(disc);
+        ui::titled_card(ui, "Relay", Some(state.sentence()), |ui| match &state {
+            RelayState::Ready { name, ip } => {
+                let detail = match ip {
+                    Some(ip) => format!("{name} · {ip}"),
+                    None => name.clone(),
+                };
+                ui::caption(ui, detail);
+            }
+            RelayState::Unavailable { name } => {
+                ui::caption(
+                    ui,
+                    format!(
+                        "{name} is on the tailnet. This grant is what Tailscale needs if the relay is yours:"
+                    ),
+                );
+                ui::well(ui, |ui| {
+                    ui.label(egui::RichText::new(RELAY_GRANT).monospace().color(P.muted));
+                });
+                ui.horizontal(|ui| {
+                    if ui::ghost_button(ui, "Copy grant").clicked() {
+                        ui.ctx().copy_text(RELAY_GRANT.to_string());
+                        self.notice =
+                            Some((Tone::Info, "Copied the grant.".into(), Instant::now()));
+                    }
+                    if ui::ghost_button(ui, "How it works").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(RELAY_DOCS));
+                    }
+                });
+            }
+            RelayState::None | RelayState::Offline { .. } | RelayState::Checking { .. } => {
+                ui.horizontal(|ui| {
+                    if ui::ghost_button(ui, "How it works").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(RELAY_DOCS));
+                    }
+                });
+            }
+        });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayState {
+    None,
+    Offline {
+        name: String,
+    },
+    Checking {
+        name: String,
+    },
+    Unavailable {
+        name: String,
+    },
+    Ready {
+        name: String,
+        ip: Option<std::net::Ipv4Addr>,
+    },
+}
+
+impl RelayState {
+    fn sentence(&self) -> &'static str {
+        match self {
+            Self::None => RELAY_NONE,
+            Self::Offline { .. } => RELAY_OFFLINE,
+            Self::Checking { .. } => RELAY_CHECKING,
+            Self::Unavailable { .. } => RELAY_UNAVAILABLE,
+            Self::Ready { .. } => RELAY_READY,
+        }
+    }
+}
+
+fn ip_listed(servers: &[String], ip: Option<std::net::Ipv4Addr>) -> bool {
+    ip.is_some_and(|ip| servers.iter().any(|s| s == &ip.to_string()))
+}
+
+/// Ready only when an online `tag:relay` node's Tailscale IP is in the debug
+/// list. `Known([])` is not ACL denial. A nonempty list that matches no
+/// tagged IP is not Ready.
+fn relay_state(disc: &Discovery) -> RelayState {
+    let Some(first) = disc.relays.first() else {
+        return RelayState::None;
+    };
+    if let PeerRelayServers::Known(servers) = &disc.peer_relay_servers {
+        if let Some(r) = disc
+            .relays
+            .iter()
+            .find(|r| r.online && ip_listed(servers, r.ip))
+        {
+            return RelayState::Ready {
+                name: r.name.clone(),
+                ip: r.ip,
+            };
+        }
+        if let Some(r) = disc
+            .relays
+            .iter()
+            .find(|r| !r.online && ip_listed(servers, r.ip))
+        {
+            return RelayState::Offline {
+                name: r.name.clone(),
+            };
+        }
+    }
+    let relay = disc.relays.iter().find(|r| r.online).unwrap_or(first);
+    let name = relay.name.clone();
+    if !disc.relays.iter().any(|r| r.online) {
+        return RelayState::Offline { name };
+    }
+    match &disc.peer_relay_servers {
+        PeerRelayServers::Unknown => RelayState::Checking { name },
+        PeerRelayServers::Known(_) => RelayState::Unavailable { name },
     }
 }
 
@@ -1106,13 +1239,13 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
         if let Some(h) = &pc.host {
             if h.streamer.encoder == "software" {
                 out.push(format!(
-                    "{} encodes video in software: Sunshine found no GPU encoder there, so frames are slow to make whatever the network does. Check the GPU driver on the PC, or keep the stream at 1080p and 30 fps.",
+                    "{} encodes video in software: the streaming engine found no GPU encoder there, so frames are slow to make whatever the network does. Check the GPU driver on the PC, or keep the stream at 1080p and 30 fps.",
                     pc.name
                 ));
             }
             if !h.streamer.audio_problem.is_empty() {
                 out.push(format!(
-                    "{} has no sound to send: Sunshine reports “{}”. A PC with no monitor or speakers has no audio device to capture; give it a virtual one (Steam's Streaming Speakers, or VB-CABLE) and pick it as Sunshine's audio sink.",
+                    "{} has no sound to send: the PC reports “{}”. A PC with no monitor or speakers has no audio device to capture; give it a virtual one (Steam's Streaming Speakers, or VB-CABLE) and pick it as the PC's audio sink.",
                     pc.name, h.streamer.audio_problem
                 ));
             }
@@ -1130,6 +1263,7 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::config::KnownPc;
+    use crate::session::Relay;
 
     #[test]
     fn remembered_pcs_say_when_they_were_seen_and_keys_get_warnings() {
@@ -1200,6 +1334,7 @@ mod tests {
             direct: Some(false),
             relay: "tok".into(),
             rtt_ms: Some(210),
+            ..Default::default()
         };
         assert_eq!(
             describe(&pc),
@@ -1217,6 +1352,7 @@ mod tests {
                 direct: Some(false),
                 relay: "tok".into(),
                 rtt_ms: Some(200),
+                ..Default::default()
             },
             host: Some(brolink_core::api::Status {
                 version: "3.0.0".into(),
@@ -1268,6 +1404,167 @@ mod tests {
         };
         assert!(path_warnings(&disc).is_empty());
     }
+
+    fn a_relay(online: bool) -> Relay {
+        Relay {
+            name: "relay-sj".into(),
+            ip: Some("100.64.0.40".parse().unwrap()),
+            online,
+        }
+    }
+
+    fn disc_with(relays: Vec<Relay>, servers: PeerRelayServers) -> Discovery {
+        Discovery {
+            relays,
+            peer_relay_servers: servers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn relay_card_copy_covers_the_three_states_and_does_not_invent_a_denial() {
+        assert_eq!(RelayState::None.sentence(), RELAY_NONE);
+        assert_eq!(
+            RelayState::Ready {
+                name: "relay-sj".into(),
+                ip: None,
+            }
+            .sentence(),
+            RELAY_READY
+        );
+        for s in [RELAY_NONE, RELAY_READY, RELAY_UNAVAILABLE] {
+            assert!(!s.to_lowercase().contains("shared"));
+            assert!(!s.contains("BroLink relay"));
+        }
+
+        assert_eq!(
+            relay_state(&Discovery::default()),
+            RelayState::None,
+            "no tagged node is no relay, even before the debug command runs"
+        );
+        assert_eq!(
+            relay_state(&disc_with(
+                vec![],
+                PeerRelayServers::Known(vec!["100.64.0.40".into()]),
+            )),
+            RelayState::None,
+            "a grant without a tagged node is not a relay on this network"
+        );
+
+        let online = vec![a_relay(true)];
+        assert_eq!(
+            relay_state(&disc_with(online.clone(), PeerRelayServers::Unknown)),
+            RelayState::Checking {
+                name: "relay-sj".into()
+            }
+        );
+        assert_ne!(
+            relay_state(&disc_with(online.clone(), PeerRelayServers::Unknown)).sentence(),
+            RELAY_UNGRANTED,
+            "Unknown is not a denial"
+        );
+        assert!(
+            relay_state(&disc_with(online.clone(), PeerRelayServers::Unknown))
+                .sentence()
+                .contains("not a denial")
+        );
+        assert!(
+            relay_state(&disc_with(online.clone(), PeerRelayServers::Unknown))
+                .sentence()
+                .contains("1.86")
+        );
+
+        let empty = relay_state(&disc_with(online.clone(), PeerRelayServers::Known(vec![])));
+        assert_eq!(
+            empty,
+            RelayState::Unavailable {
+                name: "relay-sj".into()
+            }
+        );
+        assert_ne!(
+            empty.sentence(),
+            RELAY_UNGRANTED,
+            "Known([]) is not ACL denial"
+        );
+        assert!(
+            empty.sentence().contains("not a denial"),
+            "{}",
+            empty.sentence()
+        );
+
+        assert_eq!(
+            relay_state(&disc_with(
+                online.clone(),
+                PeerRelayServers::Known(vec!["100.64.0.40".into()]),
+            )),
+            RelayState::Ready {
+                name: "relay-sj".into(),
+                ip: Some("100.64.0.40".parse().unwrap()),
+            }
+        );
+
+        let mismatch = relay_state(&disc_with(
+            online.clone(),
+            PeerRelayServers::Known(vec!["100.64.0.99".into()]),
+        ));
+        assert_eq!(
+            mismatch,
+            RelayState::Unavailable {
+                name: "relay-sj".into()
+            },
+            "a nonempty list that matches no tagged IP is not Ready"
+        );
+        assert_ne!(mismatch.sentence(), RELAY_READY);
+        assert_ne!(mismatch.sentence(), RELAY_UNGRANTED);
+
+        assert_eq!(
+            relay_state(&disc_with(
+                vec![a_relay(false)],
+                PeerRelayServers::Known(vec![]),
+            )),
+            RelayState::Offline {
+                name: "relay-sj".into()
+            },
+            "an offline node is not 'online but ungranted'"
+        );
+        assert_eq!(
+            relay_state(&disc_with(
+                vec![a_relay(false)],
+                PeerRelayServers::Known(vec!["100.64.0.40".into()]),
+            )),
+            RelayState::Offline {
+                name: "relay-sj".into()
+            },
+            "permitted server whose tagged node is offline is Offline, not Ready"
+        );
+
+        let decoy_online = Relay {
+            name: "decoy".into(),
+            ip: Some("100.64.0.40".parse().unwrap()),
+            online: true,
+        };
+        let permitted_offline = Relay {
+            name: "relay-sj".into(),
+            ip: Some("100.64.0.41".parse().unwrap()),
+            online: false,
+        };
+        assert_eq!(
+            relay_state(&disc_with(
+                vec![decoy_online, permitted_offline],
+                PeerRelayServers::Known(vec!["100.64.0.41".into()]),
+            )),
+            RelayState::Offline {
+                name: "relay-sj".into()
+            },
+            "must not Ready an unmatched online tagged node"
+        );
+
+        assert!(RELAY_GRANT.contains("autogroup:member"));
+        assert!(RELAY_GRANT.contains("tag:relay"));
+        assert!(RELAY_GRANT.contains("tailscale.com/cap/relay"));
+        assert!(!RELAY_GRANT.contains("\"*\""));
+        assert_eq!(RELAY_DOCS, "https://tailscale.com/docs/features/peer-relay");
+    }
 }
 
 /// `cargo test -p brolink-client snapshots -- --ignored` writes PNGs of each
@@ -1276,6 +1573,7 @@ mod tests {
 mod snapshots {
     use super::*;
     use crate::config::KnownPc;
+    use crate::session::Relay;
     use brolink_core::api::Status;
 
     fn out_dir() -> std::path::PathBuf {
@@ -1311,6 +1609,7 @@ mod snapshots {
                 direct: Some(false),
                 relay: "tok".into(),
                 rtt_ms: Some(210),
+                ..Default::default()
             },
             sunshine: true,
             known: Some(KnownPc {
@@ -1372,20 +1671,284 @@ mod snapshots {
         size: egui::Vec2,
         ppp: f32,
     ) -> egui_kittest::Harness<'static, ClientApp> {
+        build_with(disc, prog, settings, size, ppp, true)
+    }
+
+    fn build_with(
+        disc: Discovery,
+        prog: Progress,
+        settings: bool,
+        size: egui::Vec2,
+        ppp: f32,
+        gpu: bool,
+    ) -> egui_kittest::Harness<'static, ClientApp> {
         let disc = Arc::new(Mutex::new(disc));
         let prog = Arc::new(Mutex::new(prog));
-        let mut harness = egui_kittest::Harness::builder()
-            .wgpu()
+        let mut builder = egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(ppp)
-            .with_max_steps(8)
-            .build_eframe(move |cc| {
-                let mut app = ClientApp::with_shared(cc, disc, prog, false);
-                app.settings_open = settings;
-                app
-            });
+            .with_max_steps(8);
+        if gpu {
+            builder = builder.wgpu();
+        }
+        let mut harness = builder.build_eframe(move |cc| {
+            let mut app = ClientApp::with_shared(cc, disc, prog, false);
+            app.settings_open = settings;
+            app
+        });
         harness.run_steps(3);
         harness
+    }
+
+    /// Every widget sits inside the window, and no two controls overlap.
+    fn assert_fits(h: &egui_kittest::Harness<'_, ClientApp>, width: f32) {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{By, Queryable};
+        let mut controls = Vec::new();
+        for node in h.query_all(By::new().predicate(|_| true)) {
+            let Some(b) = node.raw_bounds() else { continue };
+            let text = node.label().or_else(|| node.value()).unwrap_or_default();
+            assert!(
+                b.x0 >= -0.5 && b.x1 <= f64::from(width) + 0.5,
+                "{:?} {text:?} runs past the {width}-wide window: {b:?}",
+                node.role()
+            );
+            if matches!(
+                node.role(),
+                Role::Button | Role::CheckBox | Role::RadioButton | Role::ComboBox
+            ) {
+                controls.push((
+                    text,
+                    egui::Rect::from_min_max(
+                        egui::pos2(b.x0 as f32, b.y0 as f32),
+                        egui::pos2(b.x1 as f32, b.y1 as f32),
+                    ),
+                ));
+            }
+        }
+        assert!(!controls.is_empty(), "no controls found");
+        for (i, (a_name, a)) in controls.iter().enumerate() {
+            for (b_name, b) in &controls[i + 1..] {
+                let hit = a.intersect(*b);
+                assert!(
+                    hit.width() <= 1.0 || hit.height() <= 1.0,
+                    "{a_name} {a:?} overlaps {b_name} {b:?}"
+                );
+            }
+        }
+    }
+
+    const MIN_WINDOW: egui::Vec2 = egui::vec2(640.0, 420.0);
+
+    #[test]
+    fn lobby_fits_the_minimum_window() {
+        use egui_kittest::kittest::Queryable;
+        let h = build_with(pcs(), Progress::default(), false, MIN_WINDOW, 1.0, false);
+        assert_fits(&h, 640.0);
+        assert_eq!(h.query_all_by_label("Connect").count(), 3);
+        let mut disc = pcs();
+        disc.login = "someone.with.a.long.name@example-mail-provider.com".into();
+        let h = build_with(disc, Progress::default(), false, MIN_WINDOW, 1.0, false);
+        assert_fits(&h, 640.0);
+        assert!(h.query_by_label("Settings").is_some());
+    }
+
+    #[test]
+    fn settings_fit_the_minimum_window() {
+        use egui_kittest::kittest::Queryable;
+        let h = build_with(pcs(), Progress::default(), true, MIN_WINDOW, 1.0, false);
+        assert_fits(&h, 640.0);
+        assert!(h.query_by_label("Close settings").is_some());
+    }
+
+    #[test]
+    fn open_source_row_shows_the_bundled_notices() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = build_with(pcs(), Progress::default(), true, MIN_WINDOW, 1.0, false);
+        assert!(h.query_by_label("Open source").is_some());
+        assert!(h.query_by_label_contains("moonlight-common-c").is_none());
+        h.get_by_label("Show notices").click();
+        h.run_steps(3);
+        assert!(h.state().notices_open);
+        assert!(h.query_by_label_contains("moonlight-common-c").is_some());
+        assert!(h.query_by_label("Hide notices").is_some());
+        assert_fits(&h, 640.0);
+    }
+
+    #[test]
+    fn an_empty_lobby_fits_the_minimum_window() {
+        let disc = Discovery {
+            login: "user@example.com".into(),
+            refreshed: Some(Instant::now()),
+            ..Default::default()
+        };
+        let h = build_with(disc, Progress::default(), false, MIN_WINDOW, 1.0, false);
+        assert_fits(&h, 640.0);
+    }
+
+    #[test]
+    fn settings_opens_and_closes_as_a_bool_toggled_view() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = build_with(pcs(), Progress::default(), false, MIN_WINDOW, 1.0, false);
+        assert!(!h.state().settings_open);
+        assert!(h.query_by_label("How it works").is_none());
+        h.get_by_label("Settings").click();
+        h.run_steps(3);
+        assert!(h.state().settings_open);
+        assert!(h.query_by_label("Close settings").is_some());
+        assert!(h.query_by_label("How it works").is_some());
+        h.get_by_label("Close settings").click();
+        h.run_steps(3);
+        assert!(!h.state().settings_open);
+        assert!(h.query_by_label("Settings").is_some());
+        assert!(h.query_by_label("How it works").is_none());
+    }
+
+    const TAGGED_RELAY_STATUS: &str = r#"{"BackendState":"Running","Peer":{
+      "nodekey:relay": {"ID":"nRELAY","HostName":"sj-instance","OS":"linux","Online":true,
+                        "TailscaleIPs":["100.64.0.40"],"Tags":["tag:relay"]},
+      "nodekey:winrelay": {"ID":"nWINREL","HostName":"relay-pc","OS":"windows","Online":true,
+                           "TailscaleIPs":["100.64.0.42"],"Tags":["tag:relay"]},
+      "nodekey:pc": {"ID":"nPC","HostName":"Gaming-PC","OS":"windows","Online":true,
+                     "TailscaleIPs":["100.64.0.41"]},
+      "nodekey:other": {"ID":"nOTHER","HostName":"tagged-pc","OS":"windows","Online":true,
+                        "TailscaleIPs":["100.64.0.43"],"Tags":["tag:other"]}
+    }}"#;
+
+    fn discovery_from_status(json: &str) -> Discovery {
+        let st = brolink_core::tailscale::parse_status(json).expect("fixture");
+        Discovery {
+            login: "user@example.com".into(),
+            refreshed: Some(Instant::now()),
+            pcs: st
+                .windows_peers()
+                .into_iter()
+                .map(|n| Pc {
+                    node_id: n.id.clone(),
+                    name: n.host_name.clone(),
+                    ip: n.ipv4(),
+                    online: n.online,
+                    sunshine: true,
+                    ..Default::default()
+                })
+                .collect(),
+            relays: st
+                .relay_peers()
+                .into_iter()
+                .map(|n| Relay {
+                    name: n.host_name.clone(),
+                    ip: n.ipv4(),
+                    online: n.online,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tagged_relay_nodes_stay_out_of_the_pc_list_and_in_discovery() {
+        use egui_kittest::kittest::Queryable;
+        let disc = discovery_from_status(TAGGED_RELAY_STATUS);
+        assert_eq!(
+            disc.pcs.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["Gaming-PC", "tagged-pc"]
+        );
+        assert_eq!(
+            disc.relays
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["relay-pc", "sj-instance"]
+        );
+
+        let h = build_with(
+            disc.clone(),
+            Progress::default(),
+            false,
+            MIN_WINDOW,
+            1.0,
+            false,
+        );
+        assert_fits(&h, 640.0);
+        assert!(h.query_by_label("Gaming-PC").is_some());
+        assert!(h.query_by_label("tagged-pc").is_some());
+        assert!(h.query_by_label("sj-instance").is_none());
+        assert!(h.query_by_label("relay-pc").is_none());
+        assert_eq!(h.query_all_by_label("Connect").count(), 2);
+
+        let h = build_with(disc, Progress::default(), true, MIN_WINDOW, 1.0, false);
+        assert_fits(&h, 640.0);
+        assert!(h.query_by_label("How it works").is_some());
+        assert!(h.query_by_label("sj-instance").is_none());
+        assert!(h.query_by_label("relay-pc").is_none());
+    }
+
+    fn relay_disc(online: bool, servers: PeerRelayServers) -> Discovery {
+        Discovery {
+            login: "user@example.com".into(),
+            refreshed: Some(Instant::now()),
+            relays: vec![Relay {
+                name: "relay-sj".into(),
+                ip: Some("100.64.0.40".parse().unwrap()),
+                online,
+            }],
+            peer_relay_servers: servers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn relay_card_fits_the_minimum_window_in_every_state() {
+        use egui_kittest::kittest::Queryable;
+        let states = [
+            Discovery {
+                login: "user@example.com".into(),
+                refreshed: Some(Instant::now()),
+                ..Default::default()
+            },
+            relay_disc(false, PeerRelayServers::Unknown),
+            relay_disc(true, PeerRelayServers::Unknown),
+            relay_disc(true, PeerRelayServers::Known(vec![])),
+            relay_disc(true, PeerRelayServers::Known(vec!["100.64.0.99".into()])),
+            relay_disc(true, PeerRelayServers::Known(vec!["100.64.0.40".into()])),
+        ];
+        for disc in states {
+            let h = build_with(disc, Progress::default(), true, MIN_WINDOW, 1.0, false);
+            assert_fits(&h, 640.0);
+        }
+        let h = build_with(
+            relay_disc(true, PeerRelayServers::Known(vec![])),
+            Progress::default(),
+            true,
+            MIN_WINDOW,
+            1.0,
+            false,
+        );
+        assert!(h.query_by_label("Copy grant").is_some());
+        assert!(h.query_by_label("How it works").is_some());
+        let h = build_with(
+            Discovery {
+                login: "user@example.com".into(),
+                refreshed: Some(Instant::now()),
+                ..Default::default()
+            },
+            Progress::default(),
+            true,
+            MIN_WINDOW,
+            1.0,
+            false,
+        );
+        assert!(h.query_by_label("Copy grant").is_none());
+        assert!(h.query_by_label("How it works").is_some());
+        let h = build_with(
+            relay_disc(true, PeerRelayServers::Known(vec!["100.64.0.40".into()])),
+            Progress::default(),
+            true,
+            MIN_WINDOW,
+            1.0,
+            false,
+        );
+        assert!(h.query_by_label("Copy grant").is_none());
     }
 
     /// The stream screen with its toolbar, before any picture has arrived:
@@ -1407,6 +1970,7 @@ mod snapshots {
             direct: Some(false),
             relay: "tok".into(),
             rtt_ms: Some(210),
+            ..Default::default()
         };
         let settings = crate::path::effective(&crate::config::StreamSettings::default(), &path);
         let session = brolink_stream::Session::start(
@@ -1462,6 +2026,8 @@ mod snapshots {
         save(h.render().unwrap(), "client-lobby.png");
         let mut h = build(pcs(), Progress::default(), true);
         save(h.render().unwrap(), "client-settings.png");
+        let mut h = build_sized(pcs(), Progress::default(), false, MIN_WINDOW, 2.0);
+        save(h.render().unwrap(), "client-lobby-640x420.png");
     }
 
     #[test]
@@ -1502,6 +2068,72 @@ mod snapshots {
             false,
         );
         save(h.render().unwrap(), "client-no-tailscale.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn open_source_notices() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = build_sized(
+            pcs(),
+            Progress::default(),
+            true,
+            egui::vec2(1024.0, 2400.0),
+            1.0,
+        );
+        h.get_by_label("Show notices").click();
+        h.run_steps(3);
+        save(h.render().unwrap(), "client-open-source.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn relay_card_states() {
+        let none = Discovery {
+            login: "user@example.com".into(),
+            refreshed: Some(Instant::now()),
+            ..Default::default()
+        };
+        let mut h = build(none, Progress::default(), true);
+        save(h.render().unwrap(), "client-relay-none.png");
+        let mut h = build(
+            relay_disc(false, PeerRelayServers::Unknown),
+            Progress::default(),
+            true,
+        );
+        save(h.render().unwrap(), "client-relay-offline.png");
+        let mut h = build(
+            relay_disc(true, PeerRelayServers::Unknown),
+            Progress::default(),
+            true,
+        );
+        save(h.render().unwrap(), "client-relay-checking.png");
+        let mut h = build(
+            relay_disc(true, PeerRelayServers::Known(vec![])),
+            Progress::default(),
+            true,
+        );
+        save(h.render().unwrap(), "client-relay-unavailable.png");
+        let mut h = build(
+            relay_disc(true, PeerRelayServers::Known(vec!["100.64.0.99".into()])),
+            Progress::default(),
+            true,
+        );
+        save(h.render().unwrap(), "client-relay-mismatch.png");
+        let mut h = build(
+            relay_disc(true, PeerRelayServers::Known(vec!["100.64.0.40".into()])),
+            Progress::default(),
+            true,
+        );
+        save(h.render().unwrap(), "client-relay-ready.png");
+        let mut h = build_sized(
+            relay_disc(true, PeerRelayServers::Known(vec![])),
+            Progress::default(),
+            true,
+            MIN_WINDOW,
+            2.0,
+        );
+        save(h.render().unwrap(), "client-relay-unavailable-640x420.png");
     }
 }
 

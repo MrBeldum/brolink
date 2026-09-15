@@ -21,53 +21,95 @@ pub struct Path {
     pub direct: Option<bool>,
     /// The relay's region code ("tok") when relayed.
     pub relay: String,
+    /// Tailscale's `PeerRelay` for this peer: non-empty when the path goes
+    /// through a relay node on the tailnet rather than a DERP.
+    pub peer_relay: String,
     /// One round trip to the PC, from a TCP connect.
     pub rtt_ms: Option<u32>,
 }
 
+/// Which of Tailscale's three paths carries the stream, in its own order of
+/// preference: straight to the PC, through a relay node on the tailnet, or
+/// through one of Tailscale's shared DERP relays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Direct,
+    PeerRelay,
+    Derp,
+}
+
+/// The path in use; `None` before any traffic has flowed. A direct path
+/// wins over a peer relay even when Tailscale still reports one, and a
+/// peer relay wins over the home DERP region, which is reported whether or
+/// not packets go through it.
+pub fn path_kind(path: &Path) -> Option<PathKind> {
+    match path.direct {
+        Some(true) => Some(PathKind::Direct),
+        _ if !path.peer_relay.is_empty() => Some(PathKind::PeerRelay),
+        Some(false) => Some(PathKind::Derp),
+        None => None,
+    }
+}
+
 impl Path {
     pub fn relayed(&self) -> bool {
-        self.direct == Some(false)
+        matches!(path_kind(self), Some(PathKind::PeerRelay | PathKind::Derp))
     }
 
-    /// "Direct · 38 ms", "Relayed via Tokyo · 210 ms", "Path unknown".
+    /// "Direct · 38 ms", "Via your relay · 60 ms", "Relayed via Tokyo ·
+    /// 210 ms", "Path unknown".
     pub fn label(&self) -> String {
         let rtt = self
             .rtt_ms
             .map(|ms| format!(" · {ms} ms"))
             .unwrap_or_default();
-        match self.direct {
-            Some(true) => format!("Direct{rtt}"),
-            Some(false) if self.relay.is_empty() => format!("Relayed{rtt}"),
-            Some(false) => format!("Relayed via {}{rtt}", derp_city(&self.relay)),
+        match path_kind(self) {
+            Some(PathKind::Direct) => format!("Direct{rtt}"),
+            Some(PathKind::PeerRelay) => format!("Via your relay{rtt}"),
+            Some(PathKind::Derp) if self.relay.is_empty() => format!("Relayed{rtt}"),
+            Some(PathKind::Derp) => format!("Relayed via {}{rtt}", derp_city(&self.relay)),
             None => format!("Path unknown{rtt}"),
         }
     }
 
+    /// A DERP detour is the one thing worth red; a relay of your own is a
+    /// detour too, but one sized to the round trip, so it gets the colour a
+    /// long direct path gets.
     pub fn tone(&self) -> Tone {
-        match (self.direct, self.rtt_ms) {
-            (Some(false), _) => Tone::Danger,
-            (Some(true), Some(ms)) if ms >= 80 => Tone::Accent,
-            (Some(true), _) => Tone::Success,
+        match (path_kind(self), self.rtt_ms) {
+            (Some(PathKind::Derp), _) => Tone::Danger,
+            (Some(PathKind::PeerRelay), _) => Tone::Accent,
+            (Some(PathKind::Direct), Some(ms)) if ms >= 80 => Tone::Accent,
+            (Some(PathKind::Direct), _) => Tone::Success,
             (None, _) => Tone::Neutral,
         }
     }
 }
 
 /// Resolution, frame rate and bitrate for a path, when the user left the
-/// choice to BroLink. The numbers are what a Moonlight stream needs to
-/// stay fluid: a relay carries a few megabits at best, a long round trip
-/// makes every lost packet expensive, a LAN can take whatever the PC gives.
+/// choice to BroLink. DERP stays thin; a peer relay scales with round trip;
+/// a LAN can take whatever the PC gives.
 pub fn auto_values(path: &Path) -> (Resolution, u32, u32) {
     let rtt = path.rtt_ms.unwrap_or(40);
-    if path.relayed() || rtt >= 200 {
-        (Resolution::P1080, 30, 4_000)
-    } else if rtt >= 80 {
-        (Resolution::P1080, 60, 8_000)
-    } else if rtt >= 25 || path.direct.is_none() {
-        (Resolution::P1440, 60, 15_000)
-    } else {
-        (Resolution::P1440, 60, 30_000)
+    match path_kind(path) {
+        Some(PathKind::PeerRelay) => match rtt {
+            0..=25 => (Resolution::P1440, 60, 40_000),
+            26..=80 => (Resolution::P1440, 60, 20_000),
+            81..=200 => (Resolution::P1080, 60, 12_000),
+            _ => (Resolution::P1080, 30, 4_000),
+        },
+        Some(PathKind::Derp) => (Resolution::P1080, 30, 4_000),
+        Some(PathKind::Direct) | None => {
+            if rtt >= 200 {
+                (Resolution::P1080, 30, 4_000)
+            } else if rtt >= 80 {
+                (Resolution::P1080, 60, 8_000)
+            } else if rtt >= 25 || path.direct.is_none() {
+                (Resolution::P1440, 60, 15_000)
+            } else {
+                (Resolution::P1440, 60, 30_000)
+            }
+        }
     }
 }
 
@@ -93,17 +135,19 @@ pub fn explain(
     pc_nat: Option<&NatReport>,
     mac_nat: Option<&NatReport>,
 ) -> Option<String> {
-    if !path.relayed() {
-        return None;
-    }
-    let via = if path.relay.is_empty() {
-        "a Tailscale relay".to_string()
-    } else {
-        format!("Tailscale's {} relay", derp_city(&path.relay))
+    let mut out = match path_kind(path) {
+        Some(PathKind::PeerRelay) => format!(
+            "{pc} is reached through your relay, not directly. Every packet takes that detour; Auto sizes the stream to the round trip. "
+        ),
+        Some(PathKind::Derp) if path.relay.is_empty() => format!(
+            "{pc} is reached through a Tailscale relay, not directly. Every packet takes that detour and the relay holds the stream to a few megabits, whatever the two networks can do. "
+        ),
+        Some(PathKind::Derp) => format!(
+            "{pc} is reached through Tailscale's {} relay, not directly. Every packet takes that detour and the relay holds the stream to a few megabits, whatever the two networks can do. ",
+            derp_city(&path.relay)
+        ),
+        Some(PathKind::Direct) | None => return None,
     };
-    let mut out = format!(
-        "{pc} is reached through {via}, not directly. Every packet takes that detour and the relay holds the stream to a few megabits, whatever the two networks can do. "
-    );
     let cause = match (pc_nat, mac_nat) {
         (Some(p), _) if !p.udp => format!(
             "{pc}'s network blocks UDP, so no direct path is possible from anywhere. A different network for {pc}, or a Tailscale subnet router beside it, is the only fix."
@@ -180,6 +224,7 @@ mod tests {
             direct: Some(false),
             relay: "tok".into(),
             rtt_ms: Some(210),
+            ..Default::default()
         };
         assert_eq!(p.label(), "Relayed via Tokyo · 210 ms");
         assert_eq!(p.tone(), Tone::Danger);
@@ -187,6 +232,7 @@ mod tests {
             direct: Some(true),
             relay: "tok".into(),
             rtt_ms: Some(38),
+            ..Default::default()
         };
         assert_eq!(p.label(), "Direct · 38 ms");
         assert_eq!(p.tone(), Tone::Success);
@@ -202,6 +248,64 @@ mod tests {
         );
         assert_eq!(Path::default().label(), "Path unknown");
         assert_eq!(Path::default().tone(), Tone::Neutral);
+        let p = Path {
+            direct: Some(false),
+            rtt_ms: Some(150),
+            ..Default::default()
+        };
+        assert_eq!(p.label(), "Relayed · 150 ms");
+    }
+
+    #[test]
+    fn a_peer_relay_is_named_as_yours_not_as_a_derp_detour() {
+        // Given: no direct path, home DERP "tok" still reported, but a relay
+        // node on the tailnet carries the packets.
+        let p = Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            peer_relay: "100.64.0.40:40000:vni:17".into(),
+            rtt_ms: Some(60),
+        };
+        assert_eq!(p.label(), "Via your relay · 60 ms");
+        assert_eq!(p.tone(), Tone::Accent, "a detour, not an alarm");
+        assert!(!p.label().contains("Tokyo"));
+
+        // Given: the relay is named before any traffic has flowed.
+        let early = Path {
+            peer_relay: "100.64.0.40:40000:vni:17".into(),
+            ..Default::default()
+        };
+        assert_eq!(early.label(), "Via your relay");
+        assert_eq!(early.tone(), Tone::Accent);
+
+        // Given: a direct path holds while Tailscale still names the relay.
+        let direct = Path {
+            direct: Some(true),
+            peer_relay: "100.64.0.40:40000:vni:17".into(),
+            rtt_ms: Some(12),
+            ..Default::default()
+        };
+        assert_eq!(direct.label(), "Direct · 12 ms");
+        assert_eq!(direct.tone(), Tone::Success);
+
+        let mac_easy = nat(true, Some(false), false, false);
+        let pc_hard = nat(true, Some(true), false, true);
+        let t = explain("Gaming-PC", &p, Some(&pc_hard), Some(&mac_easy)).unwrap();
+        assert!(
+            t.starts_with("Gaming-PC is reached through your relay, not directly."),
+            "{t}"
+        );
+        assert!(!t.contains("Tokyo"), "{t}");
+        assert!(!t.contains("few megabits"), "{t}");
+        assert!(
+            t.contains("Gaming-PC's router is a hard NAT with no UPnP"),
+            "the way to a direct path is still worth saying: {t}"
+        );
+        let t = explain("Gaming-PC", &early, None, None).unwrap();
+        assert!(
+            t.starts_with("Gaming-PC is reached through your relay"),
+            "{t}"
+        );
     }
 
     #[test]
@@ -210,6 +314,7 @@ mod tests {
             direct: Some(false),
             relay: "tok".into(),
             rtt_ms: Some(150),
+            ..Default::default()
         };
         assert_eq!(auto_values(&relayed), (Resolution::P1080, 30, 4_000));
         let far = Path {
@@ -256,12 +361,175 @@ mod tests {
         assert_eq!(e.app, "Desktop");
     }
 
+    fn auto_path(kind: PathKind, rtt_ms: Option<u32>) -> Path {
+        match kind {
+            PathKind::Direct => Path {
+                direct: Some(true),
+                rtt_ms,
+                ..Default::default()
+            },
+            PathKind::Derp => Path {
+                direct: Some(false),
+                relay: "tok".into(),
+                rtt_ms,
+                ..Default::default()
+            },
+            PathKind::PeerRelay => Path {
+                direct: Some(false),
+                relay: "tok".into(),
+                peer_relay: "100.64.0.40:40000:vni:17".into(),
+                rtt_ms,
+            },
+        }
+    }
+
+    #[test]
+    fn auto_values_peer_relay_tiers_leave_direct_and_derp_unchanged() {
+        #[rustfmt::skip]
+        let rows = [
+            (PathKind::Direct, Some(0), Resolution::P1440, 60, 30_000, "direct 0"),
+            (PathKind::Direct, Some(24), Resolution::P1440, 60, 30_000, "direct 24"),
+            (PathKind::Direct, Some(25), Resolution::P1440, 60, 15_000, "direct 25"),
+            (PathKind::Direct, Some(79), Resolution::P1440, 60, 15_000, "direct 79"),
+            (PathKind::Direct, Some(80), Resolution::P1080, 60, 8_000, "direct 80"),
+            (PathKind::Direct, Some(199), Resolution::P1080, 60, 8_000, "direct 199"),
+            (PathKind::Direct, Some(200), Resolution::P1080, 30, 4_000, "direct 200"),
+            (PathKind::Direct, None, Resolution::P1440, 60, 15_000, "direct unknown rtt"),
+            (PathKind::Derp, Some(0), Resolution::P1080, 30, 4_000, "derp 0"),
+            (PathKind::Derp, Some(25), Resolution::P1080, 30, 4_000, "derp 25"),
+            (PathKind::Derp, Some(80), Resolution::P1080, 30, 4_000, "derp 80"),
+            (PathKind::Derp, Some(150), Resolution::P1080, 30, 4_000, "derp 150"),
+            (PathKind::Derp, Some(200), Resolution::P1080, 30, 4_000, "derp 200"),
+            (PathKind::Derp, None, Resolution::P1080, 30, 4_000, "derp unknown rtt"),
+            (PathKind::PeerRelay, Some(0), Resolution::P1440, 60, 40_000, "peer 0"),
+            (PathKind::PeerRelay, Some(25), Resolution::P1440, 60, 40_000, "peer 25"),
+            (PathKind::PeerRelay, Some(26), Resolution::P1440, 60, 20_000, "peer 26"),
+            (PathKind::PeerRelay, Some(80), Resolution::P1440, 60, 20_000, "peer 80"),
+            (PathKind::PeerRelay, Some(81), Resolution::P1080, 60, 12_000, "peer 81"),
+            (PathKind::PeerRelay, Some(200), Resolution::P1080, 60, 12_000, "peer 200"),
+            (PathKind::PeerRelay, Some(201), Resolution::P1080, 30, 4_000, "peer 201"),
+            (PathKind::PeerRelay, None, Resolution::P1440, 60, 20_000, "peer unknown rtt"),
+        ];
+        for (kind, rtt, res, fps, kbps, name) in rows {
+            assert_eq!(
+                auto_values(&auto_path(kind, rtt)),
+                (res, fps, kbps),
+                "{name}"
+            );
+        }
+
+        assert_eq!(
+            auto_values(&Path::default()),
+            (Resolution::P1440, 60, 15_000)
+        );
+        assert_eq!(
+            auto_values(&Path {
+                rtt_ms: Some(10),
+                ..Default::default()
+            }),
+            (Resolution::P1440, 60, 15_000),
+            "unknown path 10ms still middle"
+        );
+        assert_eq!(
+            auto_values(&Path {
+                direct: Some(false),
+                relay: "tok".into(),
+                rtt_ms: Some(60),
+                ..Default::default()
+            }),
+            (Resolution::P1080, 30, 4_000),
+            "old derp path"
+        );
+        assert_eq!(
+            auto_values(&Path {
+                direct: Some(true),
+                peer_relay: "100.64.0.40:40000:vni:17".into(),
+                rtt_ms: Some(2),
+                ..Default::default()
+            }),
+            (Resolution::P1440, 60, 30_000),
+            "direct outranks peer relay"
+        );
+        assert_eq!(
+            auto_values(&Path {
+                peer_relay: "100.64.0.40:40000:vni:17".into(),
+                rtt_ms: Some(60),
+                ..Default::default()
+            }),
+            (Resolution::P1440, 60, 20_000),
+            "early peer relay"
+        );
+
+        let custom = StreamSettings {
+            quality: Quality::Custom,
+            bitrate_kbps: 77_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective(&custom, &auto_path(PathKind::PeerRelay, Some(10))).bitrate_kbps,
+            77_000
+        );
+        assert_eq!(
+            effective(&custom, &auto_path(PathKind::Derp, Some(10))).bitrate_kbps,
+            77_000
+        );
+    }
+
+    #[test]
+    fn a_direct_path_outranks_a_peer_relay_which_outranks_derp() {
+        let direct = Path {
+            direct: Some(true),
+            relay: "tok".into(),
+            ..Default::default()
+        };
+        assert_eq!(path_kind(&direct), Some(PathKind::Direct));
+        assert!(!direct.relayed());
+
+        // Given: Tailscale still names a peer relay while a direct path holds.
+        let direct_over_relay = Path {
+            peer_relay: "100.64.0.40:40000:vni:17".into(),
+            ..direct.clone()
+        };
+        assert_eq!(path_kind(&direct_over_relay), Some(PathKind::Direct));
+        assert!(!direct_over_relay.relayed());
+
+        // Given: no direct path, but a relay node on the tailnet carries it.
+        // Relay ("tok") is the home DERP region and must not win.
+        let peer_relayed = Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            peer_relay: "100.64.0.40:40000:vni:17".into(),
+            rtt_ms: Some(60),
+        };
+        assert_eq!(path_kind(&peer_relayed), Some(PathKind::PeerRelay));
+        assert!(peer_relayed.relayed());
+
+        // Given: a peer relay named before any traffic has flowed.
+        let early = Path {
+            peer_relay: "100.64.0.40:40000:vni:17".into(),
+            ..Default::default()
+        };
+        assert_eq!(path_kind(&early), Some(PathKind::PeerRelay));
+
+        let derp = Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            ..Default::default()
+        };
+        assert_eq!(path_kind(&derp), Some(PathKind::Derp));
+        assert!(derp.relayed());
+
+        assert_eq!(path_kind(&Path::default()), None);
+        assert!(!Path::default().relayed());
+    }
+
     #[test]
     fn explanations_name_the_router_in_the_way() {
         let relayed = Path {
             direct: Some(false),
             relay: "tok".into(),
             rtt_ms: Some(200),
+            ..Default::default()
         };
         let direct = Path {
             direct: Some(true),

@@ -5,7 +5,7 @@ use crate::setup;
 use crate::streamer::Api;
 use brolink_core::api::Status;
 use brolink_core::http;
-use brolink_core::{CONTROL_PORT, SUNSHINE_WEB_PORT};
+use brolink_core::CONTROL_PORT;
 use brolink_ui::{self as ui, Tone, PALETTE as P};
 use eframe::egui;
 use parking_lot::Mutex;
@@ -35,9 +35,10 @@ pub struct HostApp {
     dirty: bool,
     brand: ui::Brand,
     confirm_unpair: Option<String>,
+    notices_open: bool,
     busy_since: Option<Instant>,
-    /// The Sunshine installer sits beside the exe, so setup needs no download.
-    bundled_sunshine: bool,
+    /// The engine archive sits beside the exe, so setup needs no download.
+    bundled_engine: bool,
 }
 
 impl HostApp {
@@ -56,8 +57,9 @@ impl HostApp {
             dirty: false,
             brand: ui::Brand::new(&cc.egui_ctx),
             confirm_unpair: None,
+            notices_open: false,
             busy_since: None,
-            bundled_sunshine: std::env::current_exe().is_ok_and(|e| setup::bundled_sunshine(&e)),
+            bundled_engine: std::env::current_exe().is_ok_and(|e| setup::bundled_engine(&e)),
         }
     }
 
@@ -80,7 +82,8 @@ impl HostApp {
     /// Generate a Sunshine login if there is none, save it, and run the
     /// elevated script on a thread.
     fn start_setup(&mut self, status: &Status) {
-        if !self.cfg.has_creds() {
+        let migrate = crate::migrate::uses_old_engine(&status.streamer.kind);
+        if !self.cfg.has_creds() && !migrate {
             self.cfg.sunshine_user = "brolink".into();
             self.cfg.sunshine_pass = config::random_password();
             self.dirty = true;
@@ -94,7 +97,7 @@ impl HostApp {
             s.setup_log.clear();
         }
         let cfg = self.cfg.clone();
-        let install_sunshine = !status.streamer.installed;
+        let install_engine = !status.streamer.installed || migrate;
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
         std::thread::spawn(move || {
@@ -103,7 +106,9 @@ impl HostApp {
                 .and_then(|exe| {
                     setup::run(&setup::Plan {
                         exe: &exe,
-                        install_sunshine,
+                        install_engine,
+                        migrate,
+                        dry_run: false,
                         sunshine_user: &cfg.sunshine_user,
                         sunshine_pass: &cfg.sunshine_pass,
                         adapter: &adapter,
@@ -258,7 +263,7 @@ impl HostApp {
                 ui::dot_label(ui, Tone::Success, "Everything is in place.");
             }
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if running {
                     ui::empty_state(
                         ui,
@@ -269,7 +274,10 @@ impl HostApp {
                         true,
                     );
                 } else {
-                    let label = if admin_items.is_empty() {
+                    let migrate = crate::migrate::uses_old_engine(&s.streamer.kind);
+                    let label = if migrate {
+                        "Update this PC"
+                    } else if admin_items.is_empty() {
                         "Run setup again"
                     } else {
                         "Set up this PC (administrator)"
@@ -277,13 +285,18 @@ impl HostApp {
                     if ui::primary_button(ui, label).clicked() {
                         self.start_setup(s);
                     }
-                    if !s.streamer.installed {
+                    if migrate {
                         ui::caption(
                             ui,
-                            if self.bundled_sunshine {
-                                "Installs the Sunshine that ships with BroLink, silently."
+                            "One administrator prompt. Keeps this PC's pairing and web login.",
+                        );
+                    } else if !s.streamer.installed {
+                        ui::caption(
+                            ui,
+                            if self.bundled_engine {
+                                "Installs the streaming engine that ships with BroLink."
                             } else {
-                                "Downloads Sunshine from GitHub and installs it silently."
+                                "Downloads the streaming engine and installs it."
                             },
                         );
                     }
@@ -374,11 +387,10 @@ impl HostApp {
             let gamepad_text = match gamepad {
                 Some(true) => "virtual controller driver installed",
                 Some(false) => "virtual controller driver missing",
-                None => "unknown until Sunshine is running",
+                None => "unknown until the streaming engine is running",
             };
             ui::kv_grid(
                 ui,
-                "pc_grid",
                 &[
                     ("Name", s.name.clone()),
                     ("Tailscale", tailscale),
@@ -394,11 +406,6 @@ impl HostApp {
             );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if s.streamer.running && ui::ghost_button(ui, "Open Sunshine settings").clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
-                        "https://localhost:{SUNSHINE_WEB_PORT}"
-                    )));
-                }
                 if gamepad == Some(false)
                     && ui::ghost_button(ui, "Install controller driver").clicked()
                 {
@@ -409,15 +416,6 @@ impl HostApp {
                     }
                 }
             });
-            if s.streamer.api_ok && self.cfg.has_creds() {
-                ui::caption(
-                    ui,
-                    format!(
-                        "Sunshine web login for you: {} / {}",
-                        self.cfg.sunshine_user, self.cfg.sunshine_pass
-                    ),
-                );
-            }
         });
     }
 
@@ -503,6 +501,8 @@ impl HostApp {
                     ui::muted(ui, format!("v{}", env!("CARGO_PKG_VERSION")));
                 },
             );
+            ui::row_separator(ui);
+            ui::open_source_row(ui, &mut self.notices_open);
             ui::row_separator(ui);
             ui.horizontal(|ui| {
                 if ui::danger_button(ui, "Stop the background service").clicked() {
@@ -730,7 +730,8 @@ mod tests {
         assert_eq!(pill(None, None).0, "Starting");
         let mut s = Status::default();
         assert_eq!(pill(Some(&s), None).0, "Ready");
-        s.setup.push("Sunshine is not installed.".into());
+        s.setup
+            .push("The streaming engine is not installed.".into());
         assert_eq!(pill(Some(&s), None).0, "Needs setup");
         s.setup.push("Tailscale: not running".into());
         assert_eq!(pill(Some(&s), None).0, "Tailscale off");
@@ -775,7 +776,7 @@ mod snapshots {
             wake_packet_age_secs: Some(42),
             fast_startup: Some(false),
             streamer: Streamer {
-                kind: "Sunshine".into(),
+                kind: "BroLink".into(),
                 installed: true,
                 running: true,
                 api_ok: true,
@@ -796,7 +797,7 @@ mod snapshots {
                 "BroLink Host 3.0.1 listening on TCP 47850".into(),
                 "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
-                "Sunshine is running and BroLink is logged in".into(),
+                "BroLink is running and BroLink is logged in".into(),
                 "Wake-on-LAN ready on Ethernet (02:00:00:00:00:01)".into(),
                 "example-mac (user@example.com) asked".into(),
                 "paired \"Example Mac\"".into(),
@@ -805,14 +806,105 @@ mod snapshots {
     }
 
     fn build(shared: Shared) -> egui_kittest::Harness<'static, HostApp> {
+        build_sized(shared, egui::vec2(720.0, 1500.0), 2.0, true)
+    }
+
+    fn build_sized(
+        shared: Shared,
+        size: egui::Vec2,
+        ppp: f32,
+        gpu: bool,
+    ) -> egui_kittest::Harness<'static, HostApp> {
         let shared = Arc::new(Mutex::new(shared));
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(720.0, 1500.0))
-            .with_pixels_per_point(2.0)
-            .with_max_steps(8)
-            .build_eframe(move |cc| HostApp::with_shared(cc, shared));
+        let mut builder = egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(ppp)
+            .with_max_steps(8);
+        if gpu {
+            builder = builder.wgpu();
+        }
+        let mut harness = builder.build_eframe(move |cc| HostApp::with_shared(cc, shared));
         harness.run_steps(3);
         harness
+    }
+
+    fn needs_setup_shared() -> Shared {
+        let mut st = ready_status();
+        st.streamer = Streamer::default();
+        st.wake_ready = Some(false);
+        st.fast_startup = Some(true);
+        st.setup = vec![
+            "The streaming engine is not installed.".into(),
+            "Wake-on-LAN is off on Ethernet.".into(),
+            "Fast Startup is on, so the PC cannot be woken after a shutdown.".into(),
+        ];
+        Shared {
+            status: Some(st),
+            gamepad_driver: None,
+            ..Default::default()
+        }
+    }
+
+    /// Every widget sits inside the window, and no two controls overlap.
+    fn assert_fits(h: &egui_kittest::Harness<'_, HostApp>, width: f32) {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{By, Queryable};
+        let mut controls = Vec::new();
+        for node in h.query_all(By::new().predicate(|_| true)) {
+            let Some(b) = node.raw_bounds() else { continue };
+            let text = node.label().or_else(|| node.value()).unwrap_or_default();
+            assert!(
+                b.x0 >= -0.5 && b.x1 <= f64::from(width) + 0.5,
+                "{:?} {text:?} runs past the {width}-wide window: {b:?}",
+                node.role()
+            );
+            if matches!(
+                node.role(),
+                Role::Button | Role::CheckBox | Role::RadioButton | Role::ComboBox
+            ) {
+                controls.push((
+                    text,
+                    egui::Rect::from_min_max(
+                        egui::pos2(b.x0 as f32, b.y0 as f32),
+                        egui::pos2(b.x1 as f32, b.y1 as f32),
+                    ),
+                ));
+            }
+        }
+        assert!(!controls.is_empty(), "no controls found");
+        for (i, (a_name, a)) in controls.iter().enumerate() {
+            for (b_name, b) in &controls[i + 1..] {
+                let hit = a.intersect(*b);
+                assert!(
+                    hit.width() <= 1.0 || hit.height() <= 1.0,
+                    "{a_name} {a:?} overlaps {b_name} {b:?}"
+                );
+            }
+        }
+    }
+
+    fn ready_shared() -> Shared {
+        Shared {
+            status: Some(ready_status()),
+            clients: vec![
+                ("Example Mac".into(), "0000000000000001".into()),
+                ("Second Example Mac".into(), "0000000000000002".into()),
+            ],
+            gamepad_driver: Some(false),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ready_panel_fits_the_minimum_window() {
+        let h = build_sized(ready_shared(), egui::vec2(560.0, 600.0), 1.0, false);
+        assert_fits(&h, 560.0);
+    }
+
+    #[test]
+    fn setup_panel_fits_the_minimum_window() {
+        let h = build_sized(needs_setup_shared(), egui::vec2(560.0, 600.0), 1.0, false);
+        assert_fits(&h, 560.0);
     }
 
     #[test]
@@ -828,26 +920,17 @@ mod snapshots {
             ..Default::default()
         });
         save(h.render().unwrap(), "host-ready.png");
+        let mut h = build_sized(ready_shared(), egui::vec2(560.0, 600.0), 2.0, true);
+        save(h.render().unwrap(), "host-ready-560.png");
     }
 
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
     fn needs_setup() {
-        let mut st = ready_status();
-        st.streamer = Streamer::default();
-        st.wake_ready = Some(false);
-        st.fast_startup = Some(true);
-        st.setup = vec![
-            "Sunshine is not installed.".into(),
-            "Wake-on-LAN is off on Ethernet.".into(),
-            "Fast Startup is on, so the PC cannot be woken after a shutdown.".into(),
-        ];
-        let mut h = build(Shared {
-            status: Some(st),
-            gamepad_driver: None,
-            ..Default::default()
-        });
+        let mut h = build(needs_setup_shared());
         save(h.render().unwrap(), "host-setup.png");
+        let mut h = build_sized(needs_setup_shared(), egui::vec2(560.0, 600.0), 2.0, true);
+        save(h.render().unwrap(), "host-setup-560.png");
     }
 
     #[test]
@@ -862,8 +945,8 @@ mod snapshots {
             setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\BroLink\\setup.log)".into())),
             setup_log: vec![
                 "[14:02:11] BroLink setup started".into(),
-                "[14:02:11] Downloading Sunshine".into(),
-                "  sunshine: curl: (6) Could not resolve host: api.github.com".into(),
+                "[14:02:11] Downloading the streaming engine".into(),
+                "  engine: curl: (6) Could not resolve host: api.github.com".into(),
             ],
             ..Default::default()
         });

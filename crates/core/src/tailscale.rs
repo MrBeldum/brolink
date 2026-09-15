@@ -4,10 +4,18 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// The ACL tag BroLink uses for a tailnet peer-relay node.
+pub const RELAY_TAG: &str = "tag:relay";
+
+/// Bound on `tailscale debug peer-relay-servers` only. [`run`] has no timeout.
+const PEER_RELAY_SERVERS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Where the CLI lives, first hit wins. The macOS App Store build keeps it
 /// inside the bundle; the standalone build symlinks it; Homebrew's is last.
@@ -84,6 +92,14 @@ pub struct Node {
     /// The peer's home DERP region code ("tok", "lax"), which is where its
     /// packets go when there is no direct path.
     pub relay: String,
+    /// The peer relay carrying this path, as `ip:port:vni:id`, when
+    /// Tailscale found one. Empty for a direct or DERP path, and always
+    /// empty before Tailscale 1.86. `Relay` stays set beside it: that is
+    /// the peer's *home* DERP, not the path in use.
+    #[serde(rename = "PeerRelay")]
+    pub peer_relay: String,
+    /// ACL tags ("tag:relay"), present only on tagged nodes.
+    pub tags: Vec<String>,
     /// Traffic has flowed recently, so `cur_addr` and `relay` describe the
     /// path in use rather than a guess.
     pub active: bool,
@@ -106,6 +122,10 @@ impl Node {
     }
     pub fn is_windows(&self) -> bool {
         self.os.eq_ignore_ascii_case("windows")
+    }
+    /// True only for `tag:relay`. Other tags leave a stream PC in the list.
+    pub fn is_relay(&self) -> bool {
+        self.tags.iter().any(|t| t == RELAY_TAG)
     }
     /// The peer's public IPv4 address, when Tailscale reached it directly.
     pub fn public_ipv4(&self) -> Option<Ipv4Addr> {
@@ -143,8 +163,19 @@ impl Status {
             .map(|u| u.login_name.as_str())
     }
     /// Peers running Windows, the only kind BroLink can host on.
+    /// Relay-tagged nodes are omitted even when they report Windows.
     pub fn windows_peers(&self) -> Vec<&Node> {
-        let mut v: Vec<&Node> = self.peer.values().filter(|n| n.is_windows()).collect();
+        let mut v: Vec<&Node> = self
+            .peer
+            .values()
+            .filter(|n| n.is_windows() && !n.is_relay())
+            .collect();
+        v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+        v
+    }
+    /// Nodes tagged `tag:relay`, any OS. Sorted by hostname like the PC list.
+    pub fn relay_peers(&self) -> Vec<&Node> {
+        let mut v: Vec<&Node> = self.peer.values().filter(|n| n.is_relay()).collect();
         v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
         v
     }
@@ -152,6 +183,26 @@ impl Status {
 
 pub fn parse_status(json: &str) -> Result<Status> {
     serde_json::from_str(json).context("parse tailscale status")
+}
+
+/// `tailscale debug peer-relay-servers` stdout. A 1.102.3 run with no
+/// servers is `[]`. Valid JSON array of strings → `Some` (empty is known
+/// empty, not a failure). Anything else → `None` (unknown, not ACL denial).
+pub fn parse_peer_relay_servers(stdout: &str) -> Option<Vec<String>> {
+    serde_json::from_str(stdout.trim()).ok()
+}
+
+/// Candidate peer-relay servers this node may use. `Err` when the CLI is
+/// missing, the command fails or times out, or stdout is not a JSON string
+/// array. A successful empty list is `Ok([])`.
+pub fn peer_relay_servers() -> Result<Vec<String>> {
+    let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
+    let out = run_limited(
+        Command::new(cli).args(["debug", "peer-relay-servers"]),
+        PEER_RELAY_SERVERS_TIMEOUT,
+    )?;
+    parse_peer_relay_servers(&out)
+        .ok_or_else(|| anyhow::anyhow!("peer-relay-servers: unexpected output"))
 }
 
 /// Run `tailscale status --json`. Errors when the CLI is missing or the
@@ -316,7 +367,7 @@ pub fn derp_city(code: &str) -> &str {
     }
 }
 
-fn run(cmd: &mut Command) -> Result<String> {
+fn prepare(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -328,7 +379,9 @@ fn run(cmd: &mut Command) -> Result<String> {
     // then it tries to start the (already running) GUI, prints "The
     // Tailscale GUI failed to start" on stdout and exits 0.
     cmd.env("SHLVL", "1");
-    let out = cmd.output().context("run tailscale")?;
+}
+
+fn finish(out: std::process::Output) -> Result<String> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         bail!(
@@ -345,6 +398,43 @@ fn run(cmd: &mut Command) -> Result<String> {
         );
     }
     Ok(stdout)
+}
+
+fn run(cmd: &mut Command) -> Result<String> {
+    prepare(cmd);
+    finish(cmd.output().context("run tailscale")?)
+}
+
+fn run_limited(cmd: &mut Command, limit: Duration) -> Result<String> {
+    prepare(cmd);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("run tailscale")?;
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait().context("run tailscale")? {
+            Some(status) => break status,
+            None if start.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("tailscale timed out");
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_end(&mut stdout);
+    }
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_end(&mut stderr);
+    }
+    finish(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -435,6 +525,100 @@ mod tests {
         assert!(!st.running());
         assert!(st.windows_peers().is_empty());
         assert_eq!(st.self_login(), None);
+    }
+
+    #[test]
+    fn peer_relay_and_tags_are_parsed_without_changing_direct() {
+        // Given: status from Tailscale 1.86+, where a peer-relayed node has an
+        // empty CurAddr, a home DERP region *and* a PeerRelay.
+        let st = parse_status(
+            r#"{"BackendState":"Running","Peer":{
+              "nodekey:a": {"ID":"nRELAY","HostName":"sj-instance","OS":"linux","Online":true,
+                            "TailscaleIPs":["100.64.0.40"],"Tags":["tag:relay"],
+                            "CurAddr":"","Relay":"lax","Active":true,"UnknownFutureField":{"x":1}},
+              "nodekey:b": {"ID":"nPC","HostName":"Gaming-PC","OS":"windows","Online":true,
+                            "TailscaleIPs":["100.64.0.41"],"CurAddr":"","Relay":"tok","Active":true,
+                            "PeerRelay":"100.64.0.40:40000:vni:17"}
+            }}"#,
+        )
+        .unwrap();
+        let relay = &st.peer["nodekey:a"];
+        let pc = &st.peer["nodekey:b"];
+
+        // Then: the new fields land, unknown fields are ignored, and direct()
+        // still calls an empty CurAddr not-direct.
+        assert_eq!(relay.tags, ["tag:relay"]);
+        assert_eq!(relay.peer_relay, "");
+        assert_eq!(pc.peer_relay, "100.64.0.40:40000:vni:17");
+        assert!(pc.tags.is_empty());
+        assert_eq!(pc.direct(), Some(false));
+        assert_eq!(pc.relay, "tok", "Relay is the home DERP, not the path");
+
+        // And: status from an older Tailscale, with neither field, still parses.
+        let old = parse_status(SAMPLE).unwrap();
+        assert!(old.peer["nodekey:b"].peer_relay.is_empty());
+        assert!(old.peer["nodekey:b"].tags.is_empty());
+        assert_eq!(old.peer["nodekey:b"].direct(), Some(true));
+    }
+
+    #[test]
+    fn tagged_relays_stay_out_of_the_pc_list() {
+        let st = parse_status(
+            r#"{"BackendState":"Running","Peer":{
+              "nodekey:relay": {"ID":"nRELAY","HostName":"sj-instance","OS":"linux","Online":true,
+                                "TailscaleIPs":["100.64.0.40"],"Tags":["tag:relay"]},
+              "nodekey:winrelay": {"ID":"nWINREL","HostName":"relay-pc","OS":"windows","Online":true,
+                                   "TailscaleIPs":["100.64.0.42"],"Tags":["tag:relay"]},
+              "nodekey:pc": {"ID":"nPC","HostName":"Gaming-PC","OS":"windows","Online":true,
+                             "TailscaleIPs":["100.64.0.41"]},
+              "nodekey:other": {"ID":"nOTHER","HostName":"tagged-pc","OS":"windows","Online":true,
+                                "TailscaleIPs":["100.64.0.43"],"Tags":["tag:other"]}
+            }}"#,
+        )
+        .unwrap();
+
+        let pcs = st.windows_peers();
+        assert_eq!(
+            pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
+            ["Gaming-PC", "tagged-pc"],
+            "a Windows node carrying tag:relay is excluded, but any other tag stays"
+        );
+
+        let relays = st.relay_peers();
+        assert_eq!(
+            relays
+                .iter()
+                .map(|n| n.host_name.as_str())
+                .collect::<Vec<_>>(),
+            ["relay-pc", "sj-instance"],
+            "relay discovery sees every tag:relay node, any OS, sorted"
+        );
+        assert_eq!(relays[0].os, "windows");
+        assert_eq!(relays[1].os, "linux");
+    }
+
+    #[test]
+    fn peer_relay_servers_is_parsed_and_garbage_is_not() {
+        assert_eq!(
+            parse_peer_relay_servers("[]"),
+            Some(vec![]),
+            "a successful empty list is known-empty"
+        );
+        assert_eq!(
+            parse_peer_relay_servers(r#"["100.64.0.40","100.64.0.42"]"#),
+            Some(vec!["100.64.0.40".into(), "100.64.0.42".into()])
+        );
+        assert_eq!(parse_peer_relay_servers("not json"), None);
+        assert_eq!(parse_peer_relay_servers(r#"{"addr":"100.64.0.40"}"#), None);
+        assert_eq!(parse_peer_relay_servers(""), None);
+    }
+
+    #[test]
+    fn run_limited_kills_a_hung_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let err = run_limited(&mut cmd, Duration::from_millis(100)).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
     }
 
     #[test]

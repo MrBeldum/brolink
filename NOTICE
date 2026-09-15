@@ -17,9 +17,10 @@ Compiled into the client (crates/stream):
 
 Shipped inside brolink-windows-x64.zip and installed by setup:
 
-  Sunshine, GPL-3.0, LizardByte. The unmodified Windows installer; the
-    version is pinned in .github/workflows/release.yml and its source is at
-    https://github.com/LizardByte/Sunshine
+  Sunshine, GPL-3.0, LizardByte. The unmodified Windows lite archive
+    (Sunshine-Windows-AMD64-lite.zip); the version is pinned in
+    crates/host/src/setup.rs and .github/workflows/release.yml and its
+    source is at https://github.com/LizardByte/Sunshine
 
 Used when present, never redistributed:
 

@@ -1,6 +1,6 @@
 //! Windows only: give the exe an icon and a version block. Explorer, the
 //! taskbar and Defender's heuristics all read them; a bare Rust binary has
-//! neither. The icon is the same procedural mark the windows draw.
+//! neither. The icon is the same logo the windows draw.
 
 #[cfg(windows)]
 #[path = "../core/src/icon.rs"]
@@ -10,6 +10,7 @@ mod icon;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../core/src/icon.rs");
+    println!("cargo:rerun-if-changed=../core/assets/logo-1024.png");
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("brolink.ico");
