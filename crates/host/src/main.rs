@@ -7,16 +7,24 @@
 //!
 //! `--replaces <pid>` is how an update hands over: the new executable waits
 //! for the old service to release the port (see [`update`]).
+//!
+//! `--brand-engine <dir>` is run by the elevated setup script: it gives the
+//! streaming engine's executables BroLink's name and icon (see [`brand`]).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod brand;
 mod clipboard;
 mod config;
+mod display;
+mod migrate;
 mod power;
 mod service;
 mod setup;
 mod streamer;
 mod update;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod verinfo;
 mod wake;
 
 use anyhow::Result;
@@ -40,6 +48,11 @@ struct Args {
     /// Started by an update: wait for this process to give up the port.
     #[arg(long, requires = "background")]
     replaces: Option<u32>,
+    /// Give the streaming engine in DIR BroLink's name and icon. Run by
+    /// setup, elevated, with the engine stopped; exits non-zero with the
+    /// reason on stderr.
+    #[arg(long, value_name = "DIR", conflicts_with = "background")]
+    brand_engine: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -51,6 +64,12 @@ fn main() -> Result<()> {
     });
     if args.background {
         return service::Service::new().run_arc(args.replaces.is_some());
+    }
+    if let Some(dir) = &args.brand_engine {
+        return brand::brand(dir).map_err(|e| {
+            tracing::error!("brand engine at {}: {e:#}", dir.display());
+            e
+        });
     }
     ensure_service_running();
     let native = eframe::NativeOptions {

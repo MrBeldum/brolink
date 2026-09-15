@@ -60,6 +60,10 @@ fn with_suffix(exe: &Path, suffix: &str) -> PathBuf {
     exe.with_file_name(name)
 }
 
+pub fn refuse_self_update(engine_running: bool, session_active: bool) -> bool {
+    engine_running && session_active
+}
+
 /// Check the upload and stage it beside `exe`. Returns the version it
 /// carries.
 pub fn stage(req: &Request, exe: &Path) -> Result<Version, Rejected> {
@@ -265,6 +269,14 @@ mod tests {
         b[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(!is_host_executable(&b));
         assert!(!is_host_executable(b"MZ"));
+    }
+
+    #[test]
+    fn an_active_session_blocks_self_update() {
+        assert!(refuse_self_update(true, true));
+        assert!(!refuse_self_update(true, false));
+        assert!(!refuse_self_update(false, true));
+        assert!(!refuse_self_update(false, false));
     }
 
     #[test]

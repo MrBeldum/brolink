@@ -37,6 +37,56 @@ pub struct App {
     pub title: String,
 }
 
+/// Host cert is not the pinned DER. Display includes "certificate changed"
+/// so the existing session.rs re-pair path still matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinMismatch;
+
+impl std::fmt::Display for PinMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the PC's certificate changed; pair again")
+    }
+}
+
+impl std::error::Error for PinMismatch {}
+
+/// True when `err` is or wraps [`PinMismatch`], including inside rustls `Other`.
+pub fn is_pin_mismatch(err: &anyhow::Error) -> bool {
+    err.chain().any(cause_is_pin_mismatch)
+}
+
+fn cause_is_pin_mismatch(err: &(dyn std::error::Error + 'static)) -> bool {
+    if err.downcast_ref::<PinMismatch>().is_some() {
+        return true;
+    }
+    // rustls::Stream hands its error over as io::Error::new(InvalidData, e),
+    // and io::Error::source() skips that inner value (it reports the inner
+    // error's own source), so the chain walk never sees the rustls error.
+    if let Some(inner) = err
+        .downcast_ref::<std::io::Error>()
+        .and_then(|io| io.get_ref())
+    {
+        return cause_is_pin_mismatch(inner);
+    }
+    let Some(tls) = err.downcast_ref::<rustls::Error>() else {
+        return false;
+    };
+    let other = match tls {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::Other(o))
+        | rustls::Error::Other(o) => o,
+        _ => return false,
+    };
+    other.0.as_ref().downcast_ref::<PinMismatch>().is_some()
+}
+
+fn map_tls(err: anyhow::Error) -> anyhow::Error {
+    if is_pin_mismatch(&err) {
+        anyhow!(PinMismatch)
+    } else {
+        err
+    }
+}
+
 pub struct Client<'a> {
     identity: &'a Identity,
     ip: IpAddr,
@@ -121,7 +171,7 @@ impl<'a> Client<'a> {
         let name = rustls::pki_types::ServerName::from(self.ip);
         let mut conn = rustls::ClientConnection::new(tls, name)?;
         let mut s = rustls::Stream::new(&mut conn, &mut tcp);
-        let r = http::exchange(&mut s, "GET", target, &self.ip.to_string(), "")?;
+        let r = http::exchange(&mut s, "GET", target, &self.ip.to_string(), "").map_err(map_tls)?;
         check(&r.body)?;
         Ok(r.body)
     }
@@ -391,9 +441,7 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
         if end_entity.as_ref() == self.der.as_slice() {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General(
-                "the PC's certificate changed; pair again".into(),
-            ))
+            Err(rustls::CertificateError::Other(rustls::OtherError(Arc::new(PinMismatch))).into())
         }
     }
 
@@ -545,6 +593,53 @@ mod tests {
         assert_eq!(apps[0].title, "Desktop");
         assert_eq!(apps[0].id, 881448767);
         assert_eq!(apps[1].id, 1234);
+    }
+
+    #[test]
+    fn pinned_verifier_rejects_a_different_der_as_pin_mismatch() {
+        use rustls::client::danger::ServerCertVerifier;
+        let algs = rustls::crypto::ring::default_provider().signature_verification_algorithms;
+        let pinned = Pinned {
+            der: vec![0x30, 0x82, 0x01],
+            algs,
+        };
+        let name = rustls::pki_types::ServerName::from(IpAddr::from([127, 0, 0, 1]));
+        let now = rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1));
+        let presented = rustls::pki_types::CertificateDer::from(vec![0x30, 0x82, 0x99]);
+        let err = pinned
+            .verify_server_cert(&presented, &[], &name, &[], now)
+            .unwrap_err();
+        assert!(
+            !matches!(err, rustls::Error::General(_)),
+            "pin mismatch must not be a generic rustls error: {err:?}"
+        );
+        let wrapped = anyhow::Error::from(err);
+        assert!(is_pin_mismatch(&wrapped), "{wrapped:#}");
+        let via_stream = anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            pinned
+                .verify_server_cert(&presented, &[], &name, &[], now)
+                .unwrap_err(),
+        ));
+        assert!(
+            is_pin_mismatch(&via_stream),
+            "the io::Error rustls::Stream produces must still classify: {via_stream:#}"
+        );
+        assert!(super::map_tls(via_stream)
+            .downcast_ref::<PinMismatch>()
+            .is_some());
+        let surfaced = super::map_tls(wrapped);
+        assert!(
+            surfaced.to_string().contains("certificate changed"),
+            "{surfaced}"
+        );
+        assert!(surfaced.downcast_ref::<PinMismatch>().is_some());
+        let same = rustls::pki_types::CertificateDer::from(vec![0x30, 0x82, 0x01]);
+        assert!(pinned
+            .verify_server_cert(&same, &[], &name, &[], now)
+            .is_ok());
+        let generic = anyhow::Error::from(rustls::Error::General("handshake failed".into()));
+        assert!(!is_pin_mismatch(&generic), "{generic:#}");
     }
 
     #[test]

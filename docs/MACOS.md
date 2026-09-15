@@ -1,10 +1,9 @@
 # macOS client (Apple Silicon)
 
 BroLink for the Mac is one native app: your PCs, a Connect button each, a
-power menu, and the stream itself. The GameStream client library from
-Moonlight is compiled in, video is decoded by VideoToolbox (H.264 and
-HEVC), audio by Opus, and the picture is drawn in BroLink's own window
-under a toolbar.
+power menu, and the stream itself. BroLink's stream protocol is compiled
+in, video is decoded by VideoToolbox (H.264 and HEVC), audio by Opus, and
+the picture is drawn in BroLink's own window under a toolbar.
 
 ## Requirements
 
@@ -71,9 +70,9 @@ xcrun stapler staple dist/BroLink.app
    side.
 3. Click **Connect**. The first time with a PC, BroLink pairs with it: it
    picks a random PIN, sends it to BroLink Host over Tailscale, and the host
-   enters it in Sunshine. You see the PIN but never need it. If there is no
-   BroLink Host on the PC, the PIN stays on screen for someone at the PC to
-   type into Sunshine's web page.
+   enters it for you. You see the PIN but never need it. If there is no
+   BroLink Host on the PC, pairing cannot finish: open BroLink Host there
+   and run setup first.
 4. The PC's desktop appears.
 
 ## While streaming
@@ -148,12 +147,12 @@ details BroLink has learned; it sends the packet without connecting.
 | Bitrate | 2 to 150 Mbps |
 | Codec | Auto (HEVC when the PC can encode it), H.264 |
 | Full screen | How a session starts |
-| App | The Sunshine app to launch; "Desktop" is the whole PC. The list fills in after the first connection |
+| App | The app on the PC to launch; "Desktop" is the whole PC. The list fills in after the first connection |
 | Command key acts as Ctrl | Off makes ⌘ the Windows key |
 | Offer to sleep the PC after each session | Off by default. Asleep, Tailscale is off; this Mac can only wake the PC from that PC's own network |
 
 Settings are saved in `~/Library/Application Support/BroLink/client.toml`,
-along with the MAC, LAN address and Sunshine certificate of each PC BroLink
+along with the MAC, LAN address and pairing certificate of each PC BroLink
 has paired with.
 
 ## Waking a PC from another network
@@ -177,6 +176,35 @@ a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
   the first time the Mac serves a BroLink Host install through the stream.
 - Nothing else. BroLink captures no screen and reads the keyboard and
   mouse only in its own window.
+
+## Connected, but the picture is black
+
+A connection can carry valid video that contains only black pixels.
+BroLink now detects this after five seconds and shows a persistent message
+instead of presenting the stream as healthy. **Restart stream** reconnects
+and, for Desktop, resets the PC's capture session. If no video arrives or
+decoding fails, the message distinguishes those problems too.
+
+The notice then asks the PC what it can see and says which cause it is.
+
+On a PC with no monitor attached, it is usually the colour mode. Windows
+carries on composing the desktop in HDR or wide colour, as the monitor
+that is now gone once asked for, on a placeholder display that reports no
+luminance at all. Anything converting that desktop to an ordinary picture
+turns every frame black, even though the PC's own desktop draws perfectly
+normally — which is why the stream looks broken and the PC does not.
+
+Where that mode is one the display supports, the notice offers **Turn off
+HDR on the PC**, which does exactly that over the control API and starts a
+fresh capture. Where Windows is enforcing it on a placeholder display it
+refuses every switch away from it: the mode is a consequence of having no
+display rather than a setting, and only giving the PC a display clears it.
+Attach a monitor, plug in an HDMI/DisplayPort dummy plug, or install a
+virtual display driver on the PC, and select that display for streaming.
+
+The notice names the other causes too — a desktop that is genuinely black
+because the display is asleep, a lock screen the PC cannot capture, or a
+capture failing while the desktop plainly has a picture.
 
 ## Updates
 
@@ -221,4 +249,3 @@ it says what happened last. A copy that is not running from an app bundle
   the certificate from pairing. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.
-

@@ -12,8 +12,8 @@ use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use brolink_core::api::{
-    Ack, Clipboard, NatReport, PinRequest, PowerRequest, Status, Streamer, CLIPBOARD_PATH,
-    UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerRequest, Status, Streamer,
+    CLIPBOARD_PATH, UPDATE_PATH,
 };
 use brolink_core::http::{self, Request, Response};
 use brolink_core::{tailscale, CONTROL_PORT};
@@ -73,6 +73,16 @@ impl Service {
             log.pop_front();
         }
         log.push_back(msg);
+    }
+
+    fn session_active(&self) -> bool {
+        let cfg = self.cfg.lock().clone();
+        cfg.has_creds()
+            && Api {
+                user: &cfg.sunshine_user,
+                pass: &cfg.sunshine_pass,
+            }
+            .session_active()
     }
 
     /// Bind, then serve forever. Fails only when the port is taken, which
@@ -227,7 +237,7 @@ impl Service {
             let mut cur = self.streamer.lock();
             if (cur.installed, cur.running, cur.api_ok) != (st.installed, st.running, st.api_ok) {
                 self.log(match (&st.installed, &st.running, &st.api_ok) {
-                    (false, _, _) => "Sunshine is not installed".to_string(),
+                    (false, _, _) => "the streaming engine is not installed".to_string(),
                     (true, false, _) => format!("{} is installed but not running", st.kind),
                     (true, true, false) => {
                         format!("{} is running; BroLink cannot log in to it yet", st.kind)
@@ -321,7 +331,7 @@ impl Service {
             setup.push(format!("Tailscale: {e}. Install it and sign in."));
         }
         if !streamer.installed {
-            setup.push("Sunshine is not installed.".into());
+            setup.push("The streaming engine is not installed.".into());
         } else if !streamer.running {
             setup.push(format!("{} is installed but not running.", streamer.kind));
         } else if !streamer.api_ok {
@@ -329,6 +339,13 @@ impl Service {
                 "BroLink has no working login for {}.",
                 streamer.kind
             ));
+        } else if streamer.kind == "BroLink"
+            && !crate::brand::is_branded_cached(std::path::Path::new(crate::streamer::ENGINE_DIR))
+        {
+            setup.push(
+                "The streaming engine still shows its upstream name and icon in Task Manager."
+                    .into(),
+            );
         }
         if wake.magic_packet == Some(false) {
             setup.push(format!("Wake-on-LAN is off on {}.", wake.adapter));
@@ -464,6 +481,8 @@ impl Service {
         let local = peer.ip().is_loopback();
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
+            ("GET", "/v1/display") => Response::json(200, &self.display()),
+            ("POST", "/v1/display") => self.set_display(req),
             ("POST", "/v1/pin") => self.pin(req),
             ("POST", "/v1/power") => self.power(req),
             ("POST", p) if p == UPDATE_PATH => self.update(req),
@@ -495,6 +514,14 @@ impl Service {
     fn update(&self, req: &Request) -> Response {
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
+        }
+        if update::refuse_self_update(self.streamer.lock().running, self.session_active()) {
+            self.update_running.store(false, Ordering::Release);
+            self.log("update deferred: a stream is running");
+            return Response::json(
+                409,
+                &Ack::err("a stream is running; the update is retried after it ends"),
+            );
         }
         let exe = match std::env::current_exe() {
             Ok(e) => e,
@@ -543,7 +570,9 @@ impl Service {
         if !cfg.has_creds() || !self.streamer.lock().api_ok {
             return Response::json(
                 502,
-                &Ack::err("BroLink cannot log in to Sunshine on this PC; run setup there"),
+                &Ack::err(
+                    "BroLink cannot log in to the streaming engine on this PC; run setup there",
+                ),
             );
         }
         let api = Api {
@@ -559,6 +588,45 @@ impl Service {
                 self.log(format!("PIN from \"{}\" refused: {e:#}", p.name));
                 Response::json(502, &Ack::err(e.to_string()))
             }
+        }
+    }
+
+    /// Everything that decides whether a capture can see the desktop.
+    fn display(&self) -> serde_json::Value {
+        let cfg = self.cfg.lock().clone();
+        let windows =
+            crate::display::probe().unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+        let color = crate::display::advanced_color()
+            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+        let sunshine = Api {
+            user: &cfg.sunshine_user,
+            pass: &cfg.sunshine_pass,
+        }
+        .display_diagnostics();
+        serde_json::json!({
+            "windows": windows,
+            "advanced_color": color,
+            "sunshine": sunshine,
+        })
+    }
+
+    /// Turn the PC's HDR desktop off (or back on). This is the one display
+    /// setting the Mac can change: an HDR desktop on a PC with no monitor
+    /// captures as black, and nobody can reach the PC's settings to fix it
+    /// when the picture is the thing that is broken.
+    fn set_display(&self, req: &Request) -> Response {
+        let Ok(want) = req.json::<DisplayRequest>() else {
+            return Response::json(400, &Ack::err("expected {\"advanced_color\": true|false}"));
+        };
+        match crate::display::set_advanced_color(want.advanced_color) {
+            Ok(state) => {
+                self.log(format!(
+                    "the Mac turned the HDR desktop {}",
+                    if want.advanced_color { "on" } else { "off" }
+                ));
+                Response::json(200, &state)
+            }
+            Err(e) => Response::json(500, &Ack::err(format!("advanced colour: {e:#}"))),
         }
     }
 

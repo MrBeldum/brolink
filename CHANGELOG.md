@@ -4,6 +4,78 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## 3.2.0 (unreleased)
+
+- A private Tailscale peer relay you run yourself. `deploy/relay/` is a
+  Docker kit for a VPS (UDP 40000, iptables above the cloud REJECT, state
+  volume, wait-for-Running before `tailscale set`). Tailscale's own DERP
+  stays the fallback; BroLink adds no relay protocol of its own. Settings
+  shows a Relay card with the exact state: no relay on this network, a
+  relay that this device is not granted, or ready. Needs Tailscale 1.86 or
+  later on every device.
+- Streams tell a peer relay apart from DERP. Auto quality on a peer relay
+  goes up to 1440p60 at 40 Mbps by round trip; the DERP and direct tiers are
+  unchanged. Tagged relay nodes never appear in the PC list.
+- The Windows streaming engine now unpacks from the pinned lite archive to
+  `C:\Program Files\BroLink\engine` as the "BroLink Streaming" service:
+  no Apps & Features entry, Start Menu shortcut, tray icon or web-UI link.
+  Firewall rules are named "BroLink". An engine installed earlier by an
+  MSI is migrated in order — copy state, verify, start, prove it listens,
+  then uninstall the MSI — and keeps its pairing and web login; a
+  `config.bak` is left beside it and the old install folder is removed
+  once the MSI is gone. The engine's processes appear as "BroLink
+  Streaming" with BroLink's icon in Task Manager, the volume mixer and
+  firewall prompts: setup rewrites their version block and icon in place
+  and keeps their copyright and licence strings. The host offers
+  **Update this PC** after
+  an exe-only update and refuses a self-update while a stream is running.
+- A PC whose engine certificate changed asks to pair again instead of a
+  generic TLS error, and the old pin is forgotten.
+- No user-visible mention of upstream project names or ports; **Open
+  source** in Settings shows the notices.
+- Nothing overlaps at the smallest window (640×420 on the Mac, 560×600 on
+  the PC): the stream toolbar folds into a More menu, overlays shrink to the
+  window, and CPU-only layout tests enforce it.
+- New logo and palette (violet, pink and cyan on near-black) across the
+  Dock, Finder, Windows and in-window icons.
+- A connected stream that remains black now says so and asks the PC why,
+  instead of presenting a healthy-looking stream. Missing video, frozen
+  video, and decoder failures have separate persistent notices.
+- The notice offers **Restart stream**, which starts a fresh Desktop capture
+  instead of resuming the same broken capture. Failure to stop Sunshine's
+  previous session is reported instead of silently resuming the wrong app.
+- Frame rate and bitrate no longer remain frozen at their last good values
+  when video stops. Stream overlays no longer pass clicks through to the PC.
+- The stream's audio line says when the output device is taking no sound,
+  instead of naming a device that is silent.
+- VideoToolbox callback errors now request a recovery frame and recreate
+  failed decoder sessions, just like synchronous decode errors.
+- The PC's display report now answers why a capture is black: whether any
+  monitor hardware is present, whether the session is locked, how bright the
+  PC's own desktop is (as sampled numbers, never an image), which colour
+  mode Windows is composing in, and Sunshine's capture settings and log
+  tail. Each part reports its own failure rather than losing the whole
+  report.
+- A PC whose monitor is gone keeps composing in the colour mode that
+  monitor asked for — half-float, ten bits a channel — on a placeholder
+  display that reports no luminance at all. A capture converting that to an
+  ordinary picture turns every frame black while the PC's own desktop draws
+  normally. The stream's notice now says so, in place of blaming a missing
+  display for a desktop that is plainly there.
+- Where that mode is one the display supports, the notice offers to turn it
+  off and the Mac does so over the control API, then starts a fresh
+  capture. Windows 11 splits that switch into HDR and wide colour, so each
+  is tried in turn and the display is read back afterwards rather than the
+  return code believed.
+- Where Windows is enforcing the mode on a placeholder display it refuses
+  every switch with ERROR_NOT_SUPPORTED — the mode is a consequence of
+  having no display, not a setting. The notice says that plainly and asks
+  for a monitor, a dummy plug or a virtual display driver instead of
+  offering a button that cannot work.
+- The live video test now checks for a visible picture, with a separate
+  mode that verifies the black-picture notice and restart action. Synthetic
+  video tests cover the Mac decoder and GPU renderer.
+
 ## 3.1.1 (2026-09-09)
 
 A hardening release: both apps parse the network more strictly, update
