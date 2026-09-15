@@ -3,6 +3,8 @@
 //! display whose shape matches the stream, the toolbar slides in from the
 //! top edge instead. Short notices (clipboard, connection, an install in
 //! progress) appear under the toolbar and fade.
+//!
+//! allow: SIZE_OK — one stream view; later UI tasks own any split.
 
 use crate::clipboard;
 use crate::config::{ClientConfig, Preset, Quality};
@@ -20,8 +22,20 @@ use semver::Version;
 use std::time::{Duration, Instant};
 
 const BAR: f32 = 40.0;
+/// Below this width the right-hand controls collapse into a real egui More
+/// menu so they cannot overlap Disconnect or the PC name.
+const OVERFLOW_BELOW: f32 = 1200.0;
 const STATUS: f32 = 24.0;
 const TOAST_FOR: Duration = Duration::from_secs(5);
+/// Each side of an overlay frame (its inner margin) and the picture it
+/// leaves visible beyond that.
+const OVERLAY_PAD: f32 = 12.0;
+
+/// Content width of an overlay: `max`, or what the screen leaves once the
+/// frame's sides and a margin either side are taken off.
+fn overlay_width(max: f32, screen_w: f32) -> f32 {
+    max.min(screen_w - 4.0 * OVERLAY_PAD).max(0.0)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -75,6 +89,9 @@ pub struct View {
     motion: (f32, f32),
     last_pointer: Instant,
     bar_until: Instant,
+    /// Last measured toolbar height; auto-hide and the letterbox use this
+    /// instead of a stale [`BAR`].
+    bar_h: f32,
     confirm: Option<PowerAction>,
     confirm_install: bool,
     poor: bool,
@@ -99,6 +116,7 @@ impl Default for View {
             motion: (0.0, 0.0),
             last_pointer: Instant::now(),
             bar_until: Instant::now() + Duration::from_secs(3),
+            bar_h: BAR,
             confirm: None,
             confirm_install: false,
             poor: false,
@@ -183,7 +201,10 @@ impl View {
         let area = if env.fullscreen {
             screen
         } else {
-            Rect::from_min_max(Pos2::new(screen.left(), screen.top() + BAR), screen.max)
+            Rect::from_min_max(
+                Pos2::new(screen.left(), screen.top() + self.bar_h),
+                screen.max,
+            )
         };
         let video = fit(area, vw / vh);
         let top_gap = video.top() - screen.top();
@@ -196,22 +217,23 @@ impl View {
         }
         // In full screen without a spare bar, the toolbar shows when the
         // pointer touches the top edge and stays a moment after it leaves.
-        let bar_rect = if !env.fullscreen || top_gap >= BAR - 6.0 {
+        let docked = !env.fullscreen || top_gap >= self.bar_h - 6.0;
+        let mut bar_rect = if docked {
             Some(Rect::from_min_size(
                 screen.min,
-                Vec2::new(screen.width(), BAR.min(top_gap.max(BAR))),
+                Vec2::new(screen.width(), self.bar_h),
             ))
         } else {
             let at_edge = pointer.is_some_and(|p| p.y <= 4.0) && !self.captured;
             if at_edge {
                 self.bar_until = now + Duration::from_millis(2500);
             }
-            let hovering = pointer.is_some_and(|p| p.y <= BAR + 4.0) && !self.captured;
+            let hovering = pointer.is_some_and(|p| p.y <= self.bar_h + 4.0) && !self.captured;
             let popup = ctx.memory(|m| m.any_popup_open());
             (self.bar_until > now || hovering || popup || self.confirm.is_some())
-                .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), BAR)))
+                .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)))
         };
-        let floating = env.fullscreen && top_gap < BAR - 6.0;
+        let floating = env.fullscreen && !docked;
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -257,7 +279,12 @@ impl View {
             });
 
         if let Some(rect) = bar_rect {
-            self.toolbar(ctx, rect, floating, env, &mut actions);
+            let measured = self.toolbar(ctx, rect, floating, env, &mut actions);
+            self.bar_h = measured.height().max(BAR);
+            bar_rect = Some(Rect::from_min_size(
+                screen.min,
+                Vec2::new(screen.width(), self.bar_h),
+            ));
         }
         self.toasts(
             ctx,
@@ -279,9 +306,10 @@ impl View {
         floating: bool,
         env: &Env<'_>,
         actions: &mut Vec<Action>,
-    ) {
+    ) -> Rect {
         let live = env.live;
         let cfg = env.cfg;
+        let overflow = rect.width() < OVERFLOW_BELOW;
         let frame = if floating {
             ui::overlay_frame()
                 .corner_radius(0)
@@ -292,15 +320,16 @@ impl View {
                 .inner_margin(Margin::symmetric(12, 0))
         };
         let path = env.path.clone().unwrap_or_else(|| live.path.clone());
-        egui::Area::new(Id::new("stream-toolbar"))
+        let bar = egui::Area::new(Id::new("stream-toolbar"))
             .fixed_pos(rect.min)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
-                ui.set_min_size(rect.size());
-                ui.set_max_size(rect.size());
+                ui.set_min_width(rect.width());
+                ui.set_max_width(rect.width());
+                ui.set_min_height(BAR);
                 frame.show(ui, |ui| {
-                    ui.set_min_height(rect.height());
+                    ui.set_min_height(BAR);
                     ui.horizontal_centered(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         let s = live.session.stats();
@@ -317,65 +346,59 @@ impl View {
                                 .font(brolink_ui::theme::medium(13.5))
                                 .color(P.text),
                         );
-                        let (w, h) = if s.width > 0 {
-                            (s.width, s.height)
-                        } else {
-                            (live.requested.0, live.requested.1)
-                        };
-                        ui::caption(
-                            ui,
-                            format!("{w}×{h} · {} fps · {}", live.requested.2, live.codec),
-                        );
-                        ui.add_space(2.0);
-                        let pill = ui::status_pill(ui, &path.label(), path.tone());
-                        if path.relayed() {
-                            pill.on_hover_text(
-                                "Packets go through a Tailscale relay, not straight to the PC. The lobby explains why and what would fix it.",
+                        if !overflow {
+                            let (w, h) = if s.width > 0 {
+                                (s.width, s.height)
+                            } else {
+                                (live.requested.0, live.requested.1)
+                            };
+                            ui::caption(
+                                ui,
+                                format!("{w}×{h} · {} fps · {}", live.requested.2, live.codec),
                             );
-                        } else if path.direct == Some(true) {
-                            pill.on_hover_text("Packets go straight to the PC.");
-                        }
-                        if self.captured {
-                            ui::caption(ui, "Ctrl+Alt frees the mouse");
+                            ui.add_space(2.0);
+                            let pill = ui::status_pill(ui, &path.label(), path.tone());
+                            if path.relayed() {
+                                pill.on_hover_text(
+                                    "Packets go through a Tailscale relay, not straight to the PC. The lobby explains why and what would fix it.",
+                                );
+                            } else if path.direct == Some(true) {
+                                pill.on_hover_text("Packets go straight to the PC.");
+                            }
+                            if self.captured {
+                                ui::caption(ui, "Ctrl+Alt frees the mouse");
+                            }
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui::danger_button(ui, "Disconnect").clicked() {
                                 actions.push(Action::Disconnect);
                             }
-                            self.pc_menu(ui, env, actions);
-                            if ui::ghost_button(
-                                ui,
-                                if env.fullscreen {
-                                    "Exit full screen"
-                                } else {
-                                    "Full screen"
-                                },
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::Fullscreen(!env.fullscreen));
+                            if overflow {
+                                self.more_menu(ui, ctx, env, actions);
+                            } else {
+                                self.pc_menu(ui, env, actions);
+                                self.fullscreen_button(ui, env, actions);
+                                self.stats_button(ui);
+                                self.keys_menu(ui, live, cfg, actions);
+                                self.quality_menu(ui, live, cfg, actions);
+                                self.mouse_menu(ui, ctx, live);
                             }
-                            if ui::ghost_button(ui, if self.stats { "Hide stats" } else { "Stats" })
-                                .on_hover_text("Frame rate, bitrate, round trip, loss and decode time in the status line")
-                                .clicked()
-                            {
-                                self.stats = !self.stats;
-                            }
-                            self.keys_menu(ui, live, cfg, actions);
-                            self.quality_menu(ui, live, cfg, actions);
-                            self.mouse_menu(ui, ctx, live);
                         });
                     });
                 });
             });
 
         if let Some(action) = self.confirm {
+            let w = overlay_width(440.0, rect.width());
             egui::Area::new(Id::new("stream-confirm"))
-                .fixed_pos(Pos2::new(rect.center().x - 220.0, rect.bottom() + 8.0))
+                .fixed_pos(Pos2::new(
+                    rect.center().x - w / 2.0 - OVERLAY_PAD,
+                    rect.bottom() + 8.0,
+                ))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     ui::overlay_frame().show(ui, |ui| {
-                        ui.set_width(440.0);
+                        ui.set_width(w);
                         ui.label(
                             RichText::new(format!(
                             "{} {}? Programs are closed without asking; anything unsaved is lost.",
@@ -402,12 +425,16 @@ impl View {
                 .clone()
                 .map(|(r, l)| (r.to_string(), l.map(|v| v.to_string())))
                 .unwrap_or_default();
+            let w = overlay_width(500.0, rect.width());
             egui::Area::new(Id::new("stream-install"))
-                .fixed_pos(Pos2::new(rect.center().x - 250.0, rect.bottom() + 8.0))
+                .fixed_pos(Pos2::new(
+                    rect.center().x - w / 2.0 - OVERLAY_PAD,
+                    rect.bottom() + 8.0,
+                ))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     ui::overlay_frame().show(ui, |ui| {
-                        ui.set_width(500.0);
+                        ui.set_width(w);
                         ui.label(
                             RichText::new(format!("Install BroLink Host {} on {}", latest.as_deref().unwrap_or("(latest)"), live.pc))
                                 .font(brolink_ui::theme::medium(14.0))
@@ -431,6 +458,78 @@ impl View {
                         });
                     });
                 });
+        }
+        bar.response.rect
+    }
+
+    fn more_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        env: &Env<'_>,
+        actions: &mut Vec<Action>,
+    ) {
+        let live = env.live;
+        let cfg = env.cfg;
+        let response = ui::ghost_button(ui, "More");
+        let popup_id = Id::new("stream-more");
+        if response.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &response,
+            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_min_width(180.0);
+                self.mouse_menu(ui, ctx, live);
+                self.quality_menu(ui, live, cfg, actions);
+                self.keys_menu(ui, live, cfg, actions);
+                if ui
+                    .button(if self.stats { "Hide stats" } else { "Stats" })
+                    .clicked()
+                {
+                    self.stats = !self.stats;
+                    ui.memory_mut(|m| m.close_popup());
+                }
+                let fs = if env.fullscreen {
+                    "Exit full screen"
+                } else {
+                    "Full screen"
+                };
+                if ui.button(fs).clicked() {
+                    actions.push(Action::Fullscreen(!env.fullscreen));
+                    ui.memory_mut(|m| m.close_popup());
+                }
+                self.pc_menu(ui, env, actions);
+            },
+        );
+    }
+
+    fn fullscreen_button(&self, ui: &mut egui::Ui, env: &Env<'_>, actions: &mut Vec<Action>) {
+        if ui::ghost_button(
+            ui,
+            if env.fullscreen {
+                "Exit full screen"
+            } else {
+                "Full screen"
+            },
+        )
+        .clicked()
+        {
+            actions.push(Action::Fullscreen(!env.fullscreen));
+        }
+    }
+
+    fn stats_button(&mut self, ui: &mut egui::Ui) {
+        if ui::ghost_button(ui, if self.stats { "Hide stats" } else { "Stats" })
+            .on_hover_text(
+                "Frame rate, bitrate, round trip, loss and decode time in the status line",
+            )
+            .clicked()
+        {
+            self.stats = !self.stats;
         }
     }
 
@@ -628,15 +727,16 @@ impl View {
         }
         ctx.request_repaint_after(Duration::from_millis(500));
         let top = bar.map(|b| b.bottom()).unwrap_or(screen.top()) + 10.0;
+        let w = overlay_width(496.0, screen.width());
         egui::Area::new(Id::new("stream-toasts"))
-            .fixed_pos(Pos2::new(screen.center().x - 260.0, top))
+            .fixed_pos(Pos2::new(screen.center().x - w / 2.0 - OVERLAY_PAD, top))
             .order(egui::Order::Foreground)
             .interactable(video_problem.is_some())
             .show(ctx, |ui| {
-                ui.set_width(520.0);
+                ui.set_width(w + 2.0 * OVERLAY_PAD);
                 if let Some(problem) = video_problem {
                     ui::overlay_frame().show(ui, |ui| {
-                        ui.set_width(496.0);
+                        ui.set_width(w);
                         ui.label(RichText::new(problem).color(P.text));
                         // The PC's own answer, once it has given one.
                         if let Some(help) = env.video_help.as_ref() {
@@ -671,7 +771,7 @@ impl View {
                 }
                 for (tone, text) in lines {
                     ui::overlay_frame().show(ui, |ui| {
-                        ui.set_width(496.0);
+                        ui.set_width(w);
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new("●").size(9.0).color(tone.color()));
                             ui.label(RichText::new(text).color(P.text));
@@ -769,11 +869,13 @@ impl View {
             ctx.layer_id_at(p)
                 .is_some_and(|layer| layer.order > egui::Order::Background)
         });
-        let over_video = pointer.is_some_and(|p| video.contains(p))
-            && !over_bar
-            && !popup
-            && !overlay
-            && !over_overlay;
+        let over_video = pointer_on_stream(
+            pointer.is_some_and(|p| video.contains(p)),
+            over_bar,
+            popup,
+            overlay,
+            over_overlay,
+        );
         let keys_to_pc =
             focused && !ctx.wants_keyboard_input() && !popup && !overlay && input.connected();
         let ppp = ctx.pixels_per_point();
@@ -927,6 +1029,19 @@ impl View {
     }
 }
 
+/// Whether a pointer in the picture should be sent to the PC. A real egui
+/// popup (More) sets `popup`; a hand-rolled `Area` at `Order::Background`
+/// would not, and clicks would leak through.
+fn pointer_on_stream(
+    in_video: bool,
+    over_bar: bool,
+    popup: bool,
+    overlay: bool,
+    over_overlay: bool,
+) -> bool {
+    in_video && !over_bar && !popup && !overlay && !over_overlay
+}
+
 /// "Auto · Smooth" → "Auto", "Custom · Sharp" → "Sharp", else "Custom".
 fn short_quality(live: &Live) -> String {
     match (live.settings.quality, live.settings.preset()) {
@@ -962,6 +1077,8 @@ pub fn fit(area: Rect, aspect: f32) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ClientConfig;
+    use crate::session::Live;
 
     #[test]
     fn fit_letterboxes_a_16_9_stream_on_a_16_10_screen() {
@@ -990,5 +1107,313 @@ mod tests {
         assert!(old_host("3.1.0", None).is_none());
         assert!(old_host("soon", None).is_none());
         assert!(old_host("3.0.1", None).is_some());
+    }
+
+    #[test]
+    fn overlay_width_clamps_to_the_screen() {
+        assert_eq!(overlay_width(440.0, 640.0), 440.0);
+        assert_eq!(overlay_width(500.0, 640.0), 500.0);
+        assert_eq!(overlay_width(496.0, 640.0), 496.0);
+        assert_eq!(overlay_width(440.0, 400.0), 400.0 - 4.0 * OVERLAY_PAD);
+        assert!(overlay_width(500.0, 400.0) + 4.0 * OVERLAY_PAD <= 400.0);
+    }
+
+    #[test]
+    fn a_popup_eats_clicks_that_would_otherwise_hit_the_picture() {
+        assert!(pointer_on_stream(true, false, false, false, false));
+        assert!(
+            !pointer_on_stream(true, false, true, false, false),
+            "More open: any_popup_open must block remote mouse"
+        );
+        assert!(!pointer_on_stream(true, true, false, false, false));
+        assert!(!pointer_on_stream(true, false, false, true, false));
+        assert!(!pointer_on_stream(true, false, false, false, true));
+        assert!(
+            pointer_on_stream(true, false, false, false, false),
+            "a Background Area would leave popup=false and leak the click"
+        );
+    }
+
+    struct Fixture {
+        view: View,
+        live: Option<Live>,
+        cfg: ClientConfig,
+        fullscreen: bool,
+        applied: bool,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Some(live) = self.live.take() {
+                live.session.stop();
+            }
+        }
+    }
+
+    fn dummy_live(ctx: &egui::Context) -> Live {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let frames = std::sync::Arc::new(brolink_stream::FrameSlot::default());
+        let path = crate::path::Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            rtt_ms: Some(210),
+            ..Default::default()
+        };
+        let settings = crate::config::StreamSettings::default();
+        let session = brolink_stream::Session::start(
+            brolink_stream::session::Server {
+                address: "10.255.255.1".into(),
+                app_version: "7.1.431.-1".into(),
+                gfe_version: "3.23.0.74".into(),
+                rtsp_url: "rtsp://10.255.255.1:48010".into(),
+                codec_mode_support: 1,
+            },
+            brolink_stream::Settings {
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 4000,
+                hevc: true,
+                remote: true,
+            },
+            [0; 16],
+            [0; 16],
+            frames.clone(),
+            tx,
+            || {},
+        );
+        let ip: std::net::Ipv4Addr = "100.64.0.10".parse().unwrap();
+        let input = session.input();
+        Live {
+            pc: "Gaming-PC".into(),
+            node_id: "n1".into(),
+            ip,
+            session,
+            input,
+            frames,
+            events: rx,
+            started: Instant::now(),
+            codec: "HEVC",
+            requested: (1920, 1080, 30),
+            settings,
+            path,
+            clipboard: crate::clipboard::Sync::spawn(ip, ctx.clone()),
+        }
+    }
+
+    fn paint(ctx: &egui::Context, f: &mut Fixture) {
+        if !f.applied {
+            brolink_ui::apply(ctx);
+            f.applied = true;
+            return;
+        }
+        if f.live.is_none() {
+            f.live = Some(dummy_live(ctx));
+        }
+        let Fixture {
+            view,
+            live,
+            cfg,
+            fullscreen,
+            ..
+        } = f;
+        let env = Env {
+            live: live.as_ref().unwrap(),
+            cfg,
+            fullscreen: *fullscreen,
+            path: None,
+            old_host: None,
+            handover: None,
+            video_help: None,
+        };
+        view.show(ctx, &env);
+    }
+
+    fn harness(size: Vec2) -> egui_kittest::Harness<'static, Fixture> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .with_max_steps(2)
+            .build_state(
+                paint,
+                Fixture {
+                    view: View::default(),
+                    live: None,
+                    cfg: ClientConfig::default(),
+                    fullscreen: false,
+                    applied: false,
+                },
+            )
+    }
+
+    fn bar_control_rects(h: &egui_kittest::Harness<'_, Fixture>) -> Vec<(String, Rect)> {
+        use egui_kittest::kittest::Queryable;
+        let names = [
+            "Disconnect",
+            "More",
+            "PC",
+            "Full screen",
+            "Exit full screen",
+            "Stats",
+            "Hide stats",
+            "Keys",
+            "Quality",
+            "Mouse",
+        ];
+        let mut out = Vec::new();
+        for name in names {
+            for node in h.query_all_by_label_contains(name) {
+                let Some(b) = node.raw_bounds() else { continue };
+                if b.y0 > f64::from(BAR + 8.0) {
+                    continue;
+                }
+                out.push((
+                    name.to_string(),
+                    Rect::from_min_max(
+                        Pos2::new(b.x0 as f32, b.y0 as f32),
+                        Pos2::new(b.x1 as f32, b.y1 as f32),
+                    ),
+                ));
+            }
+        }
+        out
+    }
+
+    fn assert_no_overlap(rects: &[(String, Rect)]) {
+        for (i, (a_name, a)) in rects.iter().enumerate() {
+            for (b_name, b) in rects.iter().skip(i + 1) {
+                let hit = a.intersect(*b);
+                assert!(
+                    hit.width() <= 1.0 || hit.height() <= 1.0,
+                    "{a_name} {} overlaps {b_name} {}",
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn toolbar_at_640_does_not_overlap_and_keeps_disconnect() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness(Vec2::new(640.0, 420.0));
+        h.run_steps(2);
+        assert!(
+            h.query_by_label("Disconnect").is_some(),
+            "Disconnect must stay reachable"
+        );
+        assert!(
+            h.query_by_label_contains("More").is_some(),
+            "narrow width must overflow into More"
+        );
+        assert!(
+            h.query_by_label_contains("Quality").is_none(),
+            "Quality sits in More, not on the bar"
+        );
+        let rects = bar_control_rects(&h);
+        assert_no_overlap(&rects);
+        assert!(
+            h.state().view.bar_h >= BAR,
+            "bar_rect is measured, got {}",
+            h.state().view.bar_h
+        );
+    }
+
+    #[test]
+    fn more_is_a_real_egui_popup_and_consumes_clicks() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness(Vec2::new(640.0, 420.0));
+        h.run_steps(2);
+        assert!(
+            !h.ctx.memory(|m| m.any_popup_open()),
+            "closed More is not a popup"
+        );
+        h.get_by_label("More").simulate_click();
+        h.run_steps(2);
+        assert!(
+            h.ctx.memory(|m| m.any_popup_open()),
+            "More must use egui::popup so any_popup_open is true; a Background Area would fail this"
+        );
+        assert!(
+            h.query_by_label_contains("Quality").is_some()
+                || h.query_by_label_contains("Keys").is_some()
+                || h.query_by_label("Stats").is_some(),
+            "More lists the overflowed controls"
+        );
+        let popup_open = h.ctx.memory(|m| m.any_popup_open());
+        assert!(!pointer_on_stream(true, false, popup_open, false, false));
+        if let Some(stats) = h.query_by_label("Stats") {
+            stats.simulate_click();
+            h.run_steps(2);
+            assert!(
+                h.state().view.stats,
+                "click inside More is consumed by the popup, not forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn toolbar_at_normal_width_keeps_controls_on_the_bar() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness(Vec2::new(1400.0, 860.0));
+        h.run_steps(2);
+        assert!(h.query_by_label("Disconnect").is_some());
+        assert!(h.query_by_label_contains("More").is_none());
+        assert!(h.query_by_label_contains("Quality").is_some());
+        assert!(h.query_by_label_contains("Keys").is_some());
+        assert_no_overlap(&bar_control_rects(&h));
+    }
+
+    fn save_snapshot(img: image::RgbaImage, name: &str) {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-snapshots");
+        std::fs::create_dir_all(&dir).expect("create snapshot dir");
+        let path = dir.join(name);
+        img.save(&path).expect("write png");
+        eprintln!("wrote {}", path.display());
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn stream_toolbar_snapshot_min_width() {
+        let mut h = egui_kittest::Harness::builder()
+            .wgpu()
+            .with_size(Vec2::new(640.0, 420.0))
+            .with_pixels_per_point(1.0)
+            .with_max_steps(2)
+            .build_state(
+                paint,
+                Fixture {
+                    view: View::default(),
+                    live: None,
+                    cfg: ClientConfig::default(),
+                    fullscreen: false,
+                    applied: false,
+                },
+            );
+        h.run_steps(3);
+        save_snapshot(h.render().unwrap(), "client-stream-toolbar-640.png");
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn stream_toolbar_snapshot_normal_width() {
+        let mut h = egui_kittest::Harness::builder()
+            .wgpu()
+            .with_size(Vec2::new(1400.0, 860.0))
+            .with_pixels_per_point(1.0)
+            .with_max_steps(2)
+            .build_state(
+                paint,
+                Fixture {
+                    view: View::default(),
+                    live: None,
+                    cfg: ClientConfig::default(),
+                    fullscreen: false,
+                    applied: false,
+                },
+            );
+        h.run_steps(3);
+        save_snapshot(h.render().unwrap(), "client-stream-toolbar.png");
     }
 }

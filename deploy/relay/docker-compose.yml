@@ -1,0 +1,46 @@
+# BroLink peer relay — a Tailscale node that relays BroLink streams instead of DERP.
+# Read RELAY.md first. Run ./install-relay.sh; do not `docker compose up` by hand
+# unless the UDP port is already open in the host firewall and the cloud security list.
+
+# Pinned so another stack in a directory called "relay" cannot share this state volume.
+name: brolink-relay
+
+services:
+  relay:
+    image: ${TS_IMAGE:-tailscale/tailscale:latest}
+    container_name: brolink-relay
+    restart: unless-stopped
+
+    # Host networking: a peer relay must own a real UDP port on the public interface.
+    # (Also why `hostname:` is absent — Compose rejects it with network_mode: host.
+    # The tailnet node name comes from TS_HOSTNAME instead.)
+    network_mode: host
+
+    # Kernel networking, not userspace: userspace mode is slower and cannot relay well.
+    # TS_USERSPACE=false requires /dev/net/tun plus these two capabilities.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    # Everything tunable (including the secret TS_AUTHKEY) lives in .env, which is
+    # gitignored. environment: below is only the settings that must not be overridden.
+    env_file:
+      - .env
+    environment:
+      TS_USERSPACE: "false"
+      TS_STATE_DIR: /var/lib/tailscale
+      # Persisted state + AUTH_ONCE = the same node ID across down/up, no duplicates.
+      TS_AUTH_ONCE: "true"
+
+    volumes:
+      - relay-state:/var/lib/tailscale
+      - ./relay-entrypoint.sh:/relay-entrypoint.sh:ro
+
+    # The stock entrypoint (containerboot) has no relay knob and runs no child command,
+    # so this wrapper applies the relay prefs and then execs containerboot as PID 1.
+    entrypoint: ["/bin/sh", "/relay-entrypoint.sh"]
+
+volumes:
+  relay-state:

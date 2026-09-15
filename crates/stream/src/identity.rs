@@ -19,6 +19,9 @@ pub struct Identity {
 impl Identity {
     pub fn load_or_create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
+        // Existing client.key / client.crt / client.id are never rotated.
+        // Regenerating them unpairs every PC; engine migration and debrand
+        // must not touch these files.
         let key_path = dir.join("client.key");
         let cert_path = dir.join("client.crt");
         let id_path = dir.join("client.id");
@@ -149,7 +152,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("brolink-id-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let a = Identity::load_or_create(&dir).unwrap();
+        let key_bytes = std::fs::read(dir.join("client.key")).unwrap();
+        let crt_bytes = std::fs::read(dir.join("client.crt")).unwrap();
+        let id_bytes = std::fs::read(dir.join("client.id")).unwrap();
         let b = Identity::load_or_create(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join("client.key")).unwrap(), key_bytes);
+        assert_eq!(std::fs::read(dir.join("client.crt")).unwrap(), crt_bytes);
+        assert_eq!(std::fs::read(dir.join("client.id")).unwrap(), id_bytes);
         assert_eq!(a.unique_id, b.unique_id);
         assert_eq!(a.cert_der, b.cert_der);
         assert_eq!(a.unique_id.len(), 16);

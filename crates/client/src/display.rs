@@ -154,15 +154,16 @@ pub fn verdict(report: &Value) -> Help {
         "The PC's own desktop is black: its display is off or asleep. Wake \
          it with a key press, or check the PC's power settings."
     } else if report["windows"]["locked"] == Value::Bool(true) {
-        "The PC is showing its lock screen, which Sunshine cannot capture. \
-         Sign in on the PC, or let Sunshine run as a service."
+        "The PC is showing its lock screen, which the streaming engine \
+         cannot capture. Sign in on the PC, or let the engine run as a \
+         service."
     } else if headless {
         "No monitor is attached to the PC, so Windows is drawing to a \
          placeholder display that captures as black. Attach a monitor or a \
          dummy plug, or enable a virtual display."
     } else if desktop_brightness(report).is_some() {
         "The PC's desktop has a picture, so the capture is what is failing. \
-         Restarting the stream, or Sunshine, is the next thing to try."
+         Restarting the stream, or the PC, is the next thing to try."
     } else {
         return Help::default();
     };

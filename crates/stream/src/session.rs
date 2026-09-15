@@ -111,7 +111,7 @@ impl VideoHealth {
                 "Video stopped arriving from the PC. Try restarting the stream or lowering Quality."
                     .into()
             } else {
-                "Connected, but no video has arrived from the PC. Check its display and Sunshine, or restart the stream.".into()
+                "Connected, but no video has arrived from the PC. Check its display, or restart the stream.".into()
             });
         }
         if self
@@ -830,12 +830,36 @@ mod real {
     #[test]
     #[ignore = "needs a paired Sunshine on this machine"]
     fn stream_real() {
-        let dir = std::env::temp_dir().join("brolink-pair-test");
+        let number = |name: &str, default: u32| {
+            std::env::var(name)
+                .map(|value| value.parse::<u32>().expect(name))
+                .unwrap_or(default)
+        };
+        let width = number("BROLINK_TEST_WIDTH", 1280);
+        let height = number("BROLINK_TEST_HEIGHT", 720);
+        let fps = number("BROLINK_TEST_FPS", 60);
+        let bitrate_kbps = number("BROLINK_TEST_BITRATE_KBPS", 10_000);
+        let seconds = number("BROLINK_TEST_SECONDS", 12);
+        let remote = std::env::var_os("BROLINK_TEST_REMOTE").is_some();
+        assert!(width > 0 && height > 0 && fps > 0 && bitrate_kbps > 0 && seconds >= 12);
+        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps remote={remote} duration={seconds}s");
+        let dir = std::env::var_os("BROLINK_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("brolink-pair-test"));
         let identity = crate::Identity::load_or_create(&dir).unwrap();
-        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let ip: std::net::IpAddr = std::env::var("BROLINK_TEST_IP")
+            .unwrap_or_else(|_| "127.0.0.1".into())
+            .parse()
+            .unwrap();
         let cert = std::fs::read(dir.join("server.der")).ok();
         let mut client = Client::new(&identity, ip, cert).unwrap();
         let mut info = client.server_info().unwrap();
+        if std::env::var_os("BROLINK_TEST_IP").is_some() {
+            assert!(
+                info.paired,
+                "a remote PC must be reached without pairing again"
+            );
+        }
         if !info.paired {
             let der = client
                 .pair("4321", "brolink-test", || {
@@ -862,7 +886,7 @@ mod real {
         ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
         let resume = info.current_game != 0;
         let rtsp = client
-            .launch(desktop.id, 1280, 720, 60, &ri_key, ri_id, resume)
+            .launch(desktop.id, width, height, fps, &ri_key, ri_id, resume)
             .unwrap();
         eprintln!("rtsp: {rtsp} (resume={resume})");
         let frames = Arc::new(FrameSlot::default());
@@ -876,12 +900,12 @@ mod real {
                 codec_mode_support: info.codec_mode_support,
             },
             Settings {
-                width: 1280,
-                height: 720,
-                fps: 60,
-                bitrate_kbps: 10_000,
+                width,
+                height,
+                fps,
+                bitrate_kbps,
                 hevc: false,
-                remote: false,
+                remote,
             },
             ri_key,
             ri_iv,
@@ -891,7 +915,8 @@ mod real {
         );
         let start = Instant::now();
         let mut connected = false;
-        while start.elapsed() < Duration::from_secs(12) {
+        let mut sampled_second = 0;
+        while start.elapsed() < Duration::from_secs(u64::from(seconds)) {
             while let Ok(ev) = rx.try_recv() {
                 eprintln!("{:>6.2}s {ev:?}", start.elapsed().as_secs_f32());
                 if ev == Event::Connected {
@@ -911,6 +936,11 @@ mod real {
                         frames.seq()
                     );
                 }
+            }
+            let second = start.elapsed().as_secs();
+            if connected && second > sampled_second {
+                sampled_second = second;
+                eprintln!("sample {second}s: {:?}", session.stats());
             }
             std::thread::sleep(Duration::from_millis(5));
         }

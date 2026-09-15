@@ -2,12 +2,13 @@
 
 BroLink Host is one small program with two jobs: a background service a Mac
 talks to over Tailscale, and a window that shows what it knows and runs the
-setup. Sunshine, which ships in the same zip, does the streaming.
+setup. The streaming engine, which ships in the same zip, does the
+streaming.
 
 ## Requirements
 
 - Windows 10 1809+ or Windows 11, 64-bit
-- A GPU Sunshine can encode on (AMD, NVIDIA, Intel)
+- A GPU the streaming engine can encode on (AMD, NVIDIA, Intel)
 - [Tailscale](https://tailscale.com/download/windows), signed in with the
   same account as the Mac
 - Wired Ethernet if you want to wake the PC from the Mac
@@ -15,16 +16,15 @@ setup. Sunshine, which ships in the same zip, does the streaming.
 ## Install
 
 1. Unzip the release and run `brolink-host.exe`, or run `install-host.ps1`
-   to copy it (and the Sunshine installer) to `%LOCALAPPDATA%\BroLink`, add
-   shortcuts, and register the background service to start at logon.
+   to copy it (and the bundled engine archive) to `%LOCALAPPDATA%\BroLink`,
+   add shortcuts, and register the background service to start at logon.
 2. Click **Set up this PC**. One UAC prompt runs a script that:
-   - installs the bundled `Sunshine-Windows-AMD64-installer.msi` silently
-     (skipped if Sunshine or Apollo is already installed; downloads the
-     latest release if the MSI is not beside the exe);
-   - sets a Sunshine web login for BroLink (`sunshine --creds`) and
-     restarts the Sunshine service;
+   - unpacks the bundled engine archive into
+     `%ProgramFiles%\BroLink\engine` (downloads that pinned release if the
+     archive is not beside the exe);
+   - gives BroLink a login to the engine and restarts the engine service;
    - adds firewall rules: TCP 47850 inbound from `100.64.0.0/10` only, UDP 9
-     for the wake-packet listener, and Sunshine's ports from the tailnet;
+     for the wake-packet listener, and the streaming ports from the tailnet;
    - turns Fast Startup off (`HiberbootEnabled = 0`);
    - on the adapter that has the default route, enables wake on magic
      packet and writes the driver keywords `*WakeOnMagicPacket`,
@@ -38,9 +38,8 @@ setup. Sunshine, which ships in the same zip, does the streaming.
 3. The status pill turns green. Leave the window closed; the service keeps
    running.
 
-The window shows the Sunshine login it generated. Use it at
-`https://localhost:47990` for Sunshine's own settings (encoder, which
-display to stream, HDR, audio device, apps).
+Advanced engine settings are not exposed anywhere in BroLink: BroLink
+configures the engine itself.
 
 ## Slow streams: the network, or the encoder
 
@@ -52,14 +51,14 @@ the PC. Turn UPnP (or NAT-PMP) on in the router, or forward a UDP port to
 this PC, and Tailscale connects directly; IPv6 on both ends works too. The
 service logs the finding each time it changes.
 
-The **Streaming** line names the encoder Sunshine settled on, read from
+The **Streaming** line names the encoder the engine settled on, read from
 its log. "software" means no GPU encoder worked (a missing or broken
 driver): frames are slow to make whatever the network does. Fix the GPU
-driver, then restart the Sunshine service. If it also says **no sound**,
-Sunshine found no audio device to capture (a PC with no speakers, or a
+driver, then restart the engine service. If it also says **no sound**, the
+engine found no audio device to capture (a PC with no speakers, or a
 sink that was unplugged). Install a virtual one (Steam's Streaming
-Speakers, or VB-CABLE), pick it as Sunshine's audio sink, and restart
-Sunshine.
+Speakers, or VB-CABLE), pick it as the PC's audio sink, and restart the
+engine service.
 
 ## What the service does
 
@@ -68,9 +67,9 @@ requests, all JSON:
 
 | Request | Effect |
 |---------|--------|
-| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, Sunshine state and the encoder it uses, this PC's NAT report |
-| `POST /v1/pin {"pin","name"}` | Passes the PIN to Sunshine's `/api/pin`, so pairing never needs the PC's screen |
-| `POST /v1/power {"action"}` | `sleep`, `restart`, or `shutdown` (closes the running Sunshine app first) |
+| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, engine state and the encoder it uses, this PC's NAT report |
+| `POST /v1/pin {"pin","name"}` | Passes the PIN to the streaming engine, so pairing never needs the PC's screen |
+| `POST /v1/power {"action"}` | `sleep`, `restart`, or `shutdown` (closes the running app first) |
 | `GET /v1/clipboard` | The clipboard as text, with Windows' clipboard sequence number |
 | `POST /v1/clipboard {"text"}` | Replaces the clipboard, so a ⌘V on the Mac pastes the Mac's text |
 | `POST /v1/update` | A new `brolink-host.exe`; see Updates |
@@ -107,23 +106,34 @@ works. Untick **Let a paired Mac sleep, restart, or shut down this PC**
 if you would rather the Mac could not. Remote power actions force-close
 programs, because nobody is there to answer a save prompt.
 
-After a **restart**, Sunshine is back before anyone logs in (it is a
+After a **restart**, the engine is back before anyone logs in (it is a
 service), so the Mac can stream the login screen and sign in. BroLink's
 service starts at logon, so sleep and shutdown from the Mac return once
 someone is signed in.
 
-## Apollo instead of Sunshine
+## Streaming with the monitor off or disconnected
 
-[Apollo](https://github.com/ClassicOldSong/Apollo) is a Sunshine fork with
-a built-in virtual display that matches the Mac's resolution exactly, which
-is the only way to get a pixel-for-pixel 16:10 desktop on a MacBook screen.
-If it is installed in `C:\Program Files\Apollo`, BroLink uses it instead of
-installing Sunshine; the API and config layout are the same. Install it
-yourself from its releases page before running setup.
+Windows needs an active display for capture. If the connection works but the picture
+is black, attach a monitor or an HDMI/DisplayPort dummy plug, or install the signed
+[Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases).
+It supplies a display even when the physical monitor is off and works with BroLink's
+bundled engine. Choose a resolution and refresh rate in Windows Display settings
+(1920×1080 at 60 Hz is a useful starting point), then restart the stream.
+Installing a display does not require pairing the Mac again.
+
+## Using an engine you installed yourself
+
+BroLink streams through whichever compatible engine is already on the PC
+before it installs its own. [Apollo](https://github.com/ClassicOldSong/Apollo)
+is one: it has a built-in virtual display that can match the Mac's resolution
+for a pixel-for-pixel 16:10 desktop on a MacBook screen.
+Install it in `C:\Program Files\Apollo` from its releases
+page before running setup, and BroLink uses it instead of installing its
+own engine; the API and config layout are the same.
 
 ## Gamepads
 
-Sunshine no longer installs the virtual controller driver (ViGEmBus) by
+The engine no longer installs the virtual controller driver (ViGEmBus) by
 itself. The **This PC** card shows whether it is present and offers
 **Install controller driver**; a reboot afterwards is recommended.
 
@@ -158,7 +168,7 @@ digest, that the bytes are a Windows executable and a newer version, writes
 `brolink-host.exe.old`, moves the new one in and starts it with
 `--replaces <pid>`; the new service waits for the old one to release the
 port, then removes the `.old` file. Both events appear in the host log and
-the Sunshine session, if any, is not interrupted.
+the streaming session, if any, is not interrupted.
 
 Hosts older than 3.1 have no update route, and the Mac does not POST the
 executable at them (that used to show as a broken pipe). Instead the Mac
@@ -179,9 +189,8 @@ restart; the toggle in Settings is the only thing that turns it off.
 It also holds Windows awake while plugged in (same Settings card), because
 a sleeping PC's Tailscale is asleep and a Mac on another network cannot
 wake it.
-Sunshine runs as a Windows service and streams the sign-in screen, so a
+The engine runs as a Windows service and streams the sign-in screen, so a
 Mac can still connect after a reboot before anyone logs in. Keep the PC's
 Tailscale key from expiring by disabling key expiry for it in the
 [admin console](https://login.tailscale.com/admin/machines); the Mac warns
 about this for every PC it lists.
-

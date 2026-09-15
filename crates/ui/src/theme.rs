@@ -34,32 +34,49 @@ pub struct Palette {
     pub muted: Color32,
     /// Tertiary text: disabled labels, placeholders.
     pub faint: Color32,
-    /// Brand accent. Reserved for the one primary action on a screen, the
-    /// selected state, and "live" indicators.
+    /// Brand accent. Foreground colour: links, warnings, PIN digits, status
+    /// pills and selection. Readable at 4.5:1 on both `bg` and `surface`.
     pub accent: Color32,
-    /// Text drawn on top of the accent.
+    /// The accent as a solid fill (the primary button, the selected segment).
+    /// White text on this fill holds 4.5:1 in idle, hover and pressed states.
+    pub accent_fill: Color32,
+    /// Secondary brand colour from the logo (pink). Decorative only — never
+    /// carries text: white on this fill is 2.87:1.
+    pub accent2: Color32,
+    /// Text drawn on top of the accent fill.
     pub on_accent: Color32,
     pub success: Color32,
     pub danger: Color32,
     pub info: Color32,
 }
 
+/// Logo-derived dark palette (`logo.webp`: violet / pink / cyan on near-black).
+///
+/// Locked tokens: bg `#07080c`, surface `#101219`, accent2 `#f05fd6`,
+/// info `#22d3ee`, on_accent white. The logo violet is split into two roles:
+/// `accent` (`#8d5ef6`, the `#8b5cf6` logo violet lightened) is foreground
+/// text and reads 4.5:1 on both `bg` and `surface`; `accent_fill` (`#8257f6`,
+/// the logo violet darkened) is the solid button fill whose white text holds
+/// 4.5:1 in every state. One violet cannot do both at 4.5:1 — the luminance
+/// windows are disjoint, so the roles are separate tokens.
 pub const PALETTE: Palette = Palette {
-    bg: Color32::from_rgb(11, 14, 19),
-    surface: Color32::from_rgb(20, 25, 33),
-    raised: Color32::from_rgb(29, 36, 46),
-    raised_hover: Color32::from_rgb(38, 46, 58),
-    border: Color32::from_rgb(34, 42, 54),
-    border_strong: Color32::from_rgb(58, 69, 86),
-    well: Color32::from_rgb(9, 12, 17),
+    bg: Color32::from_rgb(7, 8, 12),        // #07080c
+    surface: Color32::from_rgb(16, 18, 25), // #101219
+    raised: Color32::from_rgb(25, 28, 38),
+    raised_hover: Color32::from_rgb(34, 38, 50),
+    border: Color32::from_rgb(30, 34, 46),
+    border_strong: Color32::from_rgb(54, 58, 78),
+    well: Color32::from_rgb(5, 6, 10),
     text: Color32::from_rgb(232, 236, 242),
     muted: Color32::from_rgb(143, 154, 172),
     faint: Color32::from_rgb(92, 102, 118),
-    accent: Color32::from_rgb(245, 165, 36),
-    on_accent: Color32::from_rgb(24, 17, 4),
+    accent: Color32::from_rgb(141, 94, 246),      // #8d5ef6
+    accent_fill: Color32::from_rgb(130, 87, 246), // #8257f6
+    accent2: Color32::from_rgb(240, 95, 214),     // #f05fd6
+    on_accent: Color32::WHITE,
     success: Color32::from_rgb(63, 185, 80),
     danger: Color32::from_rgb(248, 81, 73),
-    info: Color32::from_rgb(88, 166, 255),
+    info: Color32::from_rgb(34, 211, 238), // #22d3ee
 };
 
 /// Font families registered by [`apply`], for text that needs a specific
@@ -269,4 +286,56 @@ fn visuals() -> Visuals {
     w.open.fg_stroke = stroke(1.0, p.text);
     w.open.corner_radius = r;
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lin(c: u8) -> f64 {
+        let s = f64::from(c) / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn lum(c: Color32) -> f64 {
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    fn contrast(fg: Color32, bg: Color32) -> f64 {
+        let (a, b) = (lum(fg), lum(bg));
+        let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn logo_tokens_match_specified_hex() {
+        let p = PALETTE;
+        assert_eq!(p.bg, Color32::from_rgb(7, 8, 12));
+        assert_eq!(p.surface, Color32::from_rgb(16, 18, 25));
+        assert_eq!(p.accent, Color32::from_rgb(141, 94, 246));
+        assert_eq!(p.accent_fill, Color32::from_rgb(130, 87, 246));
+        assert_eq!(p.accent2, Color32::from_rgb(240, 95, 214));
+        assert_eq!(p.info, Color32::from_rgb(34, 211, 238));
+        assert_eq!(p.on_accent, Color32::WHITE);
+        assert_ne!(p.well, p.bg);
+    }
+
+    #[test]
+    fn text_on_surfaces_meets_aa() {
+        let p = PALETTE;
+        assert!(contrast(p.text, p.bg) >= 7.0);
+        assert!(contrast(p.text, p.surface) >= 7.0);
+        assert!(contrast(p.muted, p.bg) >= 4.5);
+        assert!(contrast(p.info, p.bg) >= 4.5);
+        assert!(contrast(p.accent2, p.bg) >= 4.5);
+        // Foreground accent (links, warnings, pills) must read on both.
+        assert!(contrast(p.accent, p.bg) >= 4.5);
+        assert!(contrast(p.accent, p.surface) >= 4.5);
+        // White button text on the fill must read at 4.5:1.
+        assert!(contrast(p.on_accent, p.accent_fill) >= 4.5);
+    }
 }

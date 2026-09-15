@@ -13,6 +13,7 @@ mod app;
 mod clipboard;
 mod config;
 mod display;
+mod migrate;
 mod power;
 mod service;
 mod setup;

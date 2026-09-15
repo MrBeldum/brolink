@@ -19,3 +19,5 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1"
 semver = "1"
 sha2 = "0.10"
+# Decodes and resizes the checked-in logo for the window and file icons.
+image = { version = "0.25", default-features = false, features = ["png"] }

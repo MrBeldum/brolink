@@ -10,9 +10,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The Sunshine installer shipped inside the Windows zip. Bump on purpose:
-  # the host's PIN hand-off is tested against this release.
-  SUNSHINE_VERSION: v2026.516.143833
+  # The engine archive shipped inside the Windows zip. Must match
+  # crates/host/src/setup.rs ENGINE_* — the windows job checks before download.
+  # Exact AMD64-lite filename: this tag also publishes ARM64-lite.zip.
+  ENGINE_TAG: v2026.906.222525
+  ENGINE_SHA256: 50f4123dd15a6817513589c912581260c34cc4a58e9a5f3071ebac3d92c94c15
+  ENGINE_ZIP: Sunshine-Windows-AMD64-lite.zip
 
 jobs:
   macos:
@@ -52,6 +55,21 @@ jobs:
         run: cargo test --workspace
       - name: build
         run: cargo build --release -p brolink-host
+      - name: pin matches setup.rs
+        shell: pwsh
+        run: |
+          $src = Get-Content crates/host/src/setup.rs -Raw
+          function Const([string]$name) {
+            $m = [regex]::Match($src, "pub const ${name}: &str = `"([^`"]+)`"")
+            if (-not $m.Success) { throw "setup.rs missing $name" }
+            $m.Groups[1].Value
+          }
+          foreach ($k in @('ENGINE_ZIP','ENGINE_TAG','ENGINE_SHA256')) {
+            $got = Const $k
+            $want = [Environment]::GetEnvironmentVariable($k)
+            if ($got -ne $want) { throw "$k drift: setup.rs=$got workflow=$want" }
+          }
+          Write-Host "ENGINE_ZIP/TAG/SHA256 match setup.rs"
       - name: package
         shell: pwsh
         run: |
@@ -59,7 +77,14 @@ jobs:
           Copy-Item target\release\brolink-host.exe dist\
           Copy-Item docs\WINDOWS.md dist\README-WINDOWS.md
           Copy-Item scripts\install-host.ps1, LICENSE, NOTICE dist\
-          Invoke-WebRequest "https://github.com/LizardByte/Sunshine/releases/download/$env:SUNSHINE_VERSION/Sunshine-Windows-AMD64-installer.msi" -OutFile dist\Sunshine-Windows-AMD64-installer.msi
+          $zip = Join-Path dist $env:ENGINE_ZIP
+          $url = "https://github.com/LizardByte/Sunshine/releases/download/$($env:ENGINE_TAG)/$($env:ENGINE_ZIP)"
+          curl.exe -sSL -A brolink -o $zip $url
+          if ($LASTEXITCODE -ne 0) { throw "downloading $url failed (curl exit $LASTEXITCODE)" }
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
+          if ($got -ne $env:ENGINE_SHA256) {
+            throw "engine archive is not $($env:ENGINE_TAG): expected $($env:ENGINE_SHA256), got $got"
+          }
           Compress-Archive -Path dist\* -DestinationPath brolink-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:

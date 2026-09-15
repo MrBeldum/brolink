@@ -10,13 +10,19 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-/// Install directories, in the order they are preferred when both exist.
-pub const INSTALL_DIRS: [(&str, &str); 2] = [
+/// Where BroLink unpacks its own copy of the streaming engine. Setup
+/// installs here; an engine installed by someone else stays where it is.
+pub const ENGINE_DIR: &str = r"C:\Program Files\BroLink\engine";
+
+/// Install directories, in the order they are preferred when several
+/// exist. BroLink's own engine wins: it is the one setup configured.
+pub const INSTALL_DIRS: [(&str, &str); 3] = [
+    ("BroLink", ENGINE_DIR),
     ("Sunshine", r"C:\Program Files\Sunshine"),
     ("Apollo", r"C:\Program Files\Apollo"),
 ];
 
-/// GitHub repository the setup script fetches the installer from.
+/// GitHub repository the setup script fetches the engine archive from.
 pub const REPO: &str = "LizardByte/Sunshine";
 
 #[derive(Debug, Clone)]
@@ -221,6 +227,12 @@ impl Api<'_> {
         self.call("GET", "/api/apps", None).is_ok()
     }
 
+    pub fn session_active(&self) -> bool {
+        self.call("GET", "/api/apps", None)
+            .ok()
+            .is_some_and(|v| session_listed(&v))
+    }
+
     /// Accept the PIN the Mac is pairing with. Sunshine says no until the
     /// Mac has actually started pairing, so callers retry.
     ///
@@ -238,7 +250,7 @@ impl Api<'_> {
                 return Ok(());
             }
         }
-        bail!("Sunshine did not accept the PIN (is the Mac pairing right now?)")
+        bail!("the streaming engine did not accept the PIN (is the Mac pairing right now?)")
     }
 
     /// End whatever is streaming, so a power action does not cut a session
@@ -329,6 +341,22 @@ fn parse_reply(text: &str) -> Result<serde_json::Value> {
     Ok(v)
 }
 
+pub fn session_listed(v: &serde_json::Value) -> bool {
+    match v.get("current_app") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => return true,
+        Some(serde_json::Value::Number(n)) if n.as_u64().is_some_and(|n| n > 0) => return true,
+        _ => {}
+    }
+    v.get("apps")
+        .and_then(|a| a.as_array())
+        .is_some_and(|apps| {
+            apps.iter().any(|a| {
+                a.get("running").and_then(|x| x.as_bool()) == Some(true)
+                    || a.get("current").and_then(|x| x.as_bool()) == Some(true)
+            })
+        })
+}
+
 fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
     v.get("named_certs")
         .and_then(|c| c.as_array())
@@ -348,6 +376,36 @@ fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_prefers_the_brolink_engine_over_sunshine() {
+        assert_eq!(INSTALL_DIRS[0], ("BroLink", ENGINE_DIR));
+        assert_eq!(INSTALL_DIRS[1].0, "Sunshine");
+        assert_eq!(INSTALL_DIRS[2].0, "Apollo");
+        let existing = [ENGINE_DIR, r"C:\Program Files\Sunshine"];
+        let winner = INSTALL_DIRS
+            .iter()
+            .find(|(_, d)| existing.contains(d))
+            .expect("both exist");
+        assert_eq!(*winner, ("BroLink", ENGINE_DIR));
+        let _ = SUNSHINE_PORT;
+    }
+
+    #[test]
+    fn session_listed_reads_current_app_and_running_flags() {
+        assert!(!session_listed(&serde_json::json!({"apps": []})));
+        assert!(session_listed(
+            &serde_json::json!({"current_app": "Desktop"})
+        ));
+        assert!(!session_listed(&serde_json::json!({"current_app": ""})));
+        assert!(session_listed(&serde_json::json!({"current_app": 1})));
+        assert!(session_listed(
+            &serde_json::json!({"apps": [{"name": "Desktop", "running": true}]})
+        ));
+        assert!(!session_listed(
+            &serde_json::json!({"apps": [{"name": "Desktop", "running": false}]})
+        ));
+    }
 
     #[test]
     fn the_encoder_family_is_read_from_the_log() {

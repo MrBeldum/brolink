@@ -75,6 +75,16 @@ impl Service {
         log.push_back(msg);
     }
 
+    fn session_active(&self) -> bool {
+        let cfg = self.cfg.lock().clone();
+        cfg.has_creds()
+            && Api {
+                user: &cfg.sunshine_user,
+                pass: &cfg.sunshine_pass,
+            }
+            .session_active()
+    }
+
     /// Bind, then serve forever. Fails only when the port is taken, which
     /// means another copy is already running. `replacing` is the service an
     /// update just started: the old one is still answering its last request,
@@ -227,7 +237,7 @@ impl Service {
             let mut cur = self.streamer.lock();
             if (cur.installed, cur.running, cur.api_ok) != (st.installed, st.running, st.api_ok) {
                 self.log(match (&st.installed, &st.running, &st.api_ok) {
-                    (false, _, _) => "Sunshine is not installed".to_string(),
+                    (false, _, _) => "the streaming engine is not installed".to_string(),
                     (true, false, _) => format!("{} is installed but not running", st.kind),
                     (true, true, false) => {
                         format!("{} is running; BroLink cannot log in to it yet", st.kind)
@@ -321,7 +331,7 @@ impl Service {
             setup.push(format!("Tailscale: {e}. Install it and sign in."));
         }
         if !streamer.installed {
-            setup.push("Sunshine is not installed.".into());
+            setup.push("The streaming engine is not installed.".into());
         } else if !streamer.running {
             setup.push(format!("{} is installed but not running.", streamer.kind));
         } else if !streamer.api_ok {
@@ -498,6 +508,14 @@ impl Service {
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
+        if update::refuse_self_update(self.streamer.lock().running, self.session_active()) {
+            self.update_running.store(false, Ordering::Release);
+            self.log("update deferred: a stream is running");
+            return Response::json(
+                409,
+                &Ack::err("a stream is running; the update is retried after it ends"),
+            );
+        }
         let exe = match std::env::current_exe() {
             Ok(e) => e,
             Err(e) => {
@@ -545,7 +563,9 @@ impl Service {
         if !cfg.has_creds() || !self.streamer.lock().api_ok {
             return Response::json(
                 502,
-                &Ack::err("BroLink cannot log in to Sunshine on this PC; run setup there"),
+                &Ack::err(
+                    "BroLink cannot log in to the streaming engine on this PC; run setup there",
+                ),
             );
         }
         let api = Api {

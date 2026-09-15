@@ -4,8 +4,35 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## Unreleased
+## 3.2.0 (unreleased)
 
+- A private Tailscale peer relay you run yourself. `deploy/relay/` is a
+  Docker kit for a VPS (UDP 40000, iptables above the cloud REJECT, state
+  volume, wait-for-Running before `tailscale set`). Tailscale's own DERP
+  stays the fallback; BroLink adds no relay protocol of its own. Settings
+  shows a Relay card with the exact state: no relay on this network, a
+  relay that this device is not granted, or ready. Needs Tailscale 1.86 or
+  later on every device.
+- Streams tell a peer relay apart from DERP. Auto quality on a peer relay
+  goes up to 1440p60 at 40 Mbps by round trip; the DERP and direct tiers are
+  unchanged. Tagged relay nodes never appear in the PC list.
+- The Windows streaming engine now unpacks from the pinned lite archive to
+  `C:\Program Files\BroLink\engine` as the "BroLink Streaming" service:
+  no Apps & Features entry, Start Menu shortcut, tray icon or web-UI link.
+  Firewall rules are named "BroLink". An engine installed earlier by an
+  MSI is migrated in order — copy state, verify, start, prove it listens,
+  then uninstall the MSI — and keeps its pairing and web login; a
+  `config.bak` is left beside it. The host offers **Update this PC** after
+  an exe-only update and refuses a self-update while a stream is running.
+- A PC whose engine certificate changed asks to pair again instead of a
+  generic TLS error, and the old pin is forgotten.
+- No user-visible mention of upstream project names or ports; **Open
+  source** in Settings shows the notices.
+- Nothing overlaps at the smallest window (640×420 on the Mac, 560×600 on
+  the PC): the stream toolbar folds into a More menu, overlays shrink to the
+  window, and CPU-only layout tests enforce it.
+- New logo and palette (violet, pink and cyan on near-black) across the
+  Dock, Finder, Windows and in-window icons.
 - A connected stream that remains black now says so and asks the PC why,
   instead of presenting a healthy-looking stream. Missing video, frozen
   video, and decoder failures have separate persistent notices.
