@@ -320,9 +320,14 @@ mod win {
 
     pub(super) fn brand(dir: &Path) -> Result<()> {
         let icon = own_icon()?;
+        // A file with no version block of its own (the service wrapper)
+        // starts from the engine's: same release, same publisher, same
+        // licence, and a FileVersion string, without which .NET-based
+        // readers such as PowerShell report every field empty.
+        let engine = read_version(&dir.join(TARGETS[0].0));
         for (file, description) in TARGETS {
             let exe = dir.join(file);
-            brand_file(&exe, description, &icon)
+            brand_file(&exe, description, &icon, engine.as_ref())
                 .with_context(|| format!("brand {}", exe.display()))?;
         }
         anyhow::ensure!(super::is_branded(dir), "the new version block did not take");
@@ -330,10 +335,19 @@ mod win {
     }
 
     /// Rewrite `exe`'s version block and first icon group in place.
-    fn brand_file(exe: &Path, description: &str, icon: &[([u8; 12], Vec<u8>)]) -> Result<()> {
+    #[allow(clippy::type_complexity)]
+    fn brand_file(
+        exe: &Path,
+        description: &str,
+        icon: &[([u8; 12], Vec<u8>)],
+        fallback: Option<&([u8; FIXED_LEN], Vec<(String, String)>, u16)>,
+    ) -> Result<()> {
         anyhow::ensure!(exe.is_file(), "{} is missing", exe.display());
-        let (fixed, theirs, lang) =
-            read_version(exe).unwrap_or((verinfo::fixed_default(), Vec::new(), verinfo::LANG));
+        let (fixed, theirs, lang) = read_version(exe).or_else(|| fallback.cloned()).unwrap_or((
+            verinfo::fixed_default(),
+            Vec::new(),
+            verinfo::LANG,
+        ));
         let strings = verinfo::merged(
             &theirs,
             &[
