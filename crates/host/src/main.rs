@@ -25,6 +25,7 @@ mod streamer;
 mod update;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod verinfo;
+mod virtual_display;
 mod wake;
 
 use anyhow::Result;

@@ -376,7 +376,7 @@ impl<'a> Client<'a> {
         resume: bool,
     ) -> Result<String> {
         let query = format!(
-            "appid={app_id}&mode={width}x{height}x{fps}&additionalStates=1&sops=0&rikey={}&rikeyid={ri_key_id}&localAudioPlayMode=0&surroundAudioInfo=196610&remoteControllersBitmap=0&gcmap=0&gcpersist=0{}",
+            "appid={app_id}&mode={width}x{height}x{fps}&additionalStates=1&sops=1&rikey={}&rikeyid={ri_key_id}&localAudioPlayMode=0&surroundAudioInfo=196610&remoteControllersBitmap=0&gcmap=0&gcpersist=0{}",
             hex(ri_key),
             crate::ffi::launch_query()
         );

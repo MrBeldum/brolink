@@ -130,6 +130,7 @@ extern "C" {
     pub fn LiSendHighResScrollEvent(amount: i16) -> c_int;
     pub fn LiSendHighResHScrollEvent(amount: i16) -> c_int;
     pub fn LiGetEstimatedRttInfo(rtt: *mut u32, variance: *mut u32) -> bool;
+    pub fn LiGetMicroseconds() -> u64;
     pub fn LiGetPendingVideoFrames() -> c_int;
     pub fn LiGetRTPVideoStats() -> *const RtpVideoStats;
     pub fn LiRequestIdrFrame();

@@ -16,13 +16,17 @@ pub enum Resolution {
 }
 
 impl Resolution {
+    /// This choice applied to a screen of `native` pixels: the quality caps
+    /// the long edge, the screen's proportions always win, and "Match
+    /// screen" is the screen itself. See `brolink_core::screens`.
     pub fn pixels(self, native: (u32, u32)) -> (u32, u32) {
-        match self {
-            Resolution::P1080 => (1920, 1080),
-            Resolution::P1440 => (2560, 1440),
-            Resolution::P2160 => (3840, 2160),
-            Resolution::Native => native,
-        }
+        let limit = match self {
+            Resolution::P1080 => 1920,
+            Resolution::P1440 => 2560,
+            Resolution::P2160 => 3840,
+            Resolution::Native => u32::MAX,
+        };
+        brolink_core::screens::fit(limit, native)
     }
 }
 
@@ -37,8 +41,7 @@ pub enum Codec {
 /// Who decides resolution, frame rate and bitrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Quality {
-    /// BroLink picks them from the path to the PC at each connect: less
-    /// over a relay or a long round trip, more on a LAN. See `path.rs`.
+    /// Recommended quality for this screen. Route latency is not bandwidth.
     #[default]
     Auto,
     /// The values in [`StreamSettings`], as set.
@@ -67,13 +70,13 @@ impl Preset {
     /// Resolution, frames per second, kilobits per second.
     pub fn values(self) -> (Resolution, u32, u32) {
         match self {
-            Preset::Smooth => (Resolution::P1080, 30, 4_000),
-            Preset::Balanced => (Resolution::P1080, 60, 10_000),
-            Preset::Sharp => (Resolution::P1440, 60, 25_000),
+            Preset::Smooth => (Resolution::P1080, 60, 12_000),
+            Preset::Balanced => (Resolution::Native, 60, 35_000),
+            Preset::Sharp => (Resolution::Native, 60, 65_000),
         }
     }
 
-    /// "1080p · 30 fps · 4 Mbps"
+    /// "1080p · 60 fps · 12 Mbps"
     pub fn describe(self) -> String {
         let (r, fps, kbps) = self.values();
         format!("{} · {fps} fps · {} Mbps", r.label(), kbps / 1000)
@@ -86,7 +89,7 @@ impl Resolution {
             Resolution::P1080 => "1080p",
             Resolution::P1440 => "1440p",
             Resolution::P2160 => "4K",
-            Resolution::Native => "This screen",
+            Resolution::Native => "Match screen",
         }
     }
 }
@@ -108,9 +111,9 @@ impl Default for StreamSettings {
     fn default() -> Self {
         Self {
             quality: Quality::Auto,
-            resolution: Resolution::P1440,
+            resolution: Resolution::Native,
             fps: 60,
-            bitrate_kbps: 30_000,
+            bitrate_kbps: 35_000,
             codec: Codec::Auto,
             app: "Desktop".into(),
             fullscreen: true,
@@ -135,7 +138,7 @@ impl StreamSettings {
             .find(|p| p.values() == (self.resolution, self.fps, self.bitrate_kbps))
     }
 
-    /// "1080p · 30 fps · 4 Mbps"
+    /// "1080p · 60 fps · 12 Mbps"
     pub fn describe(&self) -> String {
         format!(
             "{} · {} fps · {} Mbps",
@@ -198,6 +201,9 @@ impl Default for ClientConfig {
 impl ClientConfig {
     pub fn load() -> Self {
         let mut c: Self = brolink_core::config::load(FILE);
+        if c.stream.quality == Quality::Auto {
+            c.stream.resolution = Resolution::Native;
+        }
         c.normalise();
         c
     }
@@ -234,8 +240,23 @@ mod tests {
     #[test]
     fn defaults_and_round_trip() {
         let s = StreamSettings::default();
-        assert_eq!(s.resolution.pixels((3024, 1964)), (2560, 1440));
+        assert_eq!(s.resolution.pixels((3024, 1964)), (3024, 1964));
         assert_eq!(Resolution::Native.pixels((3024, 1964)), (3024, 1964));
+        assert_eq!(Resolution::P1080.pixels((3024, 1964)), (1920, 1246));
+        let modes = brolink_core::screens::stream_modes();
+        for r in [
+            Resolution::P1080,
+            Resolution::P1440,
+            Resolution::P2160,
+            Resolution::Native,
+        ] {
+            for &screen in brolink_core::screens::SCREENS {
+                assert!(
+                    modes.contains(&r.pixels(screen)),
+                    "{r:?} on {screen:?} is a listed mode"
+                );
+            }
+        }
         let c: ClientConfig = toml::from_str("").unwrap();
         assert_eq!(c.stream, s);
         assert_eq!(c.stream.quality, Quality::Auto, "auto unless someone chose");
@@ -245,12 +266,12 @@ mod tests {
         assert_eq!(c.stream.quality, Quality::Auto);
         assert_eq!(c.stream.fps, 90);
         let mut st = StreamSettings::default();
-        assert_eq!(st.preset(), None);
+        assert_eq!(st.preset(), Some(Preset::Balanced));
         st.apply_preset(Preset::Smooth);
         assert_eq!(st.quality, Quality::Custom);
         assert_eq!(st.preset(), Some(Preset::Smooth));
-        assert_eq!(st.describe(), "1080p · 30 fps · 4 Mbps");
-        assert_eq!(Preset::Sharp.describe(), "1440p · 60 fps · 25 Mbps");
+        assert_eq!(st.describe(), "1080p · 60 fps · 12 Mbps");
+        assert_eq!(Preset::Sharp.describe(), "Match screen · 60 fps · 65 Mbps");
         let mut c = ClientConfig::default();
         c.pcs.insert(
             "n".into(),
@@ -273,6 +294,9 @@ mod tests {
         for p in Preset::ALL {
             let mut c = ClientConfig::default();
             c.stream.apply_preset(p);
+            if c.stream.quality == Quality::Auto {
+                c.stream.resolution = Resolution::Native;
+            }
             c.normalise();
             assert_eq!(c.stream.preset(), Some(p), "{p:?} was clamped away");
         }
@@ -280,6 +304,9 @@ mod tests {
         c.stream.bitrate_kbps = 500;
         c.stream.fps = 5;
         c.stream.app = "  ".into();
+        if c.stream.quality == Quality::Auto {
+            c.stream.resolution = Resolution::Native;
+        }
         c.normalise();
         assert_eq!(c.stream.bitrate_kbps, 2_000);
         assert_eq!(c.stream.fps, 30);

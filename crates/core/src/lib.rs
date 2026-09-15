@@ -11,6 +11,7 @@ pub mod config;
 pub mod dates;
 pub mod http;
 pub mod icon;
+pub mod screens;
 pub mod tailscale;
 pub mod update;
 pub mod wake;

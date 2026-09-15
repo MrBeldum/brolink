@@ -161,9 +161,10 @@ fn collapsible_id(id: impl std::hash::Hash) -> Id {
 /// Centre the content in a column no wider than `max_width`.
 pub fn content_column<R>(ui: &mut Ui, max_width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     let avail = ui.available_width();
-    let w = avail.min(max_width);
+    let w = (avail - 40.0).max(0.0).min(max_width);
     let pad = ((avail - w) / 2.0).max(0.0);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_space(pad);
         ui.vertical(|ui| {
             ui.set_width(w);

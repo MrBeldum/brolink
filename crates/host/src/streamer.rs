@@ -233,6 +233,33 @@ impl Api<'_> {
             .is_some_and(|v| session_listed(&v))
     }
 
+    /// Migrate managed installations once, without interrupting a running app.
+    pub fn upgrade_stream_profile(&self) -> Result<bool> {
+        let apps = self.call("GET", "/api/apps", None)?;
+        if session_listed(&apps) {
+            return Ok(false);
+        }
+        let current = self.call("GET", "/api/config", None)?;
+        let desired = stream_profile(&current)?;
+        if desired != current {
+            self.call("POST", "/api/config", Some(&desired.to_string()))?;
+            // Sunshine closes this HTTP connection as it restarts.
+            let _ = self.raw("POST", "/api/restart");
+            std::thread::sleep(Duration::from_secs(1));
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                if self.ok() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!("streaming engine did not return after applying the display profile");
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+        Ok(true)
+    }
+
     /// Accept the PIN the Mac is pairing with. Sunshine says no until the
     /// Mac has actually started pairing, so callers retry.
     ///
@@ -303,6 +330,27 @@ fn pending_pairings(reply: Option<serde_json::Value>) -> Vec<Option<String>> {
     } else {
         ids
     }
+}
+
+/// Preserve unrelated engine settings; metadata from GET is never written.
+fn stream_profile(current: &serde_json::Value) -> Result<serde_json::Value> {
+    let mut config = current
+        .as_object()
+        .context("engine config is not an object")?
+        .clone();
+    let changed = crate::setup::ENGINE_CONF
+        .iter()
+        .any(|(k, v)| config.get(*k).and_then(|v| v.as_str()) != Some(*v));
+    if !changed {
+        return Ok(current.clone());
+    }
+    for k in ["status", "platform", "version"] {
+        config.remove(k);
+    }
+    for (k, v) in crate::setup::ENGINE_CONF {
+        config.insert((*k).into(), (*v).into());
+    }
+    Ok(config.into())
 }
 
 /// Sunshine's config carries its own web login and the pairing secrets.
@@ -376,6 +424,21 @@ fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_profile_replaces_caps_and_fixed_modes_without_losing_other_settings() {
+        let original = serde_json::json!({"status":true,"version":"x", "platform":"windows",
+            "encoder":"amdvce", "max_bitrate":"1000", "dd_resolution_option":"manual", "output_name":"virtual"});
+        let profile = stream_profile(&original).unwrap();
+        assert_eq!(profile["max_bitrate"], "0");
+        assert_eq!(profile["dd_resolution_option"], "auto");
+        assert_eq!(profile["dd_refresh_rate_option"], "auto");
+        assert_eq!(profile["encoder"], "amdvce");
+        assert_eq!(profile["output_name"], "virtual");
+        assert!(profile.get("platform").is_none());
+        assert_eq!(stream_profile(&profile).unwrap(), profile);
+        assert!(stream_profile(&serde_json::Value::Null).is_err());
+    }
 
     #[test]
     fn discovery_prefers_the_brolink_engine_over_sunshine() {

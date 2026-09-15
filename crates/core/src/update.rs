@@ -427,7 +427,10 @@ mod tests {
         };
         assert!(release.is_newer_than(&Version::parse("3.1.2-rc.5").unwrap()));
         assert!(!release.is_newer_than(&Version::new(3, 2, 0)));
-        assert_eq!(current(), Version::new(3, 2, 0));
+        assert_eq!(
+            current(),
+            Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
+        );
     }
 
     #[test]

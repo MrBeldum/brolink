@@ -77,21 +77,25 @@ xcrun stapler staple dist/BroLink.app
 
 ## While streaming
 
-The picture is letterboxed to the PC's aspect ratio. The toolbar sits above
-it (in the top letterbox bar in full screen when there is one; otherwise it
-drops down when the pointer touches the top edge) and the status line, with
-the session clock and the stream stats when they are on, sits below.
+The picture fills the window in this display's proportions, so with
+**Match screen** there is nothing to letterbox. In a window the toolbar
+sits above the picture; in full screen it drops down when the pointer
+touches the top edge (or sits in the top letterbox bar when a manual
+resolution leaves one). The status line, with the session clock, the
+frame rate and bitrate against what was asked for, and the round trip,
+sits below the picture, or over its bottom-left corner when there is no
+room.
 
 | Toolbar item | What it does |
 |--------------|--------------|
 | **● PC name · 1920×1080 · 60 fps · HEVC** | The stream as negotiated; the dot turns red while the connection is poor |
-| **Direct · 38 ms / Relayed via Tokyo · 210 ms** | The path Tailscale found to the PC and its round trip. Red means every packet goes through a Tailscale relay; the lobby says why (see below) |
+| **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found to the PC and its round trip. Red means every packet goes through a Tailscale relay, which adds delay; the lobby's **Connection details** say why and what would give a direct path. What BroLink asks for is the same on every path |
 | **Mouse: free / captured** | Free: the Mac cursor moves 1:1 on the PC and leaves the window normally. Captured: the cursor is hidden and raw movement is sent, for games. **Ctrl+Alt** toggles |
-| **Quality: Auto / Smooth / …** | Auto picks resolution, frame rate and bitrate from the path; Smooth, Balanced and Sharp are fixed points. Choosing one reconnects in a few seconds |
 | **Keys** | Ctrl+Alt+Del, Windows key, Alt+Tab, Esc, Print Screen; and the switch for what ⌘ does on the PC |
-| **Stats** | fps, bitrate, round trip, packet loss, decode time, decoder, path and quality in the status line |
+| **Stats** | A Stream performance window: received against target bitrate and frame rate, round trip, packet loss, host, assembly, queue and decode times, and whether the decoder is hardware. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
 | **PC** | Sleep, Restart…, Shut down… (the latter two ask twice); **Update BroLink Host…** for a PC whose host is older than 3.1 |
+| **Stream settings** | The same panel as in the lobby: quick profiles, picture quality, resolution, frame rate, bitrate target and video format. **Apply and reconnect** restarts the session with them in a few seconds |
 | **Disconnect** | End the session |
 
 Everything else on the keyboard goes to the PC as pressed. With **⌘ acts
@@ -107,22 +111,24 @@ then presses Ctrl+V there). Text only, up to 32 KB; an image or a file on
 either clipboard is left alone. Short notices under the toolbar say when
 something crossed. With an older host, ⌘V pastes what the PC last copied.
 
-### Slow? Look at the path
+### Laggy? Look at the path
 
 Tailscale connects the Mac and the PC directly when it can punch through
-both routers. When it cannot, every packet goes through one of its relays
-(DERP), which adds a detour of a few hundred milliseconds and holds the
-stream to a few megabits however fast the two networks are. That is the
-whole difference between "fluid" and "unusable", and no setting on either
-side changes it: only the routers do.
+both routers. When it cannot, every packet goes through a relay: your own
+peer relay if you run one (the Relay card in Settings), otherwise one of
+Tailscale's (DERP). A relay adds a detour, and the round trip it adds is a
+floor under how quickly the PC answers a click; it changes nothing about
+what BroLink asks for. Recommended quality is this screen's size at 35
+Mbps on every path, so a relayed stream is laggier, not blurrier.
+Tailscale's own relays are shared, so a stream through one can also
+stutter at busy times; a peer relay you run is yours alone.
 
 BroLink shows which case you are in next to each PC (**Relayed via Tokyo ·
-210 ms**) and, when relayed, a line under the list says which router is in
-the way and what would fix it: UPnP or NAT-PMP turned on in the PC's router,
-a UDP port forwarded to the PC, or IPv6 on both networks. Both machines
-report their own side (`tailscale netcheck`); the PC's report needs BroLink
-Host 3.1. While relayed, **Auto** quality asks for 1080p at 30 fps and 4
-Mbps, which a relay can usually carry.
+210 ms**, **Via your relay · 60 ms**) and, when relayed, **Connection
+details** under the list says which router is in the way and what would
+fix it: UPnP or NAT-PMP turned on in the PC's router, a UDP port forwarded
+to the PC, or IPv6 on both networks. Both machines report their own side
+(`tailscale netcheck`); the PC's report needs BroLink Host 3.1.
 
 ## The PC menu in the lobby
 
@@ -141,15 +147,22 @@ details BroLink has learned; it sends the packet without connecting.
 
 | Setting | What it changes |
 |---------|-----------------|
-| Quality | **Auto** (the default) picks the three rows below from the path to the PC at each connect: 1440p/60/30 Mbps on a LAN, 1440p/60/15 nearby, 1080p/60/8 across a long round trip, 1080p/30/4 through a relay. **Custom** uses the rows as set |
-| Resolution | 1080p, 1440p, 4K, or this screen's own pixel size. Exact only with a virtual display on the PC ([Apollo](https://github.com/ClassicOldSong/Apollo) provides one); otherwise the PC's monitor is scaled |
-| Frame rate | 30, 60, 90, 120 |
-| Bitrate | 2 to 150 Mbps |
-| Codec | Auto (HEVC when the PC can encode it), H.264 |
+| Quick profiles | **Smooth** 1080p · 60 fps · 12 Mbps, **Balanced** match screen · 60 · 35, **Sharp** match screen · 60 · 65; **Reset** returns to Recommended |
+| Picture quality | **Recommended** (the default) asks for this screen's own size at 35 Mbps, on every path. **Manual** uses the rows below; changing the resolution or the bitrate switches to it |
+| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro). 1080p, 1440p and 4K cap the long edge and keep this display's proportions, so the picture always fills the window. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
+| Frame rate | 30 to 240; the PC's display is switched to match when it can |
+| Bitrate target | 2 to 150 Mbps. What arrives varies with what is on screen: a still desktop uses very little |
+| Video format | Auto (HEVC when the PC can encode it), HEVC, H.264 |
 | Full screen | How a session starts |
 | App | The app on the PC to launch; "Desktop" is the whole PC. The list fills in after the first connection |
 | Command key acts as Ctrl | Off makes ⌘ the Windows key |
 | Offer to sleep the PC after each session | Off by default. Asleep, Tailscale is off; this Mac can only wake the PC from that PC's own network |
+
+The stream rows are the panel that **Stream settings** opens during a
+session, and the pill under them says exactly what the next connect asks
+for; the lobby's **Next session** card shows the same. A session also
+reconnects by itself, at the new size, when this Mac's window moves to a
+display of a different size.
 
 Settings are saved in `~/Library/Application Support/BroLink/client.toml`,
 along with the MAC, LAN address and pairing certificate of each PC BroLink

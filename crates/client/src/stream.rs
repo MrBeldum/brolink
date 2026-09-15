@@ -7,7 +7,7 @@
 //! allow: SIZE_OK — one stream view; later UI tasks own any split.
 
 use crate::clipboard;
-use crate::config::{ClientConfig, Preset, Quality};
+use crate::config::{ClientConfig, StreamSettings};
 use crate::input::{self, press_chord, Held};
 use crate::path::Path;
 use crate::session::Live;
@@ -37,7 +37,7 @@ fn overlay_width(max: f32, screen_w: f32) -> f32 {
     max.min(screen_w - 4.0 * OVERLAY_PAD).max(0.0)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Disconnect,
     RestartStream,
@@ -46,16 +46,9 @@ pub enum Action {
     Power(PowerAction),
     Fullscreen(bool),
     ToggleCmd,
-    /// Reconnect at this quality.
-    Quality(QualityChoice),
     /// Install a new BroLink Host on the PC through the stream.
     InstallHost,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QualityChoice {
-    Auto,
-    Preset(Preset),
+    ApplySettings(StreamSettings),
 }
 
 /// What the window knows that the stream screen should show.
@@ -84,6 +77,7 @@ pub struct View {
     captured: bool,
     grabbed: bool,
     stats: bool,
+    settings: Option<StreamSettings>,
     held: Held,
     scroll: (f32, f32),
     motion: (f32, f32),
@@ -111,6 +105,7 @@ impl Default for View {
             captured: false,
             grabbed: false,
             stats: false,
+            settings: None,
             held: Held::default(),
             scroll: (0.0, 0.0),
             motion: (0.0, 0.0),
@@ -134,7 +129,7 @@ impl View {
             self.poor_hinted = true;
             self.toast(
                 Tone::Danger,
-                "The connection is struggling. Quality → Smooth asks less of it.",
+                "Video is arriving unevenly. Open Stats to check loss and decode time, or lower the bitrate in Stream settings.",
             );
         }
         self.poor = poor;
@@ -161,6 +156,7 @@ impl View {
         }
         self.set_captured(ctx, false);
         self.confirm = None;
+        self.settings = None;
         self.confirm_install = false;
         self.poor = false;
         self.poor_hinted = false;
@@ -295,8 +291,91 @@ impl View {
             &mut actions,
         );
 
+        self.settings_panel(ctx, env, &mut actions);
+        if self.stats {
+            self.diagnostics(ctx, env, &stats);
+        }
         self.input(ctx, live, env.cfg, video, bar_rect);
         actions
+    }
+
+    fn settings_panel(&mut self, ctx: &egui::Context, env: &Env<'_>, actions: &mut Vec<Action>) {
+        let Some(settings) = self.settings.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        egui::Window::new("Stream settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .max_width((ctx.screen_rect().width() - 48.0).max(280.0))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height((ctx.screen_rect().height() - 150.0).max(120.0))
+                    .show(ui, |ui| {
+                        crate::settings::stream_controls(
+                            ui,
+                            settings,
+                            crate::app::ClientApp::native_pixels(ctx),
+                        );
+                    });
+                ui::row_separator(ui);
+                ui::caption(ui, "Applying reconnects the stream with these settings.");
+                ui.horizontal(|ui| {
+                    apply = ui::primary_button(ui, "Apply and reconnect").clicked();
+                    cancel = ui::ghost_button(ui, "Cancel").clicked();
+                });
+            });
+        if apply {
+            actions.push(Action::ApplySettings(settings.clone()));
+        }
+        if !open || apply || cancel {
+            self.settings = None;
+        }
+        let _ = env;
+    }
+
+    fn diagnostics(&mut self, ctx: &egui::Context, env: &Env<'_>, stats: &brolink_stream::Stats) {
+        let live = env.live;
+        egui::Window::new("Stream performance").open(&mut self.stats)
+            .resizable(false).collapsible(false).default_pos(Pos2::new(16.0, 60.0)).default_width(330.0)
+            .show(ctx, |ui| {
+                let path = env.path.as_ref().unwrap_or(&live.path);
+                ui::status_pill(ui, &path.label(), path.tone());
+                ui::caption(ui, live.quality_label());
+                ui.add_space(8.0);
+                egui::Grid::new("stream-metrics").num_columns(2).spacing([18.0, 10.0]).show(ui, |ui| {
+                    for (name, value) in [
+                        ("Stream resolution", format!("{} × {}", stats.width, stats.height)),
+                        ("Frames decoded", format!("{:.1} / {} fps", stats.fps, live.requested.2)),
+                        ("Video received", format!("{:.2} Mbps", stats.mbps)),
+                        ("Bitrate target", format!("{} Mbps", live.settings.bitrate_kbps / 1000)),
+                        ("Network round trip", format!("{} ± {} ms", stats.rtt_ms, stats.rtt_var_ms)),
+                        ("Packet loss", format!("{:.2}%", stats.loss_pct)),
+                        ("Host processing", format!("{:.2} ms", stats.host_ms)),
+                        ("Frame assembly", format!("{:.2} ms", stats.assembly_ms)),
+                        ("Decoder queue", format!("{:.2} ms", stats.queue_ms)),
+                        ("Decode time", format!("{:.2} ms", stats.decode_ms)),
+                        ("Decoder", stats.decoder.to_string()),
+                    ] {
+                        ui::caption(ui, name);
+                        ui.label(RichText::new(value).color(P.text));
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(8.0);
+                ui::caption(ui, "A still desktop uses fewer bits. Compare bitrate and FPS while moving a window or playing video.");
+                if !stats.audio.is_empty() { ui::caption(ui, &stats.audio); }
+                if ui::ghost_button(ui, "Copy diagnostics").clicked() {
+                    ctx.copy_text(format!("BroLink {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",
+                        env!("CARGO_PKG_VERSION"), path.label(), live.requested.0, live.requested.1,
+                        live.requested.2, live.settings.bitrate_kbps / 1000));
+                }
+            });
     }
 
     fn toolbar(
@@ -360,7 +439,7 @@ impl View {
                             let pill = ui::status_pill(ui, &path.label(), path.tone());
                             if path.relayed() {
                                 pill.on_hover_text(
-                                    "Packets go through a Tailscale relay, not straight to the PC. The lobby explains why and what would fix it.",
+                                    "This is the route currently in use. A relay does not impose a bitrate limit in BroLink.",
                                 );
                             } else if path.direct == Some(true) {
                                 pill.on_hover_text("Packets go straight to the PC.");
@@ -373,6 +452,11 @@ impl View {
                             if ui::danger_button(ui, "Disconnect").clicked() {
                                 actions.push(Action::Disconnect);
                             }
+                            if ui::ghost_button(ui, "Stream settings").clicked() {
+                                self.held.release_all(&live.input);
+                                self.set_captured(ctx, false);
+                                self.settings = Some(cfg.stream.clone());
+                            }
                             if overflow {
                                 self.more_menu(ui, ctx, env, actions);
                             } else {
@@ -380,7 +464,6 @@ impl View {
                                 self.fullscreen_button(ui, env, actions);
                                 self.stats_button(ui);
                                 self.keys_menu(ui, live, cfg, actions);
-                                self.quality_menu(ui, live, cfg, actions);
                                 self.mouse_menu(ui, ctx, live);
                             }
                         });
@@ -484,7 +567,6 @@ impl View {
             |ui| {
                 ui.set_min_width(180.0);
                 self.mouse_menu(ui, ctx, live);
-                self.quality_menu(ui, live, cfg, actions);
                 self.keys_menu(ui, live, cfg, actions);
                 if ui
                     .button(if self.stats { "Hide stats" } else { "Stats" })
@@ -525,7 +607,7 @@ impl View {
     fn stats_button(&mut self, ui: &mut egui::Ui) {
         if ui::ghost_button(ui, if self.stats { "Hide stats" } else { "Stats" })
             .on_hover_text(
-                "Frame rate, bitrate, round trip, loss and decode time in the status line",
+                "Show received and target bitrate, frame rate, network delay and decoder performance",
             )
             .clicked()
         {
@@ -614,52 +696,6 @@ impl View {
                 ui::caption(
                     ui,
                     "⌘C on the PC copies to this Mac; ⌘V pastes this Mac's text.",
-                );
-            }
-        });
-    }
-
-    fn quality_menu(
-        &mut self,
-        ui: &mut egui::Ui,
-        live: &Live,
-        cfg: &ClientConfig,
-        actions: &mut Vec<Action>,
-    ) {
-        let label = format!("Quality: {}", short_quality(live));
-        let current = if cfg.stream.quality == Quality::Auto {
-            QualityChoice::Auto
-        } else {
-            cfg.stream
-                .preset()
-                .map(QualityChoice::Preset)
-                .unwrap_or(QualityChoice::Auto)
-        };
-        let custom = cfg.stream.quality == Quality::Custom && cfg.stream.preset().is_none();
-        ui::menu_button(ui, &label, |ui| {
-            ui::caption(ui, "Changing this reconnects in a few seconds.");
-            let mark = |on: bool| if on { "● " } else { "   " };
-            let auto = format!(
-                "{}Auto · picks from the path ({})",
-                mark(current == QualityChoice::Auto && !custom),
-                live.path.label()
-            );
-            if ui.button(auto).clicked() {
-                actions.push(Action::Quality(QualityChoice::Auto));
-                ui.close_menu();
-            }
-            for p in Preset::ALL {
-                let on = !custom && current == QualityChoice::Preset(p);
-                let text = format!("{}{} · {}", mark(on), p.label(), p.describe());
-                if ui.button(text).clicked() {
-                    actions.push(Action::Quality(QualityChoice::Preset(p)));
-                    ui.close_menu();
-                }
-            }
-            if custom {
-                ui::caption(
-                    ui,
-                    format!("● Custom · {} (from Settings)", cfg.stream.describe()),
                 );
             }
         });
@@ -798,19 +834,14 @@ impl View {
             (secs / 60) % 60,
             secs % 60
         );
-        if stats.fps > 0.0 {
-            text.push_str(&format!(
-                "   {:.0} fps   {:.1} Mbps   {} ms rtt   {:.1}% loss   {:.1} ms decode   {}",
-                stats.fps, stats.mbps, stats.rtt_ms, stats.loss_pct, stats.decode_ms, stats.decoder
-            ));
-        }
-        if self.stats {
-            let path = env.path.clone().unwrap_or_else(|| live.path.clone());
-            text.push_str(&format!("   {}   {}", path.label(), live.quality_label()));
-            if !stats.audio.is_empty() {
-                text.push_str(&format!("   {}", stats.audio));
-            }
-        }
+        text.push_str(&format!(
+            "   {:.0} / {} fps   {:.1} / {} Mbps   {} ms RTT",
+            stats.fps,
+            live.requested.2,
+            stats.mbps,
+            live.settings.bitrate_kbps / 1000,
+            stats.rtt_ms
+        ));
         let font = egui::FontId::monospace(12.0);
         if in_gap {
             let y = video.bottom() + (screen.bottom() - video.bottom()) / 2.0;
@@ -863,7 +894,7 @@ impl View {
             )
         });
         let popup = ctx.memory(|m| m.any_popup_open());
-        let overlay = self.confirm.is_some() || self.confirm_install;
+        let overlay = self.confirm.is_some() || self.confirm_install || self.settings.is_some();
         let over_bar = pointer.is_some_and(|p| bar.is_some_and(|b| b.contains(p)));
         let over_overlay = pointer.is_some_and(|p| {
             ctx.layer_id_at(p)
@@ -1043,14 +1074,6 @@ fn pointer_on_stream(
 }
 
 /// "Auto · Smooth" → "Auto", "Custom · Sharp" → "Sharp", else "Custom".
-fn short_quality(live: &Live) -> String {
-    match (live.settings.quality, live.settings.preset()) {
-        (Quality::Auto, _) => "Auto".into(),
-        (Quality::Custom, Some(p)) => p.label().into(),
-        (Quality::Custom, None) => "Custom".into(),
-    }
-}
-
 /// Whether `host_version` is too old for `/v1/update`, with the release
 /// that an install through the stream would put on it.
 pub fn old_host(
@@ -1257,7 +1280,7 @@ mod tests {
             "Stats",
             "Hide stats",
             "Keys",
-            "Quality",
+            "Stream settings",
             "Mouse",
         ];
         let mut out = Vec::new();
@@ -1307,8 +1330,8 @@ mod tests {
             "narrow width must overflow into More"
         );
         assert!(
-            h.query_by_label_contains("Quality").is_none(),
-            "Quality sits in More, not on the bar"
+            h.query_by_label("Stream settings").is_some(),
+            "Stream settings stays on the bar at every width"
         );
         let rects = bar_control_rects(&h);
         assert_no_overlap(&rects);
@@ -1335,7 +1358,7 @@ mod tests {
             "More must use egui::popup so any_popup_open is true; a Background Area would fail this"
         );
         assert!(
-            h.query_by_label_contains("Quality").is_some()
+            h.query_by_label("Stream settings").is_some()
                 || h.query_by_label_contains("Keys").is_some()
                 || h.query_by_label("Stats").is_some(),
             "More lists the overflowed controls"
@@ -1359,7 +1382,7 @@ mod tests {
         h.run_steps(2);
         assert!(h.query_by_label("Disconnect").is_some());
         assert!(h.query_by_label_contains("More").is_none());
-        assert!(h.query_by_label_contains("Quality").is_some());
+        assert!(h.query_by_label("Stream settings").is_some());
         assert!(h.query_by_label_contains("Keys").is_some());
         assert_no_overlap(&bar_control_rects(&h));
     }

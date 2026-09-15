@@ -5,9 +5,8 @@
 //!
 //! Tailscale connects two machines directly when it can punch through both
 //! NATs; when it cannot, every packet goes through one of its DERP relays.
-//! A relay adds a detour and is shared, so a stream through one is laggy
-//! and thin however fast the two networks are. Nothing in BroLink can make
-//! a direct path exist, but it can say which router is in the way.
+//! Path latency and capacity are independent. Show the route as diagnostics;
+//! never turn a high RTT or the presence of a relay into a quality cap.
 
 use crate::config::{Quality, Resolution, StreamSettings};
 use brolink_core::api::NatReport;
@@ -86,42 +85,13 @@ impl Path {
     }
 }
 
-/// Resolution, frame rate and bitrate for a path, when the user left the
-/// choice to BroLink. DERP stays thin; a peer relay scales with round trip;
-/// a LAN can take whatever the PC gives.
-pub fn auto_values(path: &Path) -> (Resolution, u32, u32) {
-    let rtt = path.rtt_ms.unwrap_or(40);
-    match path_kind(path) {
-        Some(PathKind::PeerRelay) => match rtt {
-            0..=25 => (Resolution::P1440, 60, 40_000),
-            26..=80 => (Resolution::P1440, 60, 20_000),
-            81..=200 => (Resolution::P1080, 60, 12_000),
-            _ => (Resolution::P1080, 30, 4_000),
-        },
-        Some(PathKind::Derp) => (Resolution::P1080, 30, 4_000),
-        Some(PathKind::Direct) | None => {
-            if rtt >= 200 {
-                (Resolution::P1080, 30, 4_000)
-            } else if rtt >= 80 {
-                (Resolution::P1080, 60, 8_000)
-            } else if rtt >= 25 || path.direct.is_none() {
-                (Resolution::P1440, 60, 15_000)
-            } else {
-                (Resolution::P1440, 60, 30_000)
-            }
-        }
-    }
-}
-
-/// `settings` as the connection will use them: untouched when Custom,
-/// filled from [`auto_values`] when Auto.
-pub fn effective(settings: &StreamSettings, path: &Path) -> StreamSettings {
+/// Recommended starting quality. RTT measures delay, not throughput: neither
+/// a VPS relay nor a distant direct connection implies a bandwidth cap.
+pub fn effective(settings: &StreamSettings, _path: &Path) -> StreamSettings {
     let mut s = settings.clone();
     if s.quality == Quality::Auto {
-        let (r, fps, kbps) = auto_values(path);
-        s.resolution = r;
-        s.fps = fps;
-        s.bitrate_kbps = kbps;
+        s.resolution = Resolution::Native;
+        s.bitrate_kbps = 35_000;
     }
     s
 }
@@ -137,13 +107,13 @@ pub fn explain(
 ) -> Option<String> {
     let mut out = match path_kind(path) {
         Some(PathKind::PeerRelay) => format!(
-            "{pc} is reached through your relay, not directly. Every packet takes that detour; Auto sizes the stream to the round trip. "
+            "{pc} is reached through your relay, not directly. Every packet takes that detour, which adds delay but caps neither the bitrate nor the frame rate. "
         ),
         Some(PathKind::Derp) if path.relay.is_empty() => format!(
-            "{pc} is reached through a Tailscale relay, not directly. Every packet takes that detour and the relay holds the stream to a few megabits, whatever the two networks can do. "
+            "{pc} is reached through a Tailscale relay, not directly. Every packet takes that detour; the relay adds delay and its own throughput is shared. "
         ),
         Some(PathKind::Derp) => format!(
-            "{pc} is reached through Tailscale's {} relay, not directly. Every packet takes that detour and the relay holds the stream to a few megabits, whatever the two networks can do. ",
+            "{pc} is reached through Tailscale's {} relay, not directly. Every packet takes that detour; the relay adds delay and its own throughput is shared. ",
             derp_city(&path.relay)
         ),
         Some(PathKind::Direct) | None => return None,
@@ -309,170 +279,34 @@ mod tests {
     }
 
     #[test]
-    fn auto_asks_less_of_a_relay_and_more_of_a_lan() {
-        let relayed = Path {
-            direct: Some(false),
-            relay: "tok".into(),
-            rtt_ms: Some(150),
-            ..Default::default()
-        };
-        assert_eq!(auto_values(&relayed), (Resolution::P1080, 30, 4_000));
-        let far = Path {
-            direct: Some(true),
-            rtt_ms: Some(110),
-            ..Default::default()
-        };
-        assert_eq!(auto_values(&far), (Resolution::P1080, 60, 8_000));
-        let near = Path {
-            direct: Some(true),
-            rtt_ms: Some(30),
-            ..Default::default()
-        };
-        assert_eq!(auto_values(&near), (Resolution::P1440, 60, 15_000));
-        let lan = Path {
-            direct: Some(true),
-            rtt_ms: Some(2),
-            ..Default::default()
-        };
-        assert_eq!(auto_values(&lan), (Resolution::P1440, 60, 30_000));
-        // Unknown path: the middle, not the top.
-        assert_eq!(
-            auto_values(&Path::default()),
-            (Resolution::P1440, 60, 15_000)
-        );
-        // A very slow direct path is treated like a relay.
-        let slow = Path {
-            direct: Some(true),
-            rtt_ms: Some(400),
-            ..Default::default()
-        };
-        assert_eq!(auto_values(&slow).1, 30);
-
-        let custom = StreamSettings {
-            quality: Quality::Custom,
-            bitrate_kbps: 77_000,
-            ..Default::default()
-        };
-        assert_eq!(effective(&custom, &relayed).bitrate_kbps, 77_000);
-        let auto = StreamSettings::default();
-        let e = effective(&auto, &relayed);
-        assert_eq!(e.bitrate_kbps, 4_000);
-        assert_eq!(e.quality, Quality::Auto, "auto stays auto");
-        assert_eq!(e.app, "Desktop");
-    }
-
-    fn auto_path(kind: PathKind, rtt_ms: Option<u32>) -> Path {
-        match kind {
-            PathKind::Direct => Path {
-                direct: Some(true),
-                rtt_ms,
-                ..Default::default()
-            },
-            PathKind::Derp => Path {
-                direct: Some(false),
-                relay: "tok".into(),
-                rtt_ms,
-                ..Default::default()
-            },
-            PathKind::PeerRelay => Path {
-                direct: Some(false),
-                relay: "tok".into(),
-                peer_relay: "100.64.0.40:40000:vni:17".into(),
-                rtt_ms,
-            },
+    fn latency_and_relay_type_never_throttle_quality() {
+        for direct in [None, Some(true), Some(false)] {
+            for rtt_ms in [None, Some(2), Some(80), Some(200), Some(400)] {
+                for peer_relay in ["", "100.64.0.40:40000:vni:17"] {
+                    let path = Path {
+                        direct,
+                        rtt_ms,
+                        peer_relay: peer_relay.into(),
+                        ..Default::default()
+                    };
+                    let auto = StreamSettings {
+                        fps: 120,
+                        ..Default::default()
+                    };
+                    let s = effective(&auto, &path);
+                    assert_eq!(
+                        (s.resolution, s.fps, s.bitrate_kbps),
+                        (Resolution::Native, 120, 35_000)
+                    );
+                    let custom = StreamSettings {
+                        quality: Quality::Custom,
+                        bitrate_kbps: 150_000,
+                        ..auto
+                    };
+                    assert_eq!(effective(&custom, &path), custom);
+                }
+            }
         }
-    }
-
-    #[test]
-    fn auto_values_peer_relay_tiers_leave_direct_and_derp_unchanged() {
-        #[rustfmt::skip]
-        let rows = [
-            (PathKind::Direct, Some(0), Resolution::P1440, 60, 30_000, "direct 0"),
-            (PathKind::Direct, Some(24), Resolution::P1440, 60, 30_000, "direct 24"),
-            (PathKind::Direct, Some(25), Resolution::P1440, 60, 15_000, "direct 25"),
-            (PathKind::Direct, Some(79), Resolution::P1440, 60, 15_000, "direct 79"),
-            (PathKind::Direct, Some(80), Resolution::P1080, 60, 8_000, "direct 80"),
-            (PathKind::Direct, Some(199), Resolution::P1080, 60, 8_000, "direct 199"),
-            (PathKind::Direct, Some(200), Resolution::P1080, 30, 4_000, "direct 200"),
-            (PathKind::Direct, None, Resolution::P1440, 60, 15_000, "direct unknown rtt"),
-            (PathKind::Derp, Some(0), Resolution::P1080, 30, 4_000, "derp 0"),
-            (PathKind::Derp, Some(25), Resolution::P1080, 30, 4_000, "derp 25"),
-            (PathKind::Derp, Some(80), Resolution::P1080, 30, 4_000, "derp 80"),
-            (PathKind::Derp, Some(150), Resolution::P1080, 30, 4_000, "derp 150"),
-            (PathKind::Derp, Some(200), Resolution::P1080, 30, 4_000, "derp 200"),
-            (PathKind::Derp, None, Resolution::P1080, 30, 4_000, "derp unknown rtt"),
-            (PathKind::PeerRelay, Some(0), Resolution::P1440, 60, 40_000, "peer 0"),
-            (PathKind::PeerRelay, Some(25), Resolution::P1440, 60, 40_000, "peer 25"),
-            (PathKind::PeerRelay, Some(26), Resolution::P1440, 60, 20_000, "peer 26"),
-            (PathKind::PeerRelay, Some(80), Resolution::P1440, 60, 20_000, "peer 80"),
-            (PathKind::PeerRelay, Some(81), Resolution::P1080, 60, 12_000, "peer 81"),
-            (PathKind::PeerRelay, Some(200), Resolution::P1080, 60, 12_000, "peer 200"),
-            (PathKind::PeerRelay, Some(201), Resolution::P1080, 30, 4_000, "peer 201"),
-            (PathKind::PeerRelay, None, Resolution::P1440, 60, 20_000, "peer unknown rtt"),
-        ];
-        for (kind, rtt, res, fps, kbps, name) in rows {
-            assert_eq!(
-                auto_values(&auto_path(kind, rtt)),
-                (res, fps, kbps),
-                "{name}"
-            );
-        }
-
-        assert_eq!(
-            auto_values(&Path::default()),
-            (Resolution::P1440, 60, 15_000)
-        );
-        assert_eq!(
-            auto_values(&Path {
-                rtt_ms: Some(10),
-                ..Default::default()
-            }),
-            (Resolution::P1440, 60, 15_000),
-            "unknown path 10ms still middle"
-        );
-        assert_eq!(
-            auto_values(&Path {
-                direct: Some(false),
-                relay: "tok".into(),
-                rtt_ms: Some(60),
-                ..Default::default()
-            }),
-            (Resolution::P1080, 30, 4_000),
-            "old derp path"
-        );
-        assert_eq!(
-            auto_values(&Path {
-                direct: Some(true),
-                peer_relay: "100.64.0.40:40000:vni:17".into(),
-                rtt_ms: Some(2),
-                ..Default::default()
-            }),
-            (Resolution::P1440, 60, 30_000),
-            "direct outranks peer relay"
-        );
-        assert_eq!(
-            auto_values(&Path {
-                peer_relay: "100.64.0.40:40000:vni:17".into(),
-                rtt_ms: Some(60),
-                ..Default::default()
-            }),
-            (Resolution::P1440, 60, 20_000),
-            "early peer relay"
-        );
-
-        let custom = StreamSettings {
-            quality: Quality::Custom,
-            bitrate_kbps: 77_000,
-            ..Default::default()
-        };
-        assert_eq!(
-            effective(&custom, &auto_path(PathKind::PeerRelay, Some(10))).bitrate_kbps,
-            77_000
-        );
-        assert_eq!(
-            effective(&custom, &auto_path(PathKind::Derp, Some(10))).bitrate_kbps,
-            77_000
-        );
     }
 
     #[test]
