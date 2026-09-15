@@ -38,6 +38,9 @@ pub struct Service {
     wake: Mutex<WakeInfo>,
     /// When a magic packet for this PC last arrived.
     wake_seen: Mutex<Option<Instant>>,
+    /// Whether the virtual display lists every size a Mac can ask for;
+    /// `None` on a PC without one. See `virtual_display`.
+    virtual_display: Mutex<Option<bool>>,
     install: Mutex<Option<Install>>,
     streamer: Mutex<Streamer>,
     log: Mutex<VecDeque<String>>,
@@ -55,6 +58,7 @@ impl Service {
             tailscale: Mutex::new(Err("not checked yet".into())),
             wake: Mutex::new(WakeInfo::default()),
             wake_seen: Mutex::new(None),
+            virtual_display: Mutex::new(None),
             install: Mutex::new(None),
             streamer: Mutex::new(Streamer::default()),
             log: Mutex::new(VecDeque::new()),
@@ -204,6 +208,30 @@ impl Service {
         } else {
             running && self.streamer.lock().api_ok
         };
+        // Apply the streaming profile on existing BroLink-managed installations,
+        // after any old app has ended. The marker survives panel/config saves.
+        if tick.is_multiple_of(6) && api_ok && install.as_ref().is_some_and(|i| i.kind == "BroLink")
+        {
+            if let Ok(dir) = brolink_core::config::data_dir() {
+                let marker = dir.join("stream-profile-v1");
+                if !marker.exists() {
+                    let api = Api {
+                        user: &cfg.sunshine_user,
+                        pass: &cfg.sunshine_pass,
+                    };
+                    match api.upgrade_stream_profile() {
+                        Ok(true) => {
+                            if let Err(e) = std::fs::write(&marker, "1") {
+                                self.log(format!("could not save stream profile version: {e}"));
+                            }
+                            self.log("stream profile ready: match client display, full bitrate, 60 fps minimum");
+                        }
+                        Ok(false) => {} // A running app owns the display until it ends.
+                        Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
+                    }
+                }
+            }
+        }
         // The encoder Sunshine picked and whether it could capture audio,
         // from its log; re-read now and then since Sunshine restarts on
         // its own after setup and every session tries the audio device.
@@ -283,6 +311,19 @@ impl Service {
                 }
                 *cur = w;
             }
+            let v = crate::virtual_display::probe();
+            let mut cur = self.virtual_display.lock();
+            if *cur != v {
+                match v {
+                    Some(true) => {
+                        self.log("the virtual display lists every size a Mac can ask for")
+                    }
+                    Some(false) => self
+                        .log("the virtual display is missing sizes a Mac can ask for; run setup"),
+                    None => {}
+                }
+                *cur = v;
+            }
         }
     }
 
@@ -352,6 +393,11 @@ impl Service {
         }
         if wake.fast_startup == Some(true) {
             setup.push("Fast Startup is on, so the PC cannot be woken after a shutdown.".into());
+        }
+        if *self.virtual_display.lock() == Some(false) {
+            setup.push(
+                "The virtual display does not list every screen size a Mac can ask for.".into(),
+            );
         }
         Status {
             app: "brolink".into(),

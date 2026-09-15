@@ -50,6 +50,18 @@ extern "C" {
     static kCFTypeDictionaryKeyCallBacks: c_void;
     static kCFTypeDictionaryValueCallBacks: c_void;
     static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
+    static kCFBooleanTrue: CFTypeRef;
+    static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: CFStringRef;
+    static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder: CFStringRef;
+    static kVTDecompressionPropertyKey_RealTime: CFStringRef;
+    fn CFBooleanGetValue(value: CFTypeRef) -> u8;
+    fn VTSessionSetProperty(session: CFTypeRef, key: CFStringRef, value: CFTypeRef) -> OSStatus;
+    fn VTSessionCopyProperty(
+        session: CFTypeRef,
+        key: CFStringRef,
+        allocator: CFAllocatorRef,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
 
     fn CFRelease(cf: CFTypeRef);
     fn CFDictionaryCreate(
@@ -146,6 +158,7 @@ extern "C" {
 pub struct VideoToolbox {
     hevc: bool,
     full_range: bool,
+    hardware: bool,
     format: CMFormatDescriptionRef,
     session: VTDecompressionSessionRef,
     /// Parameter sets the current format description was built from.
@@ -164,6 +177,7 @@ impl VideoToolbox {
         Ok(Self {
             hevc,
             full_range: false,
+            hardware: false,
             format: ptr::null(),
             session: ptr::null(),
             params: Vec::new(),
@@ -269,6 +283,14 @@ impl VideoToolbox {
                 &kCFTypeDictionaryKeyCallBacks,
                 &kCFTypeDictionaryValueCallBacks,
             );
+            let spec = CFDictionaryCreate(
+                ptr::null(),
+                [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder].as_ptr(),
+                [kCFBooleanTrue].as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
             let record = VTDecompressionOutputCallbackRecord {
                 callback: Some(output),
                 refcon: ptr::null_mut(),
@@ -277,15 +299,36 @@ impl VideoToolbox {
             let status = VTDecompressionSessionCreate(
                 ptr::null(),
                 self.format,
-                ptr::null(),
+                spec,
                 attrs,
                 &record,
                 &mut session,
             );
+            CFRelease(spec);
             CFRelease(attrs);
             CFRelease(number);
             if status != 0 || session.is_null() {
                 bail!("VideoToolbox session failed ({status})");
+            }
+            let rc = VTSessionSetProperty(
+                session,
+                kVTDecompressionPropertyKey_RealTime,
+                kCFBooleanTrue,
+            );
+            if rc != 0 {
+                tracing::debug!("VideoToolbox realtime property: {rc}");
+            }
+            let mut value = ptr::null();
+            self.hardware = VTSessionCopyProperty(
+                session,
+                kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                ptr::null(),
+                &mut value,
+            ) == 0
+                && !value.is_null()
+                && CFBooleanGetValue(value) != 0;
+            if !value.is_null() {
+                CFRelease(value);
             }
             self.session = session;
         }
@@ -469,10 +512,11 @@ impl Decoder for VideoToolbox {
     }
 
     fn name(&self) -> &'static str {
-        if self.hevc {
-            "VideoToolbox HEVC"
-        } else {
-            "VideoToolbox H.264"
+        match (self.hevc, self.hardware) {
+            (true, true) => "HEVC · hardware",
+            (false, true) => "H.264 · hardware",
+            (true, false) => "HEVC · software",
+            (false, false) => "H.264 · software",
         }
     }
 }

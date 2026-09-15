@@ -3,7 +3,8 @@
 //! Everything that needs elevation is done by a single PowerShell script
 //! behind a single UAC prompt: install the bundled Sunshine if none is
 //! present, give it the login BroLink will use, open the control port to the
-//! tailnet, turn Fast Startup off and arm the network card for Wake-on-LAN.
+//! tailnet, list the Mac screen sizes on the virtual display, turn Fast
+//! Startup off and arm the network card for Wake-on-LAN.
 //! Each step logs and carries on, so one failure does not undo the others;
 //! the service re-probes afterwards and the setup card says what is still
 //! missing.
@@ -72,8 +73,16 @@ pub const UDP_RULE: &str = "BroLink Streaming UDP";
 /// *and* desktop toasts (there is no separate toast key); `origin_web_ui_allowed
 /// = pc` is localhost-only Web UI. `bind_address` is not set: it binds every
 /// socket, including GameStream.
-pub const ENGINE_CONF: &[(&str, &str)] =
-    &[("system_tray", "disabled"), ("origin_web_ui_allowed", "pc")];
+pub const ENGINE_CONF: &[(&str, &str)] = &[
+    ("system_tray", "disabled"),
+    ("origin_web_ui_allowed", "pc"),
+    ("dd_configuration_option", "ensure_active"),
+    ("dd_resolution_option", "auto"),
+    ("dd_refresh_rate_option", "auto"),
+    ("dd_config_revert_on_disconnect", "enabled"),
+    ("max_bitrate", "0"),
+    ("minimum_fps_target", "60"),
+];
 
 #[cfg(test)]
 fn conf_key(line: &str) -> Option<&str> {
@@ -456,7 +465,7 @@ if ($dir) {{
     netsh advfirewall firewall add rule name="{tcp_rule}" dir=in action=allow protocol=TCP localport=47984,47989,48010 remoteip=100.64.0.0/10 program="$engineExe" | Out-Null
     netsh advfirewall firewall add rule name="{udp_rule}" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 program="$engineExe" | Out-Null
 }}
-Step "Turning Fast Startup off: a PC shut down with it on cannot be woken"
+{virtual_display}Step "Turning Fast Startup off: a PC shut down with it on cannot be woken"
 Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord
 Step "Never idle-sleep when plugged in, so Tailscale stays up from anywhere"
 powercfg /change standby-timeout-ac 0
@@ -481,6 +490,11 @@ exit 0
         tcp_rule = TCP_RULE,
         udp_rule = UDP_RULE,
         adapter = adapter,
+        virtual_display = if p.dry_run {
+            String::new()
+        } else {
+            crate::virtual_display::setup_ps()
+        },
     )
 }
 
@@ -789,6 +803,34 @@ mod tests {
                 r#"throw "the {SERVICE_DISPLAY} service did not start""#
             )),
             "a service that never runs is an error, not a silent success:\n{s}"
+        );
+    }
+
+    #[test]
+    fn the_virtual_display_learns_every_size_a_mac_can_ask_for() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, false));
+        // A copy to try on a real PC: BROLINK_DUMP_SETUP=/tmp/setup.ps1.
+        if let Ok(path) = std::env::var("BROLINK_DUMP_SETUP") {
+            std::fs::write(path, &s).expect("dump the script");
+        }
+        let body = code(&s);
+        let step = find_in_body(&body, "Listing the sizes a Mac can ask for").expect("step");
+        let fast = find_in_body(&body, "Turning Fast Startup off").expect("fast startup");
+        let ports = find_in_body(&body, "Opening the streaming ports").expect("ports");
+        assert!(
+            ports < step && step < fast,
+            "after the engine, before the power steps"
+        );
+        assert!(s.contains("@(3024,1964)"), "{s}");
+        assert!(s.contains("pnputil /restart-device"), "{s}");
+        let dry = script(&Plan {
+            dry_run: true,
+            ..plan(&exe, false)
+        });
+        assert!(
+            !dry.contains("pnputil /restart-device") && !dry.contains("vdd_settings"),
+            "a dry run changes no display:\n{dry}"
         );
     }
 
