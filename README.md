@@ -23,11 +23,11 @@ signed in to the same Tailscale account as the PC.
    first time, it pairs with the PC by itself: the PIN goes to BroLink Host
    over Tailscale, which enters it for you.
 3. The desktop appears, full screen by default. A toolbar above the picture
-   has the stream details, whether the path is direct or relayed, a
-   **Quality** menu (Auto picks from the path), mouse capture, a **Keys**
-   menu for Ctrl+Alt+Del and friends and what the Command key does, stats,
-   full screen, the PC's power menu and **Disconnect**. The clipboard
-   follows you both ways.
+   has the stream details, whether the path is direct or relayed, mouse
+   capture, a **Keys** menu for Ctrl+Alt+Del and friends and what the
+   Command key does, stats, full screen, the PC's power menu, **Stream
+   settings** (the default asks for this Mac's own screen size at 35 Mbps,
+   on every path) and **Disconnect**. The clipboard follows you both ways.
 4. Leave the PC on if you want to connect from anywhere. Asleep, Tailscale
    is asleep too: this Mac can wake it only from that PC's own network
    (or if the router forwards UDP 9). Settings can offer sleep after a

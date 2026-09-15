@@ -24,9 +24,18 @@ streaming.
      archive is not beside the exe), and gives its executables BroLink's
      name and icon so Task Manager and the volume mixer show "BroLink
      Streaming" (their copyright and licence strings are kept);
+   - writes the engine's settings: tray and toasts off, web UI on loopback
+     only, the PC's display switched to the size and frame rate a Mac asks
+     for and put back at disconnect, no bitrate ceiling, and frames kept
+     flowing while the desktop is still;
    - gives BroLink a login to the engine and restarts the engine service;
    - adds firewall rules: TCP 47850 inbound from `100.64.0.0/10` only, UDP 9
      for the wake-packet listener, and the streaming ports from the tailnet;
+   - on a PC with the [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver),
+     lists every screen size a Mac can ask for in its `vdd_settings.xml`
+     (a minimal file when there is none; everything else in it is kept)
+     and restarts the display, so the engine can switch the PC to the
+     Mac's size;
    - turns Fast Startup off (`HiberbootEnabled = 0`);
    - on the adapter that has the default route, enables wake on magic
      packet and writes the driver keywords `*WakeOnMagicPacket`,
@@ -47,9 +56,9 @@ configures the engine itself.
 
 The **This PC** card has a **Network** line from `tailscale netcheck`. "Hard
 NAT with no UPnP" means a Mac on another network can only reach this PC
-through a Tailscale relay, which adds a detour and holds the stream to a
-few megabits; the Mac shows the same thing as **Relayed via …** next to
-the PC. Turn UPnP (or NAT-PMP) on in the router, or forward a UDP port to
+through a Tailscale relay, which adds a detour. What the Mac asks for is
+the same either way, so a relayed stream is laggier, not blurrier; the Mac
+shows the same thing as **Relayed via …** next to the PC. Turn UPnP (or NAT-PMP) on in the router, or forward a UDP port to
 this PC, and Tailscale connects directly; IPv6 on both ends works too. The
 service logs the finding each time it changes.
 
@@ -119,9 +128,12 @@ Windows needs an active display for capture. If the connection works but the pic
 is black, attach a monitor or an HDMI/DisplayPort dummy plug, or install the signed
 [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases).
 It supplies a display even when the physical monitor is off and works with BroLink's
-bundled engine. Choose a resolution and refresh rate in Windows Display settings
-(1920×1080 at 60 Hz is a useful starting point), then restart the stream.
-Installing a display does not require pairing the Mac again.
+bundled engine. Setup lists every screen size a Mac can ask for in the driver's
+settings file, and the engine switches the virtual display to the Mac's size at
+each connect, so there is nothing to choose in Windows Display settings. If the
+driver was installed after setup, run **Set up this PC** again; the setup card
+says when sizes are missing. Installing a display does not require pairing the
+Mac again.
 
 ## Using an engine you installed yourself
 
@@ -141,6 +153,10 @@ itself. The **This PC** card shows whether it is present and offers
 
 ## Troubleshooting
 
+- **The picture is an enlarged, blurry desktop**: the PC's display could not
+  switch to the size the Mac asked for. On a PC with the Virtual Display
+  Driver, run setup again so that size is listed; a monitor only offers its
+  own sizes, and the stream is scaled from the nearest.
 - **Orange "Needs setup" that will not clear**: read `setup.log`. The
   usual causes are the UAC prompt being dismissed, or a driver that refuses
   the wake keywords.

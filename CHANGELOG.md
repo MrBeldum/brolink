@@ -4,7 +4,45 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## 3.2.0 (unreleased)
+## 3.3.0 (2026-09-15)
+
+- The stream is the Mac's screen. **Match screen** is the default: the PC
+  is asked for this display's own pixel size, and 1080p, 1440p and 4K now
+  cap the long edge while keeping the display's proportions, so nothing is
+  letterboxed or stretched. The engine switches the PC's display to the
+  size asked for (setup turns its display settings on, and the launch
+  request now allows it), and a session reconnects by itself when the Mac
+  moves to a different display.
+- Nothing lowers the quality for the route any more. Recommended quality
+  is 35 Mbps at this screen's size whether the path is direct, through
+  your relay or through Tailscale's; a long round trip adds delay, not a
+  bitrate or frame-rate cap. The engine's own bitrate ceiling is cleared
+  and it is asked to keep frames flowing while the desktop is still. A PC set up
+  by an earlier BroLink gets the same profile applied once by the service,
+  between sessions. The quick profiles are now Smooth (1080p · 60 fps ·
+  12 Mbps), Balanced (match screen · 60 · 35) and Sharp (match screen ·
+  60 · 65).
+- A PC whose only display is the Virtual Display Driver can only switch to
+  sizes that driver lists. Setup adds every size a Mac can ask for to its
+  `vdd_settings.xml` (a minimal file when there is none, everything else
+  kept) and restarts the display; the setup card says when sizes are
+  missing.
+- The Mac decoder is checked for hardware acceleration rather than assumed,
+  runs in real-time mode, decodes off the packet-receive thread, and the
+  window presents with one frame of latency. Stats name the decoder as
+  hardware or software.
+- One **Stream settings** panel, in the lobby and during a session: quick
+  profiles, picture quality, resolution, frame rate, bitrate target and
+  video format, with the exact size, rate and target it adds up to.
+  Applying mid-stream reconnects. **Stats** opens a Stream performance
+  window (received against target bitrate and frame rate, round trip,
+  loss, host, assembly, queue and decode times, decoder) with a copy
+  button; the status line always shows achieved against requested. The
+  lobby leads with your PCs and a Next session summary; connection
+  details fold away. The host panel has an Overview and a Settings view,
+  a Repair setup button and a Diagnostics fold with a copy-log button.
+
+## 3.2.0 (2026-09-15)
 
 - A private Tailscale peer relay you run yourself. `deploy/relay/` is a
   Docker kit for a VPS (UDP 40000, iptables above the cloud REJECT, state
