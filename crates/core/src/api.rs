@@ -131,7 +131,7 @@ pub struct Status {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Streamer {
-    /// "Sunshine" or "Apollo"; empty when neither is installed.
+    /// "BroLink", "Sunshine" or "Apollo"; empty when no engine is installed.
     pub kind: String,
     pub installed: bool,
     /// Its GameStream port answers.
