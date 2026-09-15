@@ -1,13 +1,15 @@
 //! The window: a list of PCs with a Connect button each, settings, and the
 //! stream screen once connected.
 
-use crate::config::{ClientConfig, Codec, Quality, Resolution};
+use crate::config::ClientConfig;
+#[cfg(test)]
+use crate::config::{Codec, Resolution};
 use crate::handover::{self, Handover};
 use crate::path;
 use crate::session::{
     self, Connect, Discovery, Live, Pc, PeerRelayServers, Progress, Step, Target,
 };
-use crate::stream::{self, Action, Env, QualityChoice};
+use crate::stream::{self, Action, Env};
 use crate::update;
 use brolink_core::api::PowerAction;
 use brolink_core::tailscale;
@@ -19,7 +21,7 @@ use semver::Version;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const COLUMN_WIDTH: f32 = 560.0;
+const COLUMN_WIDTH: f32 = 860.0;
 
 const RELAY_NONE: &str = "No relay on this network. Streams use Tailscale's default relay if a direct path is not available. You can run your own relay with the deploy kit.";
 const RELAY_READY: &str = "Using your network relay when a direct path is not available.";
@@ -67,6 +69,8 @@ pub struct ClientApp {
     /// An install of BroLink Host through the stream, while it runs and a
     /// little after.
     handover: Option<Handover>,
+    display_at_connect: (u32, u32),
+    display_change: Option<((u32, u32), Instant)>,
 }
 
 impl ClientApp {
@@ -118,6 +122,8 @@ impl ClientApp {
             video_help: Arc::default(),
             asked_about_video: false,
             handover: None,
+            display_at_connect: (0, 0),
+            display_change: None,
         }
     }
 
@@ -130,11 +136,13 @@ impl ClientApp {
         }
     }
 
-    fn native_pixels(ctx: &egui::Context) -> (u32, u32) {
-        let ppp = ctx.pixels_per_point();
+    pub(crate) fn native_pixels(ctx: &egui::Context) -> (u32, u32) {
+        let ppp = ctx
+            .input(|i| i.viewport().native_pixels_per_point)
+            .unwrap_or(ctx.pixels_per_point());
         let size = ctx
             .input(|i| i.viewport().monitor_size)
-            .unwrap_or(egui::vec2(2560.0, 1440.0));
+            .unwrap_or_else(|| ctx.screen_rect().size());
         let even = |v: f32| (((v * ppp).round() as u32) / 2) * 2;
         (even(size.x).max(640), even(size.y).max(400))
     }
@@ -148,6 +156,8 @@ impl ClientApp {
         self.last_pc = Some(pc.clone());
         self.asked_about_video = false;
         *self.video_help.lock() = None;
+        self.display_at_connect = Self::native_pixels(ctx);
+        self.display_change = None;
         session::connect(Connect {
             target,
             settings: self.cfg.stream.clone(),
@@ -414,12 +424,10 @@ impl eframe::App for ClientApp {
                             self.cfg.cmd_is_ctrl = !self.cfg.cmd_is_ctrl;
                             self.dirty = true;
                         }
-                        Action::Quality(choice) => {
-                            match choice {
-                                QualityChoice::Auto => self.cfg.stream.quality = Quality::Auto,
-                                QualityChoice::Preset(p) => self.cfg.stream.apply_preset(p),
-                            }
+                        Action::ApplySettings(settings) => {
+                            self.cfg.stream = settings;
                             self.dirty = true;
+                            self.restart_capture = true;
                             self.reconnect = self.last_pc.clone();
                             self.disconnect();
                         }
@@ -429,6 +437,22 @@ impl eframe::App for ClientApp {
                         }
                     }
                 }
+            }
+            let size = Self::native_pixels(ctx);
+            if size != self.display_at_connect && self.reconnect.is_none() {
+                match self.display_change {
+                    Some((candidate, at))
+                        if candidate == size && at.elapsed() >= Duration::from_secs(1) =>
+                    {
+                        self.restart_capture = true;
+                        self.reconnect = self.last_pc.clone();
+                        self.disconnect();
+                    }
+                    Some((candidate, _)) if candidate == size => {}
+                    _ => self.display_change = Some((size, Instant::now())),
+                }
+            } else {
+                self.display_change = None;
             }
             self.commit();
             return;
@@ -484,6 +508,18 @@ impl eframe::App for ClientApp {
                 ("Ready", Tone::Success)
             };
             self.brand.header(ui, "BroLink", |ui| {
+                if ui::ghost_button(
+                    ui,
+                    if self.settings_open {
+                        "Close settings"
+                    } else {
+                        "Settings"
+                    },
+                )
+                .clicked()
+                {
+                    self.settings_open = !self.settings_open;
+                }
                 ui::status_pill(ui, label, tone);
             });
         });
@@ -492,14 +528,6 @@ impl eframe::App for ClientApp {
             // The button first, so a long login is cut rather than pushing
             // it out of the window.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if self.settings_open {
-                    "Close settings"
-                } else {
-                    "Settings"
-                };
-                if ui::ghost_button(ui, label).clicked() {
-                    self.settings_open = !self.settings_open;
-                }
                 let mut line = format!("v{}", env!("CARGO_PKG_VERSION"));
                 if !disc.login.is_empty() {
                     line.push_str(&format!(" · Tailscale as {}", disc.login));
@@ -529,12 +557,29 @@ impl eframe::App for ClientApp {
                         } else if let Step::Ended { error } = &prog.step {
                             self.ended_card(ui, &prog, error.as_deref());
                         }
-                        self.pcs_card(ui, ctx, &disc, &prog);
-                        self.path_notices(ui, &disc);
-                        self.key_expiry_notices(ui, &disc);
                         if self.settings_open {
-                            self.relay_card(ui, &disc);
                             self.settings_card(ui, ctx, &prog);
+                            self.relay_card(ui, &disc);
+                        } else {
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Your workspace, anywhere.").font(ui::theme::semibold(30.0)).color(P.text));
+                            ui::caption(ui, "Choose a PC to open its desktop. Your display and quality settings follow you.");
+                            ui.add_space(14.0);
+                            self.pcs_card(ui, ctx, &disc, &prog);
+                            ui::titled_card(ui, "Next session", None, |ui| {
+                                let settings = path::effective(&self.cfg.stream, &path::Path::default());
+                                let (w, h) = settings.resolution.pixels(Self::native_pixels(ctx));
+                                ui.horizontal_wrapped(|ui| {
+                                    ui::status_pill(ui, &format!("{w} × {h}"), Tone::Info);
+                                    ui::status_pill(ui, &format!("{} fps", settings.fps), Tone::Neutral);
+                                    ui::status_pill(ui, &format!("{} Mbps target", settings.bitrate_kbps / 1000), Tone::Neutral);
+                                    if ui::ghost_button(ui, "Configure stream").clicked() { self.settings_open = true; }
+                                });
+                            });
+                            if !path_warnings(&disc).is_empty() {
+                                egui::CollapsingHeader::new("Connection details").show(ui, |ui| self.path_notices(ui, &disc));
+                            }
+                            self.key_expiry_notices(ui, &disc);
                         }
                         ui.add_space(10.0);
                     });
@@ -825,9 +870,9 @@ impl ClientApp {
                     }
                 }
                 if let (Some(_), Some(pc)) = (error, self.last_pc.clone()) {
-                    // A stream that died is usually one the path could not
-                    // carry; the smallest ask is the likeliest to hold.
-                    if ui::primary_button(ui, "Try again at Smooth").clicked() {
+                    // The lighter profile is the likeliest to hold if the
+                    // network, not the PC, ended the last one.
+                    if ui::primary_button(ui, "Try again at Smooth (1080p · 12 Mbps)").clicked() {
                         self.cfg.stream.apply_preset(crate::config::Preset::Smooth);
                         self.dirty = true;
                         self.reconnect = Some(pc.clone());
@@ -858,86 +903,11 @@ impl ClientApp {
             Some("Applied the next time you connect."),
             |ui| {
                 let native = Self::native_pixels(ctx);
+                if crate::settings::stream_controls(ui, &mut self.cfg.stream, native) {
+                    self.dirty = true;
+                }
+                ui::row_separator(ui);
                 let s = &mut self.cfg.stream;
-                ui::setting_row(
-                    ui,
-                    "Quality",
-                    Some("Auto picks resolution, frame rate and bitrate from the path to the PC each time you connect: less through a relay or across a long round trip, more on a LAN. Custom uses the values below. The toolbar's Quality menu switches while streaming."),
-                    |ui| {
-                        if ui::segmented(
-                            ui,
-                            &[(Quality::Auto, "Auto"), (Quality::Custom, "Custom")],
-                            &mut s.quality,
-                        ) {
-                            self.dirty = true;
-                        }
-                    },
-                );
-                ui::row_separator(ui);
-                let custom = s.quality == Quality::Custom;
-                let hint = format!(
-                "This screen is {}×{}. “This screen” is exact only with a virtual display on the PC; otherwise the PC's monitor is scaled.{}",
-                native.0, native.1,
-                if custom { "" } else { " Set by Auto." }
-            );
-                ui.add_enabled_ui(custom, |ui| {
-                    ui::setting_row(ui, "Resolution", Some(&hint), |ui| {
-                        if ui::segmented(
-                            ui,
-                            &[
-                                (Resolution::P1080, "1080p"),
-                                (Resolution::P1440, "1440p"),
-                                (Resolution::P2160, "4K"),
-                                (Resolution::Native, "This screen"),
-                            ],
-                            &mut s.resolution,
-                        ) {
-                            self.dirty = true;
-                        }
-                    });
-                    ui::row_separator(ui);
-                    ui::setting_row(ui, "Frame rate", None, |ui| {
-                        if ui::segmented(
-                            ui,
-                            &[(30u32, "30"), (60, "60"), (90, "90"), (120, "120")],
-                            &mut s.fps,
-                        ) {
-                            self.dirty = true;
-                        }
-                    });
-                    ui::row_separator(ui);
-                    ui::setting_row(
-                        ui,
-                        "Bitrate",
-                        Some("Higher is sharper; lower survives a slow uplink. Tailscale's default relay carries a few Mbps at best."),
-                        |ui| {
-                            let mut mbps = s.bitrate_kbps / 1000;
-                            if ui
-                                .add(egui::Slider::new(&mut mbps, 2..=150).suffix(" Mbps"))
-                                .changed()
-                            {
-                                s.bitrate_kbps = mbps * 1000;
-                                self.dirty = true;
-                            }
-                        },
-                    );
-                });
-                ui::row_separator(ui);
-                ui::setting_row(
-                    ui,
-                    "Codec",
-                    Some("Auto uses HEVC when the PC can encode it."),
-                    |ui| {
-                        if ui::segmented(
-                            ui,
-                            &[(Codec::Auto, "Auto"), (Codec::H264, "H.264")],
-                            &mut s.codec,
-                        ) {
-                            self.dirty = true;
-                        }
-                    },
-                );
-                ui::row_separator(ui);
                 if ui::toggle_row(
                     ui,
                     &mut s.fullscreen,
@@ -2154,7 +2124,7 @@ mod live_snapshot {
         let mut harness = egui_kittest::Harness::builder()
             .wgpu()
             .with_size(egui::vec2(1512.0, 982.0))
-            .with_pixels_per_point(1.0)
+            .with_pixels_per_point(2.0)
             .with_max_steps(8)
             .build_eframe({
                 let (disc, prog) = (disc.clone(), prog.clone());
@@ -2217,6 +2187,7 @@ mod live_snapshot {
         let mut decoded = 0;
         let mut black = None;
         let mut problem = None;
+        let mut sampled = 0;
         while start.elapsed() < Duration::from_secs(20) {
             harness.run_steps(1);
             let step = prog.lock().step.clone();
@@ -2225,6 +2196,11 @@ mod live_snapshot {
             }
             if let Some(live) = harness.state().live.lock().as_ref() {
                 decoded = live.frames.seq();
+                let second = start.elapsed().as_secs();
+                if second > sampled {
+                    sampled = second;
+                    eprintln!("sample {second}s: {:?}", live.session.stats());
+                }
             }
             if step == Step::Streaming
                 && decoded > 30

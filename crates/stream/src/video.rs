@@ -103,9 +103,9 @@ pub fn supported_formats() -> i32 {
 
 /// `CAPABILITY_*` bits for this platform's decoder.
 ///
-/// VideoToolbox decodes synchronously in a few milliseconds, so frames can
-/// be handed to it straight from the receive thread (no queue, one hop
-/// less of latency), and its HEVC decoder keeps enough reference frames
+/// Decode on the protocol's bounded decoder worker. Synchronous hardware
+/// decode and CPU texture copies must not stall UDP reception. HEVC keeps
+/// enough reference frames
 /// for the host to repair a lost frame by referencing an older one
 /// instead of sending a whole keyframe, which on a slow link is the
 /// difference between a hiccup and a two-second freeze. H.264 reference
@@ -113,8 +113,7 @@ pub fn supported_formats() -> i32 {
 pub fn capabilities() -> i32 {
     #[cfg(target_os = "macos")]
     {
-        crate::ffi::CAPABILITY_DIRECT_SUBMIT
-            | crate::ffi::CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC
+        crate::ffi::CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC
     }
     #[cfg(not(target_os = "macos"))]
     {

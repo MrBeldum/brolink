@@ -36,6 +36,7 @@ pub struct HostApp {
     brand: ui::Brand,
     confirm_unpair: Option<String>,
     notices_open: bool,
+    settings_open: bool,
     busy_since: Option<Instant>,
     /// The engine archive sits beside the exe, so setup needs no download.
     bundled_engine: bool,
@@ -58,6 +59,7 @@ impl HostApp {
             brand: ui::Brand::new(&cc.egui_ctx),
             confirm_unpair: None,
             notices_open: false,
+            settings_open: false,
             busy_since: None,
             bundled_engine: std::env::current_exe().is_ok_and(|e| setup::bundled_engine(&e)),
         }
@@ -149,6 +151,18 @@ impl eframe::App for HostApp {
         ui::top_bar(ctx, "top", |ui| {
             let (label, tone) = pill(status.as_ref(), service_error.as_deref());
             self.brand.header(ui, "BroLink Host", |ui| {
+                if ui::ghost_button(
+                    ui,
+                    if self.settings_open {
+                        "Overview"
+                    } else {
+                        "Settings"
+                    },
+                )
+                .clicked()
+                {
+                    self.settings_open = !self.settings_open;
+                }
                 ui::status_pill(ui, label, tone);
             });
         });
@@ -186,11 +200,20 @@ impl eframe::App for HostApp {
                                     setup_result.as_ref(),
                                     &setup_log,
                                 );
-                                self.pc_card(ui, s, gamepad);
-                                self.paired_card(ui, &clients);
-                                self.settings_card(ui);
-                                ui::titled_card(ui, "Log", None, |ui| {
+                                if self.settings_open {
+                                    self.settings_card(ui);
+                                    ui::titled_card(ui, "Repair streaming", Some("Reapply display matching and remove stale bitrate limits. Setup preserves paired Macs."), |ui| {
+                                        if ui.add_enabled(!setup_running, egui::Button::new("Repair setup")).clicked() { self.start_setup(s); }
+                                    });
+                                } else {
+                                    ui.label(egui::RichText::new(&s.name).font(ui::theme::semibold(28.0)).color(P.text));
+                                    ui::caption(ui, "Your desktop is available to your Macs through Tailscale.");
+                                    self.pc_card(ui, s, gamepad);
+                                    self.paired_card(ui, &clients);
+                                }
+                                ui::collapsible(ui, "host-diagnostics", "Diagnostics", false, |ui| {
                                     ui::log_view(ui, "host_log", &s.log, 200.0);
+                                    if ui::ghost_button(ui, "Copy log").clicked() { ui.ctx().copy_text(s.log.join("\n")); }
                                 });
                             }
                             None => {
@@ -460,7 +483,7 @@ impl HostApp {
                 ui,
                 &mut self.cfg.power_allowed,
                 "Let a paired Mac sleep, restart, or shut down this PC",
-                Some("Only a Mac on your own Tailscale account can ask. Asleep, the PC wakes from the Mac in seconds."),
+                Some("Only devices on your Tailscale account can ask. Waking a sleeping PC requires access to its local network."),
             ) {
                 self.dirty = true;
             }

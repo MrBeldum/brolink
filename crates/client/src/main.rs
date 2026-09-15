@@ -8,6 +8,7 @@ mod handover;
 mod input;
 mod path;
 mod session;
+mod settings;
 mod stream;
 mod update;
 mod video;
@@ -32,6 +33,10 @@ fn main() -> anyhow::Result<()> {
             }),
         renderer: eframe::Renderer::Wgpu,
         vsync: true,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

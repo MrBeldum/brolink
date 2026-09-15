@@ -68,6 +68,8 @@ pub struct Stats {
     pub rtt_var_ms: u32,
     pub decode_ms: f32,
     pub host_ms: f32,
+    pub assembly_ms: f32,
+    pub queue_ms: f32,
     pub width: u32,
     pub height: u32,
     pub decoder: &'static str,
@@ -491,8 +493,8 @@ unsafe extern "C" fn video_frame(
     frame_type: c_int,
     _frame_number: c_int,
     host_latency: u16,
-    _receive_us: u64,
-    _enqueue_us: u64,
+    receive_us: u64,
+    enqueue_us: u64,
 ) -> c_int {
     let inner = ctx(p);
     if data.is_null() || len <= 0 {
@@ -503,9 +505,16 @@ unsafe extern "C" fn video_frame(
     let Some(dec) = guard.as_mut() else {
         return ffi::DR_OK;
     };
+    let now_us = ffi::LiGetMicroseconds();
     let t = Instant::now();
     let result = dec.decode(bytes, frame_type == ffi::FRAME_TYPE_IDR);
     let decode_us = t.elapsed().as_micros() as u64;
+    {
+        let mut stats = inner.stats.lock();
+        stats.decoder = dec.name();
+        stats.assembly_ms = enqueue_us.saturating_sub(receive_us) as f32 / 1000.0;
+        stats.queue_ms = now_us.saturating_sub(enqueue_us) as f32 / 1000.0;
+    }
     drop(guard);
     match result {
         Ok(Some(frame)) => {
