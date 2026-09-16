@@ -11,6 +11,7 @@ mod openh264;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
+#[derive(Default)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
@@ -21,7 +22,33 @@ pub struct Frame {
     pub full_range: bool,
 }
 
+/// Drawn frames whose buffers are kept for the decoder to fill again.
+const SPARES: usize = 3;
+
 impl Frame {
+    /// Fill this frame's buffers from raw planes, keeping the allocations
+    /// when they are large enough already. A 3024×1964 frame is nine
+    /// megabytes; taking fresh pages for each one at 60 fps costs the
+    /// decoder thread milliseconds it does not have.
+    /// `y` and `uv` are each a plane and its stride.
+    pub fn fill(
+        &mut self,
+        (width, height): (u32, u32),
+        (y, y_stride): (&[u8], usize),
+        (uv, uv_stride): (&[u8], usize),
+        full_range: bool,
+    ) {
+        self.width = width;
+        self.height = height;
+        self.y_stride = y_stride;
+        self.uv_stride = uv_stride;
+        self.full_range = full_range;
+        self.y.clear();
+        self.y.extend_from_slice(y);
+        self.uv.clear();
+        self.uv.extend_from_slice(uv);
+    }
+
     /// Check visible NV12 pixels, excluding row padding. A completely black
     /// capture can still be a valid, successfully decoded video stream.
     pub fn is_black(&self) -> bool {
@@ -57,15 +84,21 @@ impl Frame {
 
 /// The newest decoded frame, replaced rather than queued: a renderer that
 /// falls behind shows the latest picture instead of catching up on old ones.
+/// Frames the renderer has drawn come back through [`FrameSlot::recycle`]
+/// and go out again through [`FrameSlot::spare`], so the decoder fills the
+/// same few buffers over and over.
 #[derive(Default)]
 pub struct FrameSlot {
     latest: Mutex<Option<Frame>>,
     seq: AtomicU64,
+    spare: Mutex<Vec<Frame>>,
 }
 
 impl FrameSlot {
     pub fn publish(&self, frame: Frame) {
-        *self.latest.lock() = Some(frame);
+        if let Some(undrawn) = self.latest.lock().replace(frame) {
+            self.recycle(undrawn);
+        }
         self.seq.fetch_add(1, Ordering::Release);
     }
 
@@ -78,14 +111,30 @@ impl FrameSlot {
         self.seq.load(Ordering::Acquire)
     }
 
+    /// A drawn frame's buffers, for the decoder to fill again.
+    pub fn recycle(&self, frame: Frame) {
+        let mut spare = self.spare.lock();
+        if spare.len() < SPARES {
+            spare.push(frame);
+        }
+    }
+
+    /// Buffers that have come back from the renderer, if any.
+    pub fn spare(&self) -> Option<Frame> {
+        self.spare.lock().pop()
+    }
+
     pub fn clear(&self) {
         *self.latest.lock() = None;
+        self.spare.lock().clear();
     }
 }
 
 pub trait Decoder: Send {
     /// One access unit in Annex B. `None` when the decoder needs more data.
-    fn decode(&mut self, annexb: &[u8], idr: bool) -> Result<Option<Frame>>;
+    /// `spare` is a drawn frame whose buffers may be filled instead of
+    /// allocating new ones.
+    fn decode(&mut self, annexb: &[u8], idr: bool, spare: Option<Frame>) -> Result<Option<Frame>>;
     fn name(&self) -> &'static str;
 }
 
@@ -254,5 +303,44 @@ mod tests {
         assert_eq!(slot.seq(), 2);
         assert_eq!(slot.take().unwrap().width, 2);
         assert!(slot.take().is_none());
+        // The frame nobody drew went back for the decoder to fill again.
+        assert_eq!(slot.spare().map(|f| f.width), Some(1));
+        assert!(slot.spare().is_none());
+        for w in 10..20 {
+            slot.recycle(f(w));
+        }
+        let kept: Vec<u32> = std::iter::from_fn(|| slot.spare().map(|f| f.width)).collect();
+        assert_eq!(
+            kept.len(),
+            SPARES,
+            "a few spares, not every frame ever drawn"
+        );
+        slot.recycle(f(1));
+        slot.clear();
+        assert!(slot.spare().is_none(), "a new session starts with nothing");
+    }
+
+    #[test]
+    fn fill_reuses_the_buffers_it_is_given() {
+        let mut frame = Frame {
+            y: Vec::with_capacity(64),
+            uv: Vec::with_capacity(32),
+            ..Default::default()
+        };
+        let (y_ptr, uv_ptr) = (frame.y.as_ptr(), frame.uv.as_ptr());
+        frame.fill((4, 4), (&[7; 16], 4), (&[128; 8], 4), true);
+        assert_eq!(
+            (frame.width, frame.height, frame.y_stride, frame.uv_stride),
+            (4, 4, 4, 4)
+        );
+        assert!(frame.full_range);
+        assert_eq!(frame.y, [7; 16]);
+        assert_eq!(frame.uv, [128; 8]);
+        assert_eq!(frame.y.as_ptr(), y_ptr, "no new allocation for the Y plane");
+        assert_eq!(
+            frame.uv.as_ptr(),
+            uv_ptr,
+            "no new allocation for the UV plane"
+        );
     }
 }

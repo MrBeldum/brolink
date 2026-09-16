@@ -361,6 +361,8 @@ impl Drop for VideoToolbox {
 
 #[derive(Default)]
 struct Decoded {
+    /// Buffers to fill, from a frame already drawn.
+    spare: Option<Frame>,
     frame: Option<Frame>,
     status: OSStatus,
     error: Option<&'static str>,
@@ -404,17 +406,14 @@ unsafe extern "C" fn output(
     let yp = CVPixelBufferGetBaseAddressOfPlane(image, 0);
     let uvp = CVPixelBufferGetBaseAddressOfPlane(image, 1);
     if !yp.is_null() && !uvp.is_null() {
-        let y = std::slice::from_raw_parts(yp, ys * h).to_vec();
-        let uv = std::slice::from_raw_parts(uvp, uvs * uvh).to_vec();
-        out.frame = Some(Frame {
-            width: w as u32,
-            height: h as u32,
-            y,
-            y_stride: ys,
-            uv,
-            uv_stride: uvs,
-            full_range: format == K_CV_PIXEL_FORMAT_420F,
-        });
+        let mut frame = out.spare.take().unwrap_or_default();
+        frame.fill(
+            (w as u32, h as u32),
+            (std::slice::from_raw_parts(yp, ys * h), ys),
+            (std::slice::from_raw_parts(uvp, uvs * uvh), uvs),
+            format == K_CV_PIXEL_FORMAT_420F,
+        );
+        out.frame = Some(frame);
     } else {
         out.error = Some("VideoToolbox picture has no pixel data");
     }
@@ -422,7 +421,7 @@ unsafe extern "C" fn output(
 }
 
 impl Decoder for VideoToolbox {
-    fn decode(&mut self, annexb: &[u8], _idr: bool) -> Result<Option<Frame>> {
+    fn decode(&mut self, annexb: &[u8], _idr: bool, spare: Option<Frame>) -> Result<Option<Frame>> {
         let nals = nal_units(annexb);
         let mut sets = Vec::new();
         self.avcc.clear();
@@ -446,7 +445,10 @@ impl Decoder for VideoToolbox {
             return Ok(None);
         }
         let len = self.avcc.len();
-        let mut decoded = Decoded::default();
+        let mut decoded = Decoded {
+            spare,
+            ..Default::default()
+        };
         unsafe {
             let mut block: CMBlockBufferRef = ptr::null();
             let status = CMBlockBufferCreateWithMemoryBlock(
@@ -531,13 +533,21 @@ mod tests {
         let encoded = include_bytes!("../../tests/fixtures/gray-bars.h264");
         let mut decoder = VideoToolbox::new(crate::ffi::VIDEO_FORMAT_H264, 64, 64).unwrap();
         let frame = decoder
-            .decode(encoded, true)
+            .decode(encoded, true, None)
             .unwrap()
             .expect("decoded picture");
         assert_eq!((frame.width, frame.height), (64, 64));
         assert!(!frame.is_black());
         assert!(frame.y[16 * frame.y_stride + 32] >= 230);
         assert!(frame.y[48 * frame.y_stride + 32] <= 20);
+        // Given the drawn frame back, the decoder fills its buffers again.
+        let y_ptr = frame.y.as_ptr();
+        let again = decoder
+            .decode(encoded, true, Some(frame))
+            .unwrap()
+            .expect("decoded picture");
+        assert_eq!(again.y.as_ptr(), y_ptr, "the spare's buffer was reused");
+        assert!(again.y[16 * again.y_stride + 32] >= 230);
     }
 
     #[test]

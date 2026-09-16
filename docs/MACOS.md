@@ -77,20 +77,33 @@ xcrun stapler staple dist/BroLink.app
 
 ## While streaming
 
-The picture fills the window in this display's proportions, so with
-**Match screen** there is nothing to letterbox. In a window the toolbar
-sits above the picture; in full screen it drops down when the pointer
-touches the top edge (or sits in the top letterbox bar when a manual
-resolution leaves one). The status line, with the session clock, the
-frame rate and bitrate against what was asked for, and the round trip,
-sits below the picture, or over its bottom-left corner when there is no
-room.
+The picture fills the window and nothing else is drawn over it. With
+**Match screen** the picture is this display's own size, so there is no
+bar on any side; a window is resized to the stream's proportions when the
+session starts, for the same reason. A manual 16:9 size on a display of
+another shape leaves a bar above and below.
+
+**Ctrl+Alt** is the host key, as in VMware or VirtualBox. Press it and the
+mouse is freed and the toolbar drops over the top of the picture; press it
+again, or click the picture, and the toolbar goes away and the mouse is
+captured back. A menu or a question keeps the toolbar there until it is
+answered. The status line, with the session clock, the frame rate and
+bitrate against what was asked for, and the round trip, is drawn over the
+picture's bottom-left corner while **Stats** is open, or in the bar below
+the picture when a manual size leaves one.
+
+The mouse is captured by default: the Mac cursor is hidden and held in
+place and raw movement is sent, which is what games read for the camera
+(a game that ignores the cursor's position, such as Genshin Impact, turns
+only with this). The PC draws its own cursor in the picture, so only one
+pointer is ever visible. The **Mouse** menu can switch to **Free**, where
+the Mac cursor's position is sent 1:1 instead and nothing is captured.
 
 | Toolbar item | What it does |
 |--------------|--------------|
 | **● PC name · 1920×1080 · 60 fps · HEVC** | The stream as negotiated; the dot turns red while the connection is poor |
 | **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found to the PC and its round trip. Red means every packet goes through a Tailscale relay, which adds delay; the lobby's **Connection details** say why and what would give a direct path. What BroLink asks for is the same on every path |
-| **Mouse: free / captured** | Free: the Mac cursor moves 1:1 on the PC and leaves the window normally. Captured: the cursor is hidden and raw movement is sent, for games. **Ctrl+Alt** toggles |
+| **Mouse: captured / free** | Captured (the default): a click on the picture hides the cursor and sends raw movement, which games read; **Ctrl+Alt** frees it. Free: the Mac cursor's position is sent 1:1 and nothing is captured. The choice is remembered |
 | **Keys** | Ctrl+Alt+Del, Windows key, Alt+Tab, Esc, Print Screen; and the switch for what ⌘ does on the PC |
 | **Stats** | A Stream performance window: received against target bitrate and frame rate, round trip, packet loss, host, assembly, queue and decode times, and whether the decoder is hardware. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
@@ -149,7 +162,7 @@ details BroLink has learned; it sends the packet without connecting.
 |---------|-----------------|
 | Quick profiles | **Smooth** 1080p · 60 fps · 12 Mbps, **Balanced** match screen · 60 · 35, **Sharp** match screen · 60 · 65; **Reset** returns to Recommended |
 | Picture quality | **Recommended** (the default) asks for this screen's own size at 35 Mbps, on every path. **Manual** uses the rows below; changing the resolution or the bitrate switches to it |
-| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro). 1080p, 1440p and 4K cap the long edge and keep this display's proportions, so the picture always fills the window. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
+| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
 | Frame rate | 30 to 240; the PC's display is switched to match when it can |
 | Bitrate target | 2 to 150 Mbps. What arrives varies with what is on screen: a still desktop uses very little |
 | Video format | Auto (HEVC when the PC can encode it), HEVC, H.264 |

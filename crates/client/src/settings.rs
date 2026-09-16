@@ -27,10 +27,10 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         if ui::segmented(ui, &[(Quality::Auto, "Recommended"), (Quality::Custom, "Manual")], &mut s.quality) && s.quality == Quality::Auto { s.resolution = Resolution::Native; }
     });
     ui::row_separator(ui);
-    ui::setting_row(ui, "Resolution", Some("The stream follows this display’s proportions. Match screen requests its full pixel resolution."), |ui| {
+    ui::setting_row(ui, "Resolution", Some("Match screen is this display’s own pixel size, so the picture fills it exactly. 1080p, 1440p and 4K are the standard 16:9 sizes; on a display of another shape they leave a bar above and below."), |ui| {
         let mut resolution = s.resolution;
-        egui::ComboBox::from_id_salt("stream-resolution").selected_text(resolution.label()).show_ui(ui, |ui| {
-            for r in [Resolution::Native, Resolution::P1080, Resolution::P1440, Resolution::P2160] { ui.selectable_value(&mut resolution, r, r.label()); }
+        egui::ComboBox::from_id_salt("stream-resolution").selected_text(resolution.describe(native)).show_ui(ui, |ui| {
+            for r in [Resolution::Native, Resolution::P1080, Resolution::P1440, Resolution::P2160] { ui.selectable_value(&mut resolution, r, r.describe(native)); }
         });
         if resolution != s.resolution { s.resolution = resolution; s.quality = Quality::Custom; }
     });

@@ -1,8 +1,9 @@
-//! The stream screen: the PC's picture, letterboxed, with a toolbar in the
-//! bar above it and a status line in the bar below. In full screen on a
-//! display whose shape matches the stream, the toolbar slides in from the
-//! top edge instead. Short notices (clipboard, connection, an install in
-//! progress) appear under the toolbar and fade.
+//! The stream screen: the PC's picture filling the window, and nothing
+//! else until Ctrl+Alt is pressed. That frees the mouse and drops a toolbar
+//! over the top of the picture, the way a hypervisor's host key does; a
+//! click on the picture (or Ctrl+Alt again) hides it and captures the
+//! mouse back. Short notices (clipboard, connection, an install in
+//! progress) appear under the toolbar's place and fade.
 //!
 //! allow: SIZE_OK — one stream view; later UI tasks own any split.
 
@@ -49,6 +50,8 @@ pub enum Action {
     /// Install a new BroLink Host on the PC through the stream.
     InstallHost,
     ApplySettings(StreamSettings),
+    /// Whether a click on the picture captures the mouse.
+    MouseCapture(bool),
 }
 
 /// What the window knows that the stream screen should show.
@@ -74,17 +77,17 @@ struct Toast {
 }
 
 pub struct View {
+    /// The mouse is captured: hidden, held in place, raw movement sent.
     captured: bool,
     grabbed: bool,
+    /// Ctrl+Alt dropped the toolbar over the picture.
+    bar_shown: bool,
     stats: bool,
     settings: Option<StreamSettings>,
     held: Held,
     scroll: (f32, f32),
     motion: (f32, f32),
-    last_pointer: Instant,
-    bar_until: Instant,
-    /// Last measured toolbar height; auto-hide and the letterbox use this
-    /// instead of a stale [`BAR`].
+    /// Last measured toolbar height, so the notices sit under it.
     bar_h: f32,
     confirm: Option<PowerAction>,
     confirm_install: bool,
@@ -104,13 +107,12 @@ impl Default for View {
         Self {
             captured: false,
             grabbed: false,
+            bar_shown: false,
             stats: false,
             settings: None,
             held: Held::default(),
             scroll: (0.0, 0.0),
             motion: (0.0, 0.0),
-            last_pointer: Instant::now(),
-            bar_until: Instant::now() + Duration::from_secs(3),
             bar_h: BAR,
             confirm: None,
             confirm_install: false,
@@ -155,6 +157,7 @@ impl View {
             self.held.release_all(&l.input);
         }
         self.set_captured(ctx, false);
+        self.bar_shown = false;
         self.confirm = None;
         self.settings = None;
         self.confirm_install = false;
@@ -178,7 +181,12 @@ impl View {
                 egui::CursorGrab::None
             };
             ctx.send_viewport_cmd(ViewportCommand::CursorGrab(grab));
-            ctx.send_viewport_cmd(ViewportCommand::CursorVisible(!on));
+            // The cursor is hidden through `set_cursor_icon(None)` alone,
+            // every frame the pointer is on the picture. A
+            // `CursorVisible(true)` here would show it behind egui's
+            // back: egui only re-applies an icon when it changes, so the
+            // Mac cursor would stay on top of the PC's until the pointer
+            // left the window — two pointers.
         }
     }
 
@@ -193,43 +201,15 @@ impl View {
             (live.requested.0 as f32, live.requested.1 as f32)
         };
 
-        // Where the picture goes: everything, or everything under the bar.
-        let area = if env.fullscreen {
-            screen
-        } else {
-            Rect::from_min_max(
-                Pos2::new(screen.left(), screen.top() + self.bar_h),
-                screen.max,
-            )
-        };
-        let video = fit(area, vw / vh);
-        let top_gap = video.top() - screen.top();
+        // The picture fills the window, in its own proportions; the
+        // toolbar, when Ctrl+Alt has asked for it, lies over the top of it.
+        // A menu or a question keeps it there until it is answered.
+        let video = fit(screen, vw / vh);
         let bottom_gap = screen.bottom() - video.bottom();
-
-        let pointer = ctx.input(|i| i.pointer.latest_pos());
-        let now = Instant::now();
-        if ctx.input(|i| i.pointer.is_moving()) {
-            self.last_pointer = now;
-        }
-        // In full screen without a spare bar, the toolbar shows when the
-        // pointer touches the top edge and stays a moment after it leaves.
-        let docked = !env.fullscreen || top_gap >= self.bar_h - 6.0;
-        let mut bar_rect = if docked {
-            Some(Rect::from_min_size(
-                screen.min,
-                Vec2::new(screen.width(), self.bar_h),
-            ))
-        } else {
-            let at_edge = pointer.is_some_and(|p| p.y <= 4.0) && !self.captured;
-            if at_edge {
-                self.bar_until = now + Duration::from_millis(2500);
-            }
-            let hovering = pointer.is_some_and(|p| p.y <= self.bar_h + 4.0) && !self.captured;
-            let popup = ctx.memory(|m| m.any_popup_open());
-            (self.bar_until > now || hovering || popup || self.confirm.is_some())
-                .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)))
-        };
-        let floating = env.fullscreen && !docked;
+        let popup = ctx.memory(|m| m.any_popup_open());
+        let bar_visible = self.bar_shown || popup || self.confirm.is_some() || self.confirm_install;
+        let mut bar_rect = bar_visible
+            .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -275,7 +255,7 @@ impl View {
             });
 
         if let Some(rect) = bar_rect {
-            let measured = self.toolbar(ctx, rect, floating, env, &mut actions);
+            let measured = self.toolbar(ctx, rect, env, &mut actions);
             self.bar_h = measured.height().max(BAR);
             bar_rect = Some(Rect::from_min_size(
                 screen.min,
@@ -382,22 +362,15 @@ impl View {
         &mut self,
         ctx: &egui::Context,
         rect: Rect,
-        floating: bool,
         env: &Env<'_>,
         actions: &mut Vec<Action>,
     ) -> Rect {
         let live = env.live;
         let cfg = env.cfg;
         let overflow = rect.width() < OVERFLOW_BELOW;
-        let frame = if floating {
-            ui::overlay_frame()
-                .corner_radius(0)
-                .inner_margin(Margin::symmetric(12, 0))
-        } else {
-            Frame::new()
-                .fill(Color32::BLACK)
-                .inner_margin(Margin::symmetric(12, 0))
-        };
+        let frame = ui::overlay_frame()
+            .corner_radius(0)
+            .inner_margin(Margin::symmetric(12, 0));
         let path = env.path.clone().unwrap_or_else(|| live.path.clone());
         let bar = egui::Area::new(Id::new("stream-toolbar"))
             .fixed_pos(rect.min)
@@ -444,9 +417,7 @@ impl View {
                             } else if path.direct == Some(true) {
                                 pill.on_hover_text("Packets go straight to the PC.");
                             }
-                            if self.captured {
-                                ui::caption(ui, "Ctrl+Alt frees the mouse");
-                            }
+                            ui::caption(ui, "Ctrl+Alt hides this bar");
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui::danger_button(ui, "Disconnect").clicked() {
@@ -464,7 +435,7 @@ impl View {
                                 self.fullscreen_button(ui, env, actions);
                                 self.stats_button(ui);
                                 self.keys_menu(ui, live, cfg, actions);
-                                self.mouse_menu(ui, ctx, live);
+                                self.mouse_menu(ui, ctx, live, cfg, actions);
                             }
                         });
                     });
@@ -566,7 +537,7 @@ impl View {
             egui::popup::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
                 ui.set_min_width(180.0);
-                self.mouse_menu(ui, ctx, live);
+                self.mouse_menu(ui, ctx, live, cfg, actions);
                 self.keys_menu(ui, live, cfg, actions);
                 if ui
                     .button(if self.stats { "Hide stats" } else { "Stats" })
@@ -701,8 +672,15 @@ impl View {
         });
     }
 
-    fn mouse_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, live: &Live) {
-        let label = if self.captured {
+    fn mouse_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        live: &Live,
+        cfg: &ClientConfig,
+        actions: &mut Vec<Action>,
+    ) {
+        let label = if cfg.capture_mouse {
             "Mouse: captured"
         } else {
             "Mouse: free"
@@ -711,25 +689,26 @@ impl View {
             let mark = |on: bool| if on { "● " } else { "   " };
             if ui
                 .button(format!(
-                    "{}Free · the Mac cursor moves 1:1 on the PC",
-                    mark(!self.captured)
+                    "{}Captured · raw movement, which games read. A click on the picture captures; Ctrl+Alt frees",
+                    mark(cfg.capture_mouse)
                 ))
                 .clicked()
             {
-                if self.captured {
-                    self.toggle_capture(ctx, live);
+                if !cfg.capture_mouse {
+                    actions.push(Action::MouseCapture(true));
                 }
                 ui.close_menu();
             }
             if ui
                 .button(format!(
-                    "{}Captured · raw movement, for games (Ctrl+Alt frees it)",
-                    mark(self.captured)
+                    "{}Free · the Mac cursor's position is sent, 1:1 on the PC",
+                    mark(!cfg.capture_mouse)
                 ))
                 .clicked()
             {
-                if !self.captured {
-                    self.toggle_capture(ctx, live);
+                if cfg.capture_mouse {
+                    actions.push(Action::MouseCapture(false));
+                    self.release(ctx, live);
                 }
                 ui.close_menu();
             }
@@ -866,13 +845,57 @@ impl View {
         }
     }
 
-    fn toggle_capture(&mut self, ctx: &egui::Context, live: &Live) {
-        let on = !self.captured;
+    /// Capture the mouse and take the toolbar away: the picture is all.
+    fn grab(&mut self, ctx: &egui::Context, live: &Live) {
         self.held.release_all(&live.input);
-        self.set_captured(ctx, on);
-        if on {
-            self.bar_until = Instant::now();
+        self.motion = (0.0, 0.0);
+        self.set_captured(ctx, true);
+        self.bar_shown = false;
+    }
+
+    /// Give the mouse back.
+    fn release(&mut self, ctx: &egui::Context, live: &Live) {
+        self.held.release_all(&live.input);
+        self.set_captured(ctx, false);
+    }
+
+    /// Ctrl+Alt, the host key. From the picture it frees the mouse and
+    /// drops the toolbar; from the toolbar it hides it and, when capture
+    /// is on, takes the mouse back.
+    fn host_key(&mut self, ctx: &egui::Context, live: &Live, cfg: &ClientConfig) {
+        if self.captured || !self.bar_shown {
+            self.release(ctx, live);
+            self.bar_shown = true;
+        } else {
+            self.bar_shown = false;
+            if cfg.capture_mouse {
+                self.grab(ctx, live);
+            }
         }
+    }
+
+    /// The stream has just connected: take the mouse if the pointer is
+    /// here already, and say once how to get it back.
+    pub fn stream_started(&mut self, ctx: &egui::Context, live: &Live, capture: bool) {
+        // Capture as soon as the stream connects, whenever the window has
+        // focus, without waiting for the pointer to be over the picture. A
+        // game that reads raw relative motion (Genshin's camera, say) only
+        // gets it while captured; requiring the pointer to already sit on the
+        // picture meant a connect with the pointer elsewhere left the game
+        // deaf to the mouse until the user knew to click. Ctrl+Alt still frees
+        // it. The click-to-capture path stays for re-capturing after a free.
+        let focused = ctx.input(|i| i.focused);
+        if capture && focused {
+            self.grab(ctx, live);
+        }
+        self.toast(
+            Tone::Info,
+            if capture {
+                "Ctrl+Alt frees the mouse and shows the toolbar; a click on the picture captures it again."
+            } else {
+                "Ctrl+Alt shows and hides the toolbar."
+            },
+        );
     }
 
     /// Forward this frame's keyboard and mouse events to the PC.
@@ -925,7 +948,7 @@ impl View {
             self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
             if ctrl_alt && !self.capture_chord_held {
                 self.capture_chord_held = true;
-                self.toggle_capture(ctx, live);
+                self.host_key(ctx, live, cfg);
                 return;
             }
             // A paste's chord releases the modifier it pressed once the text
@@ -997,6 +1020,15 @@ impl View {
                 Event::PointerButton {
                     button, pressed, ..
                 } if self.captured || over_video || (!pressed && self.held.any_down()) => {
+                    // A click on the picture puts the toolbar away and, when
+                    // capture is on, takes the mouse. The click itself still
+                    // goes to the PC: what was clicked on is what was meant.
+                    if pressed && over_video && !self.captured {
+                        self.bar_shown = false;
+                        if cfg.capture_mouse {
+                            self.grab(ctx, live);
+                        }
+                    }
                     if let Some(b) = input::button(button) {
                         self.held.button(input, b, pressed);
                     }
@@ -1111,7 +1143,7 @@ mod tests {
         assert!((v.height() - 850.0).abs() <= 1.0);
         assert!(
             v.top() > 60.0,
-            "there is a bar for the toolbar: {}",
+            "a 16:9 picture on a 16:10 screen leaves a bar above: {}",
             v.top()
         );
         let tall = fit(
@@ -1252,6 +1284,14 @@ mod tests {
         view.show(ctx, &env);
     }
 
+    /// A view with the toolbar dropped, as Ctrl+Alt leaves it.
+    fn view_with_bar() -> View {
+        View {
+            bar_shown: true,
+            ..View::default()
+        }
+    }
+
     fn harness(size: Vec2) -> egui_kittest::Harness<'static, Fixture> {
         egui_kittest::Harness::builder()
             .with_size(size)
@@ -1260,7 +1300,7 @@ mod tests {
             .build_state(
                 paint,
                 Fixture {
-                    view: View::default(),
+                    view: view_with_bar(),
                     live: None,
                     cfg: ClientConfig::default(),
                     fullscreen: false,
@@ -1407,7 +1447,7 @@ mod tests {
             .build_state(
                 paint,
                 Fixture {
-                    view: View::default(),
+                    view: view_with_bar(),
                     live: None,
                     cfg: ClientConfig::default(),
                     fullscreen: false,
@@ -1429,7 +1469,7 @@ mod tests {
             .build_state(
                 paint,
                 Fixture {
-                    view: View::default(),
+                    view: view_with_bar(),
                     live: None,
                     cfg: ClientConfig::default(),
                     fullscreen: false,
