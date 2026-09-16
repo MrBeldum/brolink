@@ -4,6 +4,36 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- One pointer. Freeing the mouse showed the Mac cursor behind egui's back,
+  and it stayed on top of the PC's own cursor in the picture until the
+  pointer left the window; the cursor is now hidden the one way egui
+  keeps track of.
+- The mouse is captured by default: a click on the picture hides the
+  cursor, holds it in place and sends raw movement, which is what games
+  read for the camera. A game that ignores the cursor's position (Genshin
+  Impact) turned only in the old Captured mode; Honkai: Star Rail happened
+  to follow the position too. **Free** in the Mouse menu is the old
+  behaviour, and the choice is remembered.
+- The stream is the whole window, nothing over it. **Ctrl+Alt** is the
+  host key, as in a hypervisor: it frees the mouse and drops the toolbar
+  over the picture; a click on the picture, or Ctrl+Alt again, puts it
+  away and takes the mouse back. The toolbar no longer sits above the
+  picture in a window, which is what left the bars either side, and a
+  window takes the stream's proportions when a session starts.
+- 1080p, 1440p and 4K are 1920×1080, 2560×1440 and 3840×2160, not those
+  widths at this display's shape (1920×1246 on a 14" MacBook Pro), and the
+  list shows the pixel size of each. Match screen is unchanged. On a
+  display of another shape the standard sizes leave a bar above and below.
+- Less delay between the PC and the eye. A decoded frame is presented as
+  soon as it is drawn instead of waiting for the display's next refresh,
+  up to a refresh interval sooner, and the decoder fills the same few
+  buffers over and over instead of taking nine fresh megabytes per frame.
+- The Dock icon has macOS's rounded shape and inset, with transparent
+  corners, instead of a square tile; `scripts/make-macos-icon.py`
+  builds it from the logo.
+
 ## 3.3.0 (2026-09-15)
 
 - The stream is the Mac's screen. **Match screen** is the default: the PC

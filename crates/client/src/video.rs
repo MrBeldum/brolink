@@ -306,6 +306,9 @@ impl Resources {
             _pad: [0; 2],
         };
         queue.write_buffer(&self.uniforms, 0, &u.bytes());
+        // `write_texture` has copied the planes into a staging buffer, so
+        // the frame's own buffers can go straight back to the decoder.
+        slot.recycle(frame);
     }
 }
 

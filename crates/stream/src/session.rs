@@ -381,6 +381,25 @@ impl Drop for Session {
     }
 }
 
+/// The bitrate to hand moonlight-common-c so the PC's encoder actually
+/// targets `target_kbps`.
+///
+/// moonlight does not encode at the number it is given. In
+/// `SdpGenerator.c` it reserves headroom before telling the host: it keeps
+/// 20% for FEC (`bitrate * 0.80`) and, on a remote stream, drops a further
+/// 500 kbps for audio and control. So a plain request of 35 Mbps makes the
+/// encoder aim for only ~27 Mbps, and the received video sits lower still.
+/// BroLink treats the user's number as the video target, not a total
+/// budget, so we invert that arithmetic here: ask for enough that what
+/// survives moonlight's reduction is the target the user chose. moonlight
+/// still caps the result at its own 100 Mbps ceiling.
+pub fn request_bitrate_kbps(target_kbps: u32, remote: bool) -> u32 {
+    let audio_control = if remote { 500 } else { 0 };
+    // Inverse of `adjusted = request * 0.8 - audio_control`, rounded.
+    let request = ((u64::from(target_kbps) + audio_control) * 5).div_ceil(4);
+    (request as u32).min(200_000)
+}
+
 fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: [u8; 16]) {
     let _one_at_a_time = CONNECTION.lock();
     if *inner.done.lock() {
@@ -406,8 +425,16 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         width: s.width as c_int,
         height: s.height as c_int,
         fps: s.fps as c_int,
-        bitrate_kbps: s.bitrate_kbps as c_int,
-        packet_size: if s.remote { 1024 } else { 1392 },
+        bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps, s.remote) as c_int,
+        // moonlight-common-c would cap a remote IPv4 stream at 1024-byte
+        // packets to survive raw-internet fragmentation. BroLink never rides
+        // raw internet: every stream goes through a Tailscale (WireGuard)
+        // tunnel whose path MTU is a guaranteed 1280 bytes, so 1184 fits with
+        // room for RTP/UDP/IP headers, the value moonlight itself trusts on a
+        // 1280-guaranteed IPv6 path. Bigger packets mean fewer per frame,
+        // which keeps large frames inside Sunshine's four-FEC-block limit
+        // instead of shipping them unprotected and stalling on the first loss.
+        packet_size: if s.remote { 1184 } else { 1392 },
         remote: if s.remote {
             ffi::STREAM_CFG_REMOTE
         } else {
@@ -507,7 +534,11 @@ unsafe extern "C" fn video_frame(
     };
     let now_us = ffi::LiGetMicroseconds();
     let t = Instant::now();
-    let result = dec.decode(bytes, frame_type == ffi::FRAME_TYPE_IDR);
+    let result = dec.decode(
+        bytes,
+        frame_type == ffi::FRAME_TYPE_IDR,
+        inner.frames.spare(),
+    );
     let decode_us = t.elapsed().as_micros() as u64;
     {
         let mut stats = inner.stats.lock();
@@ -818,6 +849,27 @@ mod tests {
     }
 
     #[test]
+    fn requested_bitrate_undoes_moonlights_reduction() {
+        // moonlight encodes at request * 0.8 - (remote ? 500 : 0). After our
+        // compensation the encoder should land back on the chosen target.
+        for target in [12_000u32, 35_000, 50_000, 80_000] {
+            for remote in [true, false] {
+                let request = request_bitrate_kbps(target, remote);
+                let audio_control = if remote { 500 } else { 0 };
+                let delivered = (f64::from(request) * 0.8) as i64 - audio_control;
+                // Within rounding of the div_ceil, never below the target.
+                assert!(
+                    (delivered - i64::from(target)).abs() <= 1,
+                    "target={target} remote={remote} request={request} delivered={delivered}"
+                );
+            }
+        }
+        // A plain 35 Mbps request would otherwise have encoded at ~27 Mbps.
+        assert_eq!(request_bitrate_kbps(35_000, true), 44_375);
+        assert!(request_bitrate_kbps(500_000, true) <= 200_000, "clamped");
+    }
+
+    #[test]
     fn stage_names_and_messages_are_readable() {
         assert!(!ffi::stage_name(4).is_empty());
         assert!(termination_message(0).contains("ended"));
@@ -913,7 +965,7 @@ mod real {
                 height,
                 fps,
                 bitrate_kbps,
-                hevc: false,
+                hevc: std::env::var_os("BROLINK_TEST_HEVC").is_some(),
                 remote,
             },
             ri_key,
@@ -934,6 +986,13 @@ mod real {
                 if matches!(ev, Event::Failed { .. } | Event::Terminated { .. }) {
                     panic!("session ended early: {ev:?}");
                 }
+            }
+            if connected && std::env::var_os("BROLINK_TEST_MOUSE_SWEEP").is_some() {
+                // Oscillate so the cursor stays on screen while a game reading
+                // raw input sees continuous relative motion. Watch the PC's
+                // cursor (GetCursorPos) to confirm the relative injection lands.
+                let phase = (start.elapsed().as_millis() / 400) % 2;
+                session.mouse_move(if phase == 0 { 40 } else { -40 }, 0);
             }
             if let Some(f) = frames.take() {
                 if frames.seq() % 60 == 1 {

@@ -23,27 +23,27 @@ impl OpenH264 {
 }
 
 impl Decoder for OpenH264 {
-    fn decode(&mut self, annexb: &[u8], _idr: bool) -> Result<Option<Frame>> {
+    fn decode(&mut self, annexb: &[u8], _idr: bool, spare: Option<Frame>) -> Result<Option<Frame>> {
         let Some(yuv) = self.dec.decode(annexb)? else {
             return Ok(None);
         };
         let (w, h) = yuv.dimensions();
         let (ys, us, _) = yuv.strides();
-        let mut y = Vec::with_capacity(w * h);
-        for row in yuv.y().chunks(ys).take(h) {
-            y.extend_from_slice(&row[..w]);
-        }
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         interleave_uv(yuv.u(), yuv.v(), us, cw, ch, &mut self.uv);
-        Ok(Some(Frame {
-            width: w as u32,
-            height: h as u32,
-            y,
-            y_stride: w,
-            uv: self.uv.clone(),
-            uv_stride: cw * 2,
-            full_range: false,
-        }))
+        let mut frame = spare.unwrap_or_default();
+        frame.width = w as u32;
+        frame.height = h as u32;
+        frame.y_stride = w;
+        frame.uv_stride = cw * 2;
+        frame.full_range = false;
+        frame.y.clear();
+        for row in yuv.y().chunks(ys).take(h) {
+            frame.y.extend_from_slice(&row[..w]);
+        }
+        frame.uv.clear();
+        frame.uv.extend_from_slice(&self.uv);
+        Ok(Some(frame))
     }
 
     fn name(&self) -> &'static str {
