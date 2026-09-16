@@ -16,17 +16,23 @@ pub enum Resolution {
 }
 
 impl Resolution {
-    /// This choice applied to a screen of `native` pixels: the quality caps
-    /// the long edge, the screen's proportions always win, and "Match
-    /// screen" is the screen itself. See `brolink_core::screens`.
+    /// This choice applied to a screen of `native` pixels: the standard
+    /// 16:9 sizes are exactly that, and "Match screen" is the screen
+    /// itself. See `brolink_core::screens`.
     pub fn pixels(self, native: (u32, u32)) -> (u32, u32) {
-        let limit = match self {
-            Resolution::P1080 => 1920,
-            Resolution::P1440 => 2560,
-            Resolution::P2160 => 3840,
-            Resolution::Native => u32::MAX,
-        };
-        brolink_core::screens::fit(limit, native)
+        let [p1080, p1440, p2160] = brolink_core::screens::STANDARD;
+        match self {
+            Resolution::P1080 => p1080,
+            Resolution::P1440 => p1440,
+            Resolution::P2160 => p2160,
+            Resolution::Native => brolink_core::screens::even(native),
+        }
+    }
+
+    /// "1080p · 1920 × 1080", or "Match screen · 3024 × 1964".
+    pub fn describe(self, native: (u32, u32)) -> String {
+        let (w, h) = self.pixels(native);
+        format!("{} · {w} × {h}", self.label())
     }
 }
 
@@ -177,6 +183,10 @@ pub struct ClientConfig {
     pub sleep_prompt: bool,
     /// The Mac's Command key acts as Ctrl on the PC (else as the Windows key).
     pub cmd_is_ctrl: bool,
+    /// A click on the picture captures the mouse: the cursor is hidden and
+    /// raw movement goes to the PC, which is what games read. Off, the Mac
+    /// cursor's position is sent instead and nothing is captured.
+    pub capture_mouse: bool,
     /// Install new releases of this app and send them to the PCs.
     pub auto_update: bool,
     /// A GitHub token for the release downloads, when git has none stored.
@@ -191,6 +201,7 @@ impl Default for ClientConfig {
             stream: StreamSettings::default(),
             sleep_prompt: false,
             cmd_is_ctrl: true,
+            capture_mouse: true,
             auto_update: true,
             github_token: None,
             pcs: BTreeMap::new(),
@@ -242,7 +253,17 @@ mod tests {
         let s = StreamSettings::default();
         assert_eq!(s.resolution.pixels((3024, 1964)), (3024, 1964));
         assert_eq!(Resolution::Native.pixels((3024, 1964)), (3024, 1964));
-        assert_eq!(Resolution::P1080.pixels((3024, 1964)), (1920, 1246));
+        assert_eq!(Resolution::P1080.pixels((3024, 1964)), (1920, 1080));
+        assert_eq!(Resolution::P1440.pixels((3024, 1964)), (2560, 1440));
+        assert_eq!(Resolution::P2160.pixels((1920, 1080)), (3840, 2160));
+        assert_eq!(
+            Resolution::Native.describe((3024, 1964)),
+            "Match screen · 3024 × 1964"
+        );
+        assert_eq!(
+            Resolution::P1080.describe((3024, 1964)),
+            "1080p · 1920 × 1080"
+        );
         let modes = brolink_core::screens::stream_modes();
         for r in [
             Resolution::P1080,
@@ -261,6 +282,7 @@ mod tests {
         assert_eq!(c.stream, s);
         assert_eq!(c.stream.quality, Quality::Auto, "auto unless someone chose");
         assert!(!c.sleep_prompt && c.cmd_is_ctrl && c.auto_update);
+        assert!(c.capture_mouse, "games need raw movement, so capture is on");
         // A client.toml from 3.0 has no quality key; it gets Auto too.
         let c: ClientConfig = toml::from_str("[stream]\nfps = 90\n").unwrap();
         assert_eq!(c.stream.quality, Quality::Auto);

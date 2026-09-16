@@ -36,6 +36,27 @@ const RELAY_DOCS: &str = "https://tailscale.com/docs/features/peer-relay";
 /// A one-line result, filled in by a worker thread.
 type Notice = Arc<Mutex<Option<(Tone, String)>>>;
 
+/// Give the window the stream's proportions, keeping its width, so the
+/// picture fills it with no bar on any side. Only in a window: full screen
+/// is the screen's shape, which Match screen already is.
+fn fit_window_to(ctx: &egui::Context, width: u32, height: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let size = ctx.screen_rect().size();
+    let want = window_size_for(size, width as f32 / height as f32);
+    if (want.y - size.y).abs() >= 1.0 {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
+    }
+}
+
+/// `current` with its height changed to give `aspect`, never under the
+/// window's minimum.
+fn window_size_for(current: egui::Vec2, aspect: f32) -> egui::Vec2 {
+    let width = current.x.max(640.0);
+    egui::Vec2::new(width, (width / aspect).round().max(420.0))
+}
+
 pub struct ClientApp {
     cfg: ClientConfig,
     dirty: bool,
@@ -312,7 +333,10 @@ impl ClientApp {
                         prog.since = Instant::now();
                         if self.cfg.stream.fullscreen {
                             fullscreen = Some(true);
+                        } else {
+                            fit_window_to(ctx, live.requested.0, live.requested.1);
                         }
+                        self.view.stream_started(ctx, live, self.cfg.capture_mouse);
                         if let Some(problem) = host_audio_problem(&self.discovery, &live.node_id) {
                             self.view.toast(
                                 Tone::Danger,
@@ -422,6 +446,10 @@ impl eframe::App for ClientApp {
                         }
                         Action::ToggleCmd => {
                             self.cfg.cmd_is_ctrl = !self.cfg.cmd_is_ctrl;
+                            self.dirty = true;
+                        }
+                        Action::MouseCapture(on) => {
+                            self.cfg.capture_mouse = on;
                             self.dirty = true;
                         }
                         Action::ApplySettings(settings) => {
@@ -2104,6 +2132,26 @@ mod snapshots {
             2.0,
         );
         save(h.render().unwrap(), "client-relay-unavailable-640x420.png");
+    }
+}
+
+#[cfg(test)]
+mod window_fit {
+    use super::window_size_for;
+
+    #[test]
+    fn a_window_takes_the_streams_proportions_at_its_own_width() {
+        let s = window_size_for(egui::Vec2::new(1100.0, 720.0), 3024.0 / 1964.0);
+        assert_eq!(s.x, 1100.0);
+        assert!((s.y - 714.0).abs() <= 1.0, "{}", s.y);
+        let s = window_size_for(egui::Vec2::new(1100.0, 720.0), 16.0 / 9.0);
+        assert!((s.y - 619.0).abs() <= 1.0, "{}", s.y);
+        let tiny = window_size_for(egui::Vec2::new(300.0, 100.0), 16.0 / 9.0);
+        assert_eq!(
+            tiny,
+            egui::Vec2::new(640.0, 420.0),
+            "never under the minimum"
+        );
     }
 }
 

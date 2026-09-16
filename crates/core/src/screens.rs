@@ -1,11 +1,10 @@
 //! Pixel sizes of the screens a Mac can have, and the sizes a stream asks
-//! for. The Mac asks the PC for its own screen, or for a smaller size with
-//! the same proportions, and a PC whose only display is virtual can only
-//! switch to a size that display lists. Setup on the PC lists these.
+//! for. The Mac asks the PC for its own screen or for one of the standard
+//! 16:9 sizes, and a PC whose only display is virtual can only switch to a
+//! size that display lists. Setup on the PC lists these.
 
-/// The long-edge limits behind the quality choices: 1080p, 1440p and 4K.
-/// "Match screen" has no limit.
-pub const LIMITS: [u32; 3] = [1920, 2560, 3840];
+/// The standard sizes behind the quality choices: 1080p, 1440p and 4K.
+pub const STANDARD: [(u32, u32); 3] = [(1920, 1080), (2560, 1440), (3840, 2160)];
 
 /// Native pixel sizes of Apple displays since 2015, then the common
 /// external monitors. Points times the native scale factor, whatever
@@ -34,27 +33,20 @@ pub const SCREENS: &[(u32, u32)] = &[
     (5120, 2160),
 ];
 
-/// `native` scaled down so its long edge is at most `limit`, proportions
-/// kept and both sides even (video codecs need that). Never scaled up:
-/// a screen smaller than the limit is asked for as it is.
-pub fn fit(limit: u32, native: (u32, u32)) -> (u32, u32) {
-    let (w, h) = (native.0.max(2), native.1.max(2));
-    let scale = (limit as f64 / w.max(h) as f64).min(1.0);
-    let even = |v: u32| ((v as f64 * scale).round() as u32 / 2 * 2).max(2);
-    (even(w), even(h))
+/// `native` with both sides even (video codecs need that) and never
+/// smaller than a codec can be asked for.
+pub fn even(native: (u32, u32)) -> (u32, u32) {
+    let round = |v: u32| (v / 2 * 2).max(2);
+    (round(native.0), round(native.1))
 }
 
-/// Every size a Mac may ask for: each screen as it is and at each limit,
-/// without repeats, largest first.
+/// Every size a Mac may ask for: each screen as it is and the standard
+/// sizes, without repeats, largest first.
 pub fn stream_modes() -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = SCREENS
         .iter()
-        .flat_map(|&s| {
-            LIMITS
-                .iter()
-                .map(move |&l| fit(l, s))
-                .chain(std::iter::once(fit(u32::MAX, s)))
-        })
+        .chain(STANDARD.iter())
+        .map(|&s| even(s))
         .collect();
     out.sort_by(|a, b| (b.0 * b.1).cmp(&(a.0 * a.1)).then(b.cmp(a)));
     out.dedup();
@@ -66,33 +58,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fit_keeps_proportions_rounds_even_and_never_enlarges() {
-        assert_eq!(fit(1920, (3024, 1964)), (1920, 1246));
-        assert_eq!(fit(2560, (3024, 1964)), (2560, 1662));
-        assert_eq!(fit(3840, (3024, 1964)), (3024, 1964));
-        assert_eq!(fit(u32::MAX, (3024, 1964)), (3024, 1964));
-        assert_eq!(fit(1920, (3840, 2160)), (1920, 1080));
-        assert_eq!(fit(1920, (1280, 800)), (1280, 800), "never scaled up");
-        assert_eq!(
-            fit(1920, (0, 0)),
-            (2, 2),
-            "a degenerate screen is not a panic"
-        );
-        for &s in SCREENS {
-            for l in LIMITS {
-                let (w, h) = fit(l, s);
-                assert!(w.max(h) <= l && w % 2 == 0 && h % 2 == 0, "{s:?} at {l}");
-            }
-        }
+    fn even_rounds_down_and_never_reaches_zero() {
+        assert_eq!(even((3024, 1964)), (3024, 1964));
+        assert_eq!(even((3025, 1965)), (3024, 1964));
+        assert_eq!(even((0, 0)), (2, 2), "a degenerate screen is not a panic");
     }
 
     #[test]
-    fn stream_modes_cover_every_screen_at_every_quality_without_repeats() {
+    fn stream_modes_cover_every_screen_and_standard_size_without_repeats() {
         let modes = stream_modes();
         assert!(modes.contains(&(3024, 1964)));
-        assert!(modes.contains(&(1920, 1246)));
-        assert!(modes.contains(&(2560, 1662)));
-        assert!(modes.contains(&(1920, 1080)));
+        for s in STANDARD {
+            assert!(modes.contains(&s), "{s:?} is a listed mode");
+        }
+        assert!(
+            !modes.contains(&(1920, 1246)),
+            "sizes scaled to a screen's shape are no longer asked for"
+        );
         let mut sorted = modes.clone();
         sorted.dedup();
         assert_eq!(sorted, modes, "no repeats");

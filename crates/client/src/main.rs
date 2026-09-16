@@ -32,8 +32,14 @@ fn main() -> anyhow::Result<()> {
                 height: 64,
             }),
         renderer: eframe::Renderer::Wgpu,
-        vsync: true,
+        // A decoded frame goes to the screen as soon as it is drawn rather
+        // than waiting for the display's next refresh: up to a whole
+        // refresh interval less between the PC's picture and the eye. The
+        // picture only changes when a frame arrives, so there is nothing
+        // to tear.
+        vsync: false,
         wgpu_options: egui_wgpu::WgpuConfiguration {
+            present_mode: egui_wgpu::wgpu::PresentMode::AutoNoVsync,
             desired_maximum_frame_latency: Some(1),
             ..Default::default()
         },
