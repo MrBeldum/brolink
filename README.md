@@ -22,12 +22,16 @@ signed in to the same Tailscale account as the PC.
 2. Click **Connect**. If the PC is asleep, BroLink wakes it and waits. The
    first time, it pairs with the PC by itself: the PIN goes to BroLink Host
    over Tailscale, which enters it for you.
-3. The desktop appears, full screen by default. A toolbar above the picture
-   has the stream details, whether the path is direct or relayed, mouse
-   capture, a **Keys** menu for Ctrl+Alt+Del and friends and what the
+3. The desktop appears, full screen by default, and nothing else: the
+   mouse is captured the moment you click the picture, as in a game, so
+   games that read raw mouse movement work. **Ctrl+Alt** is the host key,
+   as in a hypervisor: it frees the mouse and drops a toolbar over the
+   picture with the stream details, whether the path is direct or relayed,
+   the mouse mode, a **Keys** menu for Ctrl+Alt+Del and friends and what the
    Command key does, stats, full screen, the PC's power menu, **Stream
    settings** (the default asks for this Mac's own screen size at 35 Mbps,
-   on every path) and **Disconnect**. The clipboard follows you both ways.
+   on every path) and **Disconnect**. Click the picture, or press Ctrl+Alt
+   again, and the toolbar goes away. The clipboard follows you both ways.
 4. Leave the PC on if you want to connect from anywhere. Asleep, Tailscale
    is asleep too: this Mac can wake it only from that PC's own network
    (or if the router forwards UDP 9). Settings can offer sleep after a
