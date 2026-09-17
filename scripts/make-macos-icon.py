@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Build crates/client/BroLink.icns from crates/core/assets/logo-1024.png.
 
-macOS draws every app icon inside the same rounded shape, inset from the
-edges of a 1024-pixel canvas, with the corners transparent. The logo is a
-square: its rounded tile on a near-black pad. This crops the tile, gives it
-Apple's shape and inset (824 of 1024 pixels, corner radius 22.37% of the
-side), and writes the iconset iconutil turns into the .icns.
+The logo is a rounded tile on a near-black pad. This crops the tile and
+fills a 1024 canvas with it. macOS applies the rounded app-icon shape;
+pre-masking the tile and leaving transparent corners made a square plate
+on macOS 26.
 
     python3 scripts/make-macos-icon.py
 """
@@ -14,16 +13,13 @@ import shutil
 import subprocess
 import tempfile
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOGO = ROOT / "crates/core/assets/logo-1024.png"
 ICNS = ROOT / "crates/client/BroLink.icns"
 
 CANVAS = 1024
-TILE = 824  # Apple's icon grid: the shape spans 824 of 1024 pixels.
-RADIUS = round(TILE * 0.2237)
-OVERSAMPLE = 4
 
 
 def tile_bounds(im):
@@ -37,22 +33,15 @@ def tile_bounds(im):
     return xs[0], ys[0], xs[-1] + 1, ys[-1] + 1
 
 
-def rounded_mask(size, radius):
-    big = size * OVERSAMPLE
-    mask = Image.new("L", (big, big), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        (0, 0, big - 1, big - 1), radius=radius * OVERSAMPLE, fill=255
-    )
-    return mask.resize((size, size), Image.LANCZOS)
-
-
 def main():
     logo = Image.open(LOGO).convert("RGBA")
-    tile = logo.crop(tile_bounds(logo)).resize((TILE, TILE), Image.LANCZOS)
-    tile.putalpha(rounded_mask(TILE, RADIUS))
-    canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
-    inset = (CANVAS - TILE) // 2
-    canvas.paste(tile, (inset, inset), tile)
+    # Opaque fill: the Dock's shape comes from the system, not from alpha.
+    canvas = (
+        logo.crop(tile_bounds(logo))
+        .resize((CANVAS, CANVAS), Image.LANCZOS)
+        .convert("RGB")
+        .convert("RGBA")
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         iconset = pathlib.Path(tmp) / "BroLink.iconset"
