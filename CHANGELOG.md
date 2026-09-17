@@ -35,6 +35,9 @@ GitHub release notes, so each version gets a heading of the form
   and the icns had been pre-masked with transparent corners, which macOS
   26 draws as a square plate. `scripts/make-macos-icon.py` now fills the
   canvas and lets the system apply the shape.
+- The Windows host icon (Explorer, taskbar, Alt-Tab, the window, and the
+  in-app header) is the same filled tile. The logo's outer pad had left a
+  square plate around the mark; `icon::render` now crops it.
 
 ## 3.3.0 (2026-09-15)
 
