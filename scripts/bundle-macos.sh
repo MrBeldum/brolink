@@ -19,9 +19,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 touch "$ROOT/dist/.metadata_never_index"
 cp "$BIN" "$APP/Contents/MacOS/BroLink"
 chmod +x "$APP/Contents/MacOS/BroLink"
-# The Finder/Dock icon: crates/core/assets/logo-1024.png, the same logo the
-# window uses (brolink_core::icon::render), given macOS's rounded shape and
-# inset by scripts/make-macos-icon.py and checked in as .icns.
+# The Finder/Dock icon: the logo tile filling the canvas, built by
+# scripts/make-macos-icon.py. macOS applies the rounded app-icon shape.
 cp "$ROOT/crates/client/BroLink.icns" "$APP/Contents/Resources/BroLink.icns"
 cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST

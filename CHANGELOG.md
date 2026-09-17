@@ -30,9 +30,11 @@ GitHub release notes, so each version gets a heading of the form
   soon as it is drawn instead of waiting for the display's next refresh,
   up to a refresh interval sooner, and the decoder fills the same few
   buffers over and over instead of taking nine fresh megabytes per frame.
-- The Dock icon has macOS's rounded shape and inset, with transparent
-  corners, instead of a square tile; `scripts/make-macos-icon.py`
-  builds it from the logo.
+- The Dock icon is the bundle icns, in macOS's rounded app-icon shape.
+  eframe was replacing it at runtime with a 64-pixel square of the logo,
+  and the icns had been pre-masked with transparent corners, which macOS
+  26 draws as a square plate. `scripts/make-macos-icon.py` now fills the
+  canvas and lets the system apply the shape.
 
 ## 3.3.0 (2026-09-15)
 
