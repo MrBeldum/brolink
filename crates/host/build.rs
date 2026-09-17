@@ -1,6 +1,7 @@
 //! Windows only: give the exe an icon and a version block. Explorer, the
 //! taskbar and Defender's heuristics all read them; a bare Rust binary has
-//! neither. The icon is the same logo the windows draw.
+//! neither. The icon is the cropped logo tile, the same bitmap the windows
+//! draw; Windows 11 rounds the square.
 
 #[cfg(windows)]
 #[path = "../core/src/icon.rs"]
