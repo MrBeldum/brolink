@@ -13,6 +13,21 @@ mod stream;
 mod update;
 mod video;
 
+fn viewport_icon() -> egui::IconData {
+    if cfg!(target_os = "macos") {
+        // eframe calls NSApplication.setApplicationIconImage with this
+        // bitmap, which replaces BroLink.icns in the Dock with an unmasked
+        // square. An empty icon leaves the bundle icon in place.
+        egui::IconData::default()
+    } else {
+        egui::IconData {
+            rgba: brolink_core::icon::render(64),
+            width: 64,
+            height: 64,
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -26,11 +41,7 @@ fn main() -> anyhow::Result<()> {
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 420.0])
             .with_title("BroLink")
-            .with_icon(egui::IconData {
-                rgba: brolink_core::icon::render(64),
-                width: 64,
-                height: 64,
-            }),
+            .with_icon(viewport_icon()),
         renderer: eframe::Renderer::Wgpu,
         // A decoded frame goes to the screen as soon as it is drawn rather
         // than waiting for the display's next refresh: up to a whole
