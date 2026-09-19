@@ -473,7 +473,7 @@ impl Service {
         if !is_tailnet_ip(ip) {
             return false;
         }
-        if matches!(&*self.tailscale.lock(), Err(_)) {
+        if self.tailscale.lock().is_err() {
             return false;
         }
         let now = Instant::now();
