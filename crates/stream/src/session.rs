@@ -15,6 +15,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 static CONNECTION: Mutex<()> = Mutex::new(());
+/// Held for every `LiSend*` and around `LiStopConnection`, so input cannot
+/// run while moonlight is destroying its queues.
+static INPUT: Mutex<()> = Mutex::new(());
+/// Keeps `Inner` alive for C callbacks, including moonlight's detached
+/// termination thread that can fire after `bl_stop` returns.
+static CURRENT: Mutex<Option<Arc<Inner>>> = Mutex::new(None);
+
+fn current() -> Option<Arc<Inner>> {
+    CURRENT.lock().clone()
+}
+
+fn send_input(connected: &std::sync::atomic::AtomicBool, f: impl FnOnce()) {
+    let _guard = INPUT.lock();
+    if connected.load(Ordering::Acquire) {
+        f();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -191,63 +208,62 @@ impl Input {
     }
 
     pub fn mouse_move(&self, dx: i16, dy: i16) {
-        if self.connected() {
-            unsafe { ffi::LiSendMouseMoveEvent(dx, dy) };
-        }
+        send_input(&self.inner.connected, || unsafe {
+            ffi::LiSendMouseMoveEvent(dx, dy);
+        });
     }
 
     pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
-        if self.connected() {
-            unsafe { ffi::LiSendMousePositionEvent(x, y, width, height) };
-        }
+        send_input(&self.inner.connected, || unsafe {
+            ffi::LiSendMousePositionEvent(x, y, width, height);
+        });
     }
 
     /// `button` is one of `ffi::BUTTON_*`.
     pub fn mouse_button(&self, button: c_int, down: bool) {
-        if self.connected() {
+        send_input(&self.inner.connected, || {
             let action = if down {
                 ffi::BUTTON_ACTION_PRESS
             } else {
                 ffi::BUTTON_ACTION_RELEASE
             };
             unsafe { ffi::LiSendMouseButtonEvent(action, button) };
-        }
+        });
     }
 
     /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
     pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
-        if self.connected() {
+        send_input(&self.inner.connected, || {
             let action = if down {
                 ffi::KEY_ACTION_DOWN
             } else {
                 ffi::KEY_ACTION_UP
             };
             unsafe { ffi::LiSendKeyboardEvent(vk, action, modifiers) };
-        }
+        });
     }
 
     /// Type `text` on the PC as it is, whatever the keyboard layouts.
     pub fn text(&self, text: &str) {
-        if !self.connected() {
-            return;
-        }
-        for chunk in text_chunks(text) {
-            unsafe {
-                ffi::LiSendUtf8TextEvent(chunk.as_ptr() as *const c_char, chunk.len() as u32)
-            };
-        }
+        send_input(&self.inner.connected, || {
+            for chunk in text_chunks(text) {
+                unsafe {
+                    ffi::LiSendUtf8TextEvent(chunk.as_ptr() as *const c_char, chunk.len() as u32);
+                }
+            }
+        });
     }
 
     /// Vertical and horizontal scroll in 1/120ths of a wheel click.
     pub fn scroll(&self, vertical: i16, horizontal: i16) {
-        if self.connected() {
+        send_input(&self.inner.connected, || {
             if vertical != 0 {
                 unsafe { ffi::LiSendHighResScrollEvent(vertical) };
             }
             if horizontal != 0 {
                 unsafe { ffi::LiSendHighResHScrollEvent(horizontal) };
             }
-        }
+        });
     }
 }
 
@@ -464,6 +480,7 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         log,
     };
     let ctx = Arc::as_ptr(&inner) as *mut c_void;
+    *CURRENT.lock() = Some(inner.clone());
     let rc = unsafe { ffi::bl_start(&si, &cfg, &cb, ctx) };
     if rc == 0 {
         let mut done = inner.done.lock();
@@ -472,7 +489,11 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         }
     }
     inner.connected.store(false, Ordering::Release);
-    unsafe { ffi::bl_stop() };
+    {
+        let _input = INPUT.lock();
+        unsafe { ffi::bl_stop() };
+    }
+    *CURRENT.lock() = None;
     *inner.decoder.lock() = None;
     *inner.audio.lock() = None;
     inner.frames.clear();
@@ -480,18 +501,14 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
     (inner.wake)();
 }
 
-unsafe fn ctx<'a>(p: *mut c_void) -> &'a Inner {
-    &*(p as *const Inner)
-}
-
 unsafe extern "C" fn video_setup(
-    p: *mut c_void,
+    _p: *mut c_void,
     format: c_int,
     w: c_int,
     h: c_int,
     _fps: c_int,
 ) -> c_int {
-    let inner = ctx(p);
+    let Some(inner) = current() else { return -1 };
     match video::new_decoder(format, w as u32, h as u32) {
         Ok(d) => {
             let mut st = inner.stats.lock();
@@ -509,12 +526,14 @@ unsafe extern "C" fn video_setup(
     }
 }
 
-unsafe extern "C" fn video_cleanup(p: *mut c_void) {
-    *ctx(p).decoder.lock() = None;
+unsafe extern "C" fn video_cleanup(_p: *mut c_void) {
+    if let Some(inner) = current() {
+        *inner.decoder.lock() = None;
+    }
 }
 
 unsafe extern "C" fn video_frame(
-    p: *mut c_void,
+    _p: *mut c_void,
     data: *const u8,
     len: c_int,
     frame_type: c_int,
@@ -523,7 +542,9 @@ unsafe extern "C" fn video_frame(
     receive_us: u64,
     enqueue_us: u64,
 ) -> c_int {
-    let inner = ctx(p);
+    let Some(inner) = current() else {
+        return ffi::DR_OK;
+    };
     if data.is_null() || len <= 0 {
         return ffi::DR_OK;
     }
@@ -554,7 +575,7 @@ unsafe extern "C" fn video_frame(
                 .lock()
                 .frame(Instant::now(), frame.is_black());
             inner.frames.publish(frame);
-            account(inner, len as u64, decode_us, host_latency);
+            account(&inner, len as u64, decode_us, host_latency);
             (inner.wake)();
             ffi::DR_OK
         }
@@ -666,7 +687,7 @@ fn loss_in_window(before: &ffi::RtpVideoStats, after: &ffi::RtpVideoStats) -> (f
 }
 
 unsafe extern "C" fn audio_setup(
-    p: *mut c_void,
+    _p: *mut c_void,
     sample_rate: c_int,
     channels: c_int,
     streams: c_int,
@@ -674,7 +695,7 @@ unsafe extern "C" fn audio_setup(
     samples_per_frame: c_int,
     mapping: *const u8,
 ) -> c_int {
-    let inner = ctx(p);
+    let Some(inner) = current() else { return 0 };
     // moonlight's mapping array contains at most eight entries. Reject
     // invalid lengths before turning its pointer into a Rust slice.
     if mapping.is_null() || !(1..=8).contains(&channels) {
@@ -703,26 +724,28 @@ unsafe extern "C" fn audio_setup(
     }
 }
 
-unsafe extern "C" fn audio_cleanup(p: *mut c_void) {
-    let inner = ctx(p);
-    *inner.audio.lock() = None;
-    *inner.audio_error.lock() = None;
+unsafe extern "C" fn audio_cleanup(_p: *mut c_void) {
+    if let Some(inner) = current() {
+        *inner.audio.lock() = None;
+        *inner.audio_error.lock() = None;
+    }
 }
 
-unsafe extern "C" fn audio_packet(p: *mut c_void, data: *const u8, len: c_int) {
-    let inner = ctx(p);
+unsafe extern "C" fn audio_packet(_p: *mut c_void, data: *const u8, len: c_int) {
+    let Some(inner) = current() else { return };
     let packet: &[u8] = if data.is_null() || len <= 0 {
         &[]
     } else {
         std::slice::from_raw_parts(data, len as usize)
     };
-    if let Some(a) = inner.audio.lock().as_mut() {
+    let mut audio = inner.audio.lock();
+    if let Some(a) = audio.as_mut() {
         a.push(packet);
     }
 }
 
-unsafe extern "C" fn stage(p: *mut c_void, stage: c_int, state: c_int, error: c_int) {
-    let inner = ctx(p);
+unsafe extern "C" fn stage(_p: *mut c_void, stage: c_int, state: c_int, error: c_int) {
+    let Some(inner) = current() else { return };
     let name = ffi::stage_name(stage);
     match state {
         0 => inner.emit(Event::Stage(name)),
@@ -737,15 +760,15 @@ unsafe extern "C" fn stage(p: *mut c_void, stage: c_int, state: c_int, error: c_
     }
 }
 
-unsafe extern "C" fn connected(p: *mut c_void) {
-    let inner = ctx(p);
+unsafe extern "C" fn connected(_p: *mut c_void) {
+    let Some(inner) = current() else { return };
     inner.video_health.lock().connected_at = Some(Instant::now());
     inner.connected.store(true, Ordering::Release);
     inner.emit(Event::Connected);
 }
 
-unsafe extern "C" fn terminated(p: *mut c_void, code: c_int) {
-    let inner = ctx(p);
+unsafe extern "C" fn terminated(_p: *mut c_void, code: c_int) {
+    let Some(inner) = current() else { return };
     inner.connected.store(false, Ordering::Release);
     inner.emit(Event::Terminated {
         code,
@@ -754,8 +777,10 @@ unsafe extern "C" fn terminated(p: *mut c_void, code: c_int) {
     inner.finish();
 }
 
-unsafe extern "C" fn status(p: *mut c_void, status: c_int) {
-    ctx(p).emit(Event::Poor(status == ffi::CONN_STATUS_POOR));
+unsafe extern "C" fn status(_p: *mut c_void, status: c_int) {
+    if let Some(inner) = current() {
+        inner.emit(Event::Poor(status == ffi::CONN_STATUS_POOR));
+    }
 }
 
 unsafe extern "C" fn log(_p: *mut c_void, line: *const c_char) {

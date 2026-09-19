@@ -945,12 +945,16 @@ impl View {
             if !ctrl_alt {
                 self.capture_chord_held = false;
             }
-            self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
-            if ctrl_alt && !self.capture_chord_held {
-                self.capture_chord_held = true;
-                self.host_key(ctx, live, cfg);
+            // Ctrl+Alt is BroLink's host key. Do not send it to the PC, or
+            // games and the Start menu see a held chord after the toolbar opens.
+            if ctrl_alt {
+                if !self.capture_chord_held {
+                    self.capture_chord_held = true;
+                    self.host_key(ctx, live, cfg);
+                }
                 return;
             }
+            self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
             // A paste's chord releases the modifier it pressed once the text
             // has reached the PC. If ⌘ is still held here, press it again
             // on the PC, so ⌘V ⌘V in one hold pastes twice.
@@ -1014,8 +1018,9 @@ impl View {
                 }
                 Event::PointerMoved(p) if !self.captured && over_video => position = Some(p),
                 Event::MouseMoved(d) if self.captured => {
-                    self.motion.0 += d.x;
-                    self.motion.1 += d.y;
+                    // winit deltas are points; the stream is physical pixels.
+                    self.motion.0 += d.x * ppp;
+                    self.motion.1 += d.y * ppp;
                 }
                 Event::PointerButton {
                     button, pressed, ..

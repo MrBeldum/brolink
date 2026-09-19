@@ -42,6 +42,18 @@ impl HostConfig {
     pub fn save(&self) -> anyhow::Result<()> {
         brolink_core::config::save(FILE, self)
     }
+
+    /// Persist the panel's toggles without clobbering engine credentials
+    /// that setup just wrote to disk.
+    pub fn save_toggles(&self) -> anyhow::Result<Self> {
+        let mut disk = Self::load();
+        disk.power_allowed = self.power_allowed;
+        disk.stay_awake = self.stay_awake;
+        disk.start_with_windows = self.start_with_windows;
+        disk.save()?;
+        Ok(disk)
+    }
+
     pub fn has_creds(&self) -> bool {
         !self.sunshine_user.is_empty() && !self.sunshine_pass.is_empty()
     }

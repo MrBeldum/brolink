@@ -1,8 +1,14 @@
 //! Settings and what has been learned about each PC, in
 //! `~/Library/Application Support/BroLink/client.toml`.
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Serialises every load-modify-save of `client.toml`. The window, discovery
+/// and pairing used to write the whole file from stale copies and clobber
+/// each other (settings wiping a pairing cert, or last-seen wiping bitrate).
+static LOCK: Mutex<()> = Mutex::new(());
 
 pub const FILE: &str = "client.toml";
 
@@ -229,10 +235,42 @@ impl ClientConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub fn save(&self) -> anyhow::Result<()> {
         brolink_core::config::save(FILE, self)
     }
 
+    /// Persist the window's settings without clobbering PCs learned on disk.
+    pub fn save_settings(&self) -> anyhow::Result<Self> {
+        let _g = LOCK.lock();
+        let mut disk = Self::load();
+        apply_settings(self, &mut disk);
+        brolink_core::config::save(FILE, &disk)?;
+        Ok(disk)
+    }
+
+    /// Load-modify-save `pcs` under the same lock as [`save_settings`].
+    pub fn update_pcs(f: impl FnOnce(&mut BTreeMap<String, KnownPc>)) -> anyhow::Result<()> {
+        let _g = LOCK.lock();
+        let mut disk = Self::load();
+        let before = disk.pcs.clone();
+        f(&mut disk.pcs);
+        if disk.pcs != before {
+            brolink_core::config::save(FILE, &disk)?;
+        }
+        Ok(())
+    }
+
+    /// Pairing certificate last written for this node, if any.
+    pub fn stored_cert(node_id: &str) -> Option<Vec<u8>> {
+        Self::load()
+            .pcs
+            .get(node_id)
+            .and_then(|k| k.server_cert.as_deref())
+            .and_then(brolink_stream::nvhttp::unhex)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
         if !brolink_stream::nvhttp::is_pin_mismatch(err) {
             return false;
@@ -242,6 +280,15 @@ impl ClientConfig {
         }
         true
     }
+}
+
+fn apply_settings(from: &ClientConfig, into: &mut ClientConfig) {
+    into.stream = from.stream.clone();
+    into.sleep_prompt = from.sleep_prompt;
+    into.cmd_is_ctrl = from.cmd_is_ctrl;
+    into.capture_mouse = from.capture_mouse;
+    into.auto_update = from.auto_update;
+    into.github_token = from.github_token.clone();
 }
 
 #[cfg(test)]
@@ -354,5 +401,34 @@ mod tests {
         let generic = anyhow::anyhow!("invalid peer certificate: expired");
         assert!(!c.forget_pin_on_mismatch("n", &generic));
         assert_eq!(c.pcs["n"].server_cert.as_deref(), Some("3082"));
+    }
+
+    #[test]
+    fn saving_settings_does_not_copy_pcs_and_updating_pcs_does_not_copy_settings() {
+        let mut ui = ClientConfig::default();
+        ui.stream.bitrate_kbps = 80_000;
+        ui.cmd_is_ctrl = false;
+        ui.pcs.insert(
+            "n".into(),
+            KnownPc {
+                name: "stale".into(),
+                server_cert: Some("dead".into()),
+                ..Default::default()
+            },
+        );
+        let mut disk = ClientConfig::default();
+        disk.pcs.insert(
+            "n".into(),
+            KnownPc {
+                name: "Gaming-PC".into(),
+                server_cert: Some("3082".into()),
+                ..Default::default()
+            },
+        );
+        apply_settings(&ui, &mut disk);
+        assert_eq!(disk.stream.bitrate_kbps, 80_000);
+        assert!(!disk.cmd_is_ctrl);
+        assert_eq!(disk.pcs["n"].server_cert.as_deref(), Some("3082"));
+        assert_eq!(disk.pcs["n"].name, "Gaming-PC");
     }
 }
