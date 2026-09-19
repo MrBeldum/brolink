@@ -1,11 +1,18 @@
 #!/bin/bash
-# Start a virtual desktop, Sunshine, BroLink's control service, and
-# (optionally) Tailscale so this container is a machine on the tailnet.
+# Start a virtual desktop, the streaming engine, BroLink's control service,
+# and (optionally) Tailscale so this container is a machine on the tailnet.
 set -euo pipefail
 
 log() { echo "[brolink-node] $*"; }
 
-install -d -m 700 /root/.config/sunshine /root/.local/share/brolink/BroLink /var/run/tailscale
+install -d -m 700 /root/.config/sunshine /root/.local/share/brolink /var/run/tailscale
+if [[ ! -x /usr/local/bin/brolink-engine && -x /usr/bin/sunshine ]]; then
+  cp /usr/bin/sunshine /usr/local/bin/brolink-engine
+fi
+ENGINE=/usr/local/bin/brolink-engine
+if [[ ! -x "$ENGINE" ]]; then
+  ENGINE=/usr/bin/sunshine
+fi
 
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
   log "starting Tailscale (userspace) as ${TS_HOSTNAME:-brolink-node}"
@@ -31,8 +38,7 @@ startxfce4 >/var/log/xfce.log 2>&1 &
 sleep 1
 
 CONF=/root/.config/sunshine/sunshine.conf
-if [[ ! -f "$CONF" ]]; then
-  cat >"$CONF" <<'EOF'
+cat >"$CONF" <<'EOF'
 system_tray = disabled
 origin_web_ui_allowed = pc
 max_bitrate = 0
@@ -41,11 +47,22 @@ fec_percentage = 20
 packetsize = 1184
 amd_rc = cbr
 vaapi_rc = cbr
+sw_preset = ultrafast
 sw_tune = zerolatency
+min_threads = 4
 capture = x11
 encoder = software
 EOF
-fi
+cat >/root/.config/sunshine/apps.json <<'EOF'
+{
+  "apps": [
+    {
+      "name": "Desktop",
+      "image-path": "desktop.png"
+    }
+  ]
+}
+EOF
 
 USER_NAME="${BROLINK_USER:-brolink}"
 PASS_NAME="${BROLINK_PASS:-}"
@@ -55,9 +72,9 @@ if [[ -z "$PASS_NAME" ]]; then
   set +o pipefail
   PASS_NAME="$(tr -dc 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 20)"
   set -o pipefail
-  log "generated Sunshine login (user ${USER_NAME}); set BROLINK_PASS to pin it"
+  log "generated engine login (user ${USER_NAME}); set BROLINK_PASS to pin it"
 fi
-sunshine "$CONF" --creds "$USER_NAME" "$PASS_NAME" >/dev/null 2>&1 || true
+"$ENGINE" "$CONF" --creds "$USER_NAME" "$PASS_NAME" >/dev/null 2>&1 || true
 
 # Linux ProjectDirs for app "BroLink" is ~/.local/share/brolink, not
 # ~/.local/share/brolink/BroLink (that extra folder is macOS-style).
@@ -72,8 +89,8 @@ sunshine_pass = "${PASS_NAME}"
 EOF
 fi
 
-log "starting Sunshine"
-sunshine "$CONF" >/var/log/sunshine.log 2>&1 &
+log "starting streaming engine"
+"$ENGINE" "$CONF" >/var/log/sunshine.log 2>&1 &
 
 log "starting BroLink control service"
 exec /usr/local/bin/brolink-host --background

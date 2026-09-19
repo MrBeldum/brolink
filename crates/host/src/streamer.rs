@@ -59,8 +59,17 @@ impl Install {
 /// The end of Sunshine's log, which says which encoder it settled on and
 /// whether it could capture audio. `None` when it cannot be read.
 pub fn log_text(install: &Install) -> Option<String> {
-    let path = install.conf().with_file_name("sunshine.log");
-    read_tail(&path, 512 * 1024)
+    let mut paths = vec![install.conf().with_file_name("sunshine.log")];
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            paths.push(std::path::PathBuf::from(home).join(".config/sunshine/sunshine.log"));
+        }
+        paths.push(std::path::PathBuf::from(
+            "/root/.config/sunshine/sunshine.log",
+        ));
+    }
+    paths.into_iter().find_map(|p| read_tail(&p, 512 * 1024))
 }
 
 /// The encoder family Sunshine settled on at its last start, from its log:
@@ -184,7 +193,7 @@ pub fn start(install: &Install) -> Result<()> {
         c.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        c.spawn().context("start sunshine")?;
+        c.spawn().context("start streaming engine")?;
         let deadline = std::time::Instant::now() + Duration::from_secs(8);
         while std::time::Instant::now() < deadline {
             if running() {
@@ -494,6 +503,9 @@ mod tests {
         let profile = stream_profile(&original).unwrap();
         assert_eq!(profile["max_bitrate"], "0");
         assert_eq!(profile["amd_rc"], "cbr");
+        assert_eq!(profile["amd_quality"], "speed");
+        assert_eq!(profile["sw_preset"], "ultrafast");
+        assert_eq!(profile["min_threads"], "4");
         assert_eq!(profile["fec_percentage"], "20");
         assert_eq!(profile["packetsize"], "1184");
         assert_eq!(profile["dd_resolution_option"], "auto");
