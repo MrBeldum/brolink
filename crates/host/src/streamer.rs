@@ -115,7 +115,11 @@ pub fn audio_problem_in(log: &str) -> Option<String> {
     const WORKED: [&str; 2] = ["Audio capture format is", "Opus initialized"];
     let mut problem = None;
     for line in log.lines() {
-        if WORKED.iter().any(|k| line.contains(k)) {
+        // Encoder probe (and the engine's own "reset default device" at
+        // boot) logs audio failures that the engine then tells us to ignore.
+        if line.contains("Ignore any errors mentioned above")
+            || WORKED.iter().any(|k| line.contains(k))
+        {
             problem = None;
         } else if FAILED.iter().any(|k| line.contains(k)) {
             problem = Some(log_message(line));
@@ -175,19 +179,32 @@ pub fn find() -> Option<Install> {
     }
 }
 
-/// Start the engine as a child process. On Windows the engine is a service
-/// and this is a no-op.
+/// Start the streaming engine. On Windows this runs it as the logged-on
+/// user (the service wrapper launches it as SYSTEM, which cannot see the
+/// user's playback device) and puts a default endpoint back after the
+/// engine's own startup clears it.
 pub fn start(install: &Install) -> Result<()> {
-    if running() {
-        return Ok(());
-    }
     #[cfg(windows)]
     {
         let _ = install;
-        Ok(())
+        crate::audio::take_over_engine().context("take over streaming engine")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        while std::time::Instant::now() < deadline {
+            if running() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        if running() {
+            return Ok(());
+        }
+        anyhow::bail!("streaming engine did not start listening")
     }
     #[cfg(not(windows))]
     {
+        if running() {
+            return Ok(());
+        }
         let conf = install.conf();
         let mut c = Command::new(install.exe());
         if conf.exists() {
@@ -592,6 +609,20 @@ mod tests {
             audio_problem_in(sink).as_deref(),
             Some("Audio sink not found: Steam Streaming Speakers")
         );
+        let probe = "[2026-09-20 07:03:42.108]: Error: Couldn't get default audio endpoint [0x80070490]\n\
+                     [2026-09-20 07:03:43.263]: Info: // Ignore any errors mentioned above, they are not relevant. //\n\
+                     [2026-09-20 07:03:43.264]: Info: Found H.264 encoder: h264_amf [amdvce]\n";
+        assert_eq!(
+            audio_problem_in(probe),
+            None,
+            "startup probe failures are not a missing sound device"
+        );
+        // Hermes: probe error, then ignore, and no later capture failure.
+        let hermes = "[2026-09-20 07:03:42.108]: Error: Couldn't get default audio endpoint [0x80070490]\n\
+                      [2026-09-20 07:03:43.263]: Info: // Ignore any errors mentioned above, they are not relevant. //\n\
+                      [2026-09-20 07:03:43.264]: Info: Found H.264 encoder: h264_amf [amdvce]\n\
+                      [2026-09-20 07:03:43.400]: Info: Found HEVC encoder: hevc_amf [amdvce]\n";
+        assert_eq!(audio_problem_in(hermes), None);
         assert_eq!(
             log_message("  Couldn't capture audio [0x1]  "),
             "Couldn't capture audio [0x1]"
