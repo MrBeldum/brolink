@@ -24,11 +24,13 @@ const NETCHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 /// cheap local call; the ACL changes rarely, so 30 s is plenty.
 const PEER_RELAY_EVERY: Duration = Duration::from_secs(30);
 
-/// A Windows machine on the tailnet, as far as the client can tell.
+/// A machine on the tailnet BroLink can open, as far as this node can tell.
 #[derive(Debug, Clone, Default)]
 pub struct Pc {
     pub node_id: String,
     pub name: String,
+    /// Tailscale OS string ("windows", "macOS", "linux").
+    pub os: String,
     pub ip: Option<Ipv4Addr>,
     /// Tailscale's view; lags a wake-up by up to half a minute.
     pub online: bool,
@@ -175,6 +177,9 @@ fn learn(cfg: &ClientConfig, scan: &Discovery) {
             }
             let entry = learned.pcs.entry(pc.node_id.clone()).or_default();
             entry.name = pc.name.clone();
+            if !pc.os.is_empty() {
+                entry.os = pc.os.clone();
+            }
             if let Some(ip) = pc.ip {
                 entry.tailscale_ip = Some(ip.to_string());
             }
@@ -219,55 +224,29 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
             }
         }
     };
-    let mut peers = st.windows_peers();
+    let mut peers = st.machine_peers();
     let local;
     if std::env::var_os("BROLINK_DEV_LOCAL").is_some() {
         local = tailscale::Node {
             id: "local".into(),
-            host_name: format!("{} (this PC)", brolink_core::config::machine_name()),
-            os: "windows".into(),
+            host_name: format!("{} (this machine)", brolink_core::config::machine_name()),
+            os: std::env::consts::OS.into(),
             tailscale_ips: vec!["127.0.0.1".into()],
             online: true,
             ..Default::default()
         };
         peers.push(&local);
     }
-    let pcs = peers
-        .into_iter()
-        .map(|n| {
-            let ip = n.ipv4();
-            let (host, sunshine, rtt_ms) = match (n.online, ip) {
-                (true, Some(ip)) => {
-                    let host = host_status(ip, Duration::from_millis(900));
-                    let (sunshine, rtt) =
-                        timed_port_open(ip, SUNSHINE_PORT, Duration::from_millis(900));
-                    (host, sunshine, rtt)
-                }
-                _ => (None, false, None),
-            };
-            let mut known = cfg.pcs.get(&n.id).cloned();
-            if let Some(p) = n.public_ipv4() {
-                known.get_or_insert_with(Default::default).public_ip = Some(p.to_string());
-            }
-            Pc {
-                node_id: n.id.clone(),
-                name: n.host_name.clone(),
-                ip,
-                online: n.online,
-                host,
-                sunshine,
-                known,
-                remembered: false,
-                key_expiry_days: n.key_expiry_days(),
-                path: Path {
-                    direct: n.direct(),
-                    relay: n.relay.clone(),
-                    peer_relay: n.peer_relay.clone(),
-                    rtt_ms,
-                },
-            }
-        })
-        .collect();
+    let mut pcs: Vec<Pc> = peers.into_iter().map(|n| probe_peer(cfg, n)).collect();
+    // A tag:relay node that also runs BroLink (a VPS desktop on the same
+    // box as the packet relay) belongs in the machine list too.
+    for n in st.relay_peers() {
+        let pc = probe_peer(cfg, n);
+        if pc.host.is_some() || pc.sunshine {
+            pcs.push(pc);
+        }
+    }
+    pcs.sort_by(|a, b| a.name.cmp(&b.name));
     let relays = st
         .relay_peers()
         .into_iter()
@@ -300,6 +279,7 @@ pub fn remembered(cfg: &ClientConfig) -> Vec<Pc> {
         .map(|(id, k)| Pc {
             node_id: id.clone(),
             name: k.name.clone(),
+            os: k.os.clone(),
             ip: k.tailscale_ip.as_deref().and_then(|s| s.parse().ok()),
             known: Some(k.clone()),
             remembered: true,
@@ -308,6 +288,40 @@ pub fn remembered(cfg: &ClientConfig) -> Vec<Pc> {
         .collect();
     pcs.sort_by(|a, b| a.name.cmp(&b.name));
     pcs
+}
+
+fn probe_peer(cfg: &ClientConfig, n: &tailscale::Node) -> Pc {
+    let ip = n.ipv4();
+    let (host, sunshine, rtt_ms) = match (n.online, ip) {
+        (true, Some(ip)) => {
+            let host = host_status(ip, Duration::from_millis(900));
+            let (sunshine, rtt) = timed_port_open(ip, SUNSHINE_PORT, Duration::from_millis(900));
+            (host, sunshine, rtt)
+        }
+        _ => (None, false, None),
+    };
+    let mut known = cfg.pcs.get(&n.id).cloned();
+    if let Some(p) = n.public_ipv4() {
+        known.get_or_insert_with(Default::default).public_ip = Some(p.to_string());
+    }
+    Pc {
+        node_id: n.id.clone(),
+        name: n.host_name.clone(),
+        os: n.os.clone(),
+        ip,
+        online: n.online,
+        host,
+        sunshine,
+        known,
+        remembered: false,
+        key_expiry_days: n.key_expiry_days(),
+        path: Path {
+            direct: n.direct(),
+            relay: n.relay.clone(),
+            peer_relay: n.peer_relay.clone(),
+            rtt_ms,
+        },
+    }
 }
 
 fn host_status(ip: Ipv4Addr, timeout: Duration) -> Option<Status> {
@@ -703,7 +717,7 @@ fn run(c: &Connect) -> Result<()> {
             fps,
             bitrate_kbps: settings.bitrate_kbps,
             hevc,
-            remote: !t.ip.is_private(),
+            remote: !brolink_stream::session::lan_like_stream(t.ip),
         },
         ri_key,
         ri_iv,

@@ -1,27 +1,26 @@
 # BroLink
 
-Your Windows PC, on your Mac, from anywhere: stream it full screen with
-hardware decode. Leave the PC on (or asleep on its own network) and
-Tailscale is the path.
+Your machines, on any of your machines: stream a desktop full screen over
+Tailscale. Mac, Windows, Linux, and a VPS container all run the same BroLink
+app. Each one lists the others and can Connect; each one can share its own
+desktop.
 
-BroLink is two programs. **BroLink Host** runs on the Windows PC. **BroLink**
-runs on the Mac and contains the whole streaming client: BroLink's stream
-protocol is compiled in, frames are decoded with VideoToolbox and drawn in
-BroLink's own window. Nothing else has to be installed on the Mac. On the
-PC, BroLink Host installs the streaming engine that ships in its zip and
-configures it, so the PC needs no download either.
+On a Mac, frames are decoded with VideoToolbox. On Windows and Linux the
+viewer uses OpenH264. Sharing uses the streaming engine BroLink installs
+(Sunshine): bundled in the Windows zip, downloaded on first Mac setup, and
+shipped in the Docker node image for a VPS.
 
-[Tailscale](https://tailscale.com) connects the two. It carries the stream
-through any NAT and it is the identity check: the host answers only a Mac
-signed in to the same Tailscale account as the PC.
+[Tailscale](https://tailscale.com) is the path and the identity check. A
+machine answers only peers signed in to the same Tailscale account.
 
 ## How a session goes
 
-1. Open BroLink on the Mac. The Windows PCs on your Tailscale account are
-   listed with what each one can do right now.
-2. Click **Connect**. If the PC is asleep, BroLink wakes it and waits. The
-   first time, it pairs with the PC by itself: the PIN goes to BroLink Host
-   over Tailscale, which enters it for you.
+1. Open BroLink. Every machine on your Tailscale account is listed with
+   what it can do right now. **Share this machine** sets up the streaming
+   engine so others can Connect here.
+2. Click **Connect**. If a Windows PC is asleep, BroLink wakes it and waits.
+   The first time, it pairs by itself: the PIN goes to BroLink on that
+   machine over Tailscale, which enters it for you.
 3. The desktop appears, full screen by default, and nothing else: the
    mouse is captured the moment you click the picture, as in a game, so
    games that read raw mouse movement work. **Ctrl+Alt** is the host key,
@@ -29,8 +28,8 @@ signed in to the same Tailscale account as the PC.
    picture with the stream details, whether the path is direct or relayed,
    the mouse mode, a **Keys** menu for Ctrl+Alt+Del and friends and what the
    Command key does, stats, full screen, the PC's power menu, **Stream
-   settings** (the default asks for this Mac's own screen size at 35 Mbps,
-   on every path) and **Disconnect**. Click the picture, or press Ctrl+Alt
+   settings** (the default asks for this screen's own size at 50 Mbps, on
+   every path) and **Disconnect**. Click the picture, or press Ctrl+Alt
    again, and the toolbar goes away. The clipboard follows you both ways.
 4. Leave the PC on if you want to connect from anywhere. Asleep, Tailscale
    is asleep too: this Mac can wake it only from that PC's own network
@@ -47,10 +46,12 @@ signed in to the same Tailscale account as the PC.
    [latest release](https://github.com/MrBeldum/brolink/releases/latest)
    and unzip it. Run `brolink-host.exe`, or `install-host.ps1` for
    shortcuts and start-at-logon.
-3. Click **Set up this PC**. One administrator prompt installs the bundled
+3. Click **Share this machine**. One administrator prompt installs the bundled
    streaming engine as a Windows service (if none is installed), gives
    BroLink a login to it, opens the control port to your tailnet only,
    turns Fast Startup off and arms the network card for Wake-on-LAN.
+   The same window lists every other machine on the account; **Connect**
+   opens their desktop.
 
 Advanced engine settings are not exposed; BroLink configures the engine
 itself. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
@@ -75,8 +76,25 @@ open BroLink.app
 ```
 
 The `xattr` step is needed for a browser download because the app is
-ad-hoc signed rather than Developer-ID signed. Details, including the
+ad-hoc signed rather than Developer-ID signed. Open BroLink and click
+**Share this machine** so a Windows PC (or another Mac) can Connect here;
+macOS will ask for Screen Recording the first time. Details, including the
 toolbar and keyboard behaviour, in [docs/MACOS.md](docs/MACOS.md).
+
+### Linux / VPS (Docker)
+
+A container that shares a virtual desktop on the tailnet, so Mac and
+Windows BroLink can Connect to it. Several copies on one host are several
+machines. See [deploy/node/NODE.md](deploy/node/NODE.md).
+
+```bash
+cp deploy/node/env.example deploy/node/.env
+# paste a Tailscale auth key, pick TS_HOSTNAME
+docker compose -f deploy/node/docker-compose.yml up -d --build
+```
+
+The packet relay (when two NATs cannot punch through) is a separate kit:
+[deploy/relay/RELAY.md](deploy/relay/RELAY.md).
 
 ## Updates
 
@@ -172,9 +190,11 @@ that run against a real engine.
 ```
 crates/core     control API types, small HTTP, Tailscale CLI, wake packets, config
 crates/stream   the stream client: pairing, launch, protocol, decode, audio
-crates/host     Windows: background control service, control panel, setup script, self-update
-crates/client   macOS: PC list, wake, pair, stream window and toolbar, updater
+crates/host     node: control service, engine setup, unified window (view + share)
+crates/client   viewer UI: machine list, wake, pair, stream window and toolbar
 crates/ui       theme and widgets shared by both windows
+deploy/node/    Docker kit: virtual desktop + engine + BroLink on a VPS
+deploy/relay/   Docker kit: Tailscale peer relay
 third_party/    moonlight-common-c (GPL-3.0), vendored
 docs/           platform notes
 scripts/        installers and the macOS bundle

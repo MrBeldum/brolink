@@ -392,12 +392,17 @@ impl Drop for Session {
 /// BroLink treats the user's number as the video target, not a total
 /// budget, so we invert that arithmetic here: ask for enough that what
 /// survives moonlight's reduction is the target the user chose. moonlight
-/// still caps the result at its own 100 Mbps ceiling.
+/// still caps the result at its own 150 Mbps ceiling.
 pub fn request_bitrate_kbps(target_kbps: u32, remote: bool) -> u32 {
     let audio_control = if remote { 500 } else { 0 };
     // Inverse of `adjusted = request * 0.8 - audio_control`, rounded.
     let request = ((u64::from(target_kbps) + audio_control) * 5).div_ceil(4);
     (request as u32).min(200_000)
+}
+
+/// Tailscale (and any RFC 1918 path) is a LAN to the stream protocol.
+pub fn lan_like_stream(ip: std::net::Ipv4Addr) -> bool {
+    brolink_core::tailscale::overlay_or_lan(ip)
 }
 
 fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: [u8; 16]) {
@@ -434,11 +439,13 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         // 1280-guaranteed IPv6 path. Bigger packets mean fewer per frame,
         // which keeps large frames inside Sunshine's four-FEC-block limit
         // instead of shipping them unprotected and stalling on the first loss.
-        packet_size: if s.remote { 1184 } else { 1392 },
+        // Always 1184: STREAM_CFG_LOCAL on Tailscale must not reopen 1392,
+        // which fragments inside the tunnel and makes bitrate swing.
+        packet_size: 1184,
         remote: if s.remote {
             ffi::STREAM_CFG_REMOTE
         } else {
-            ffi::STREAM_CFG_AUTO
+            ffi::STREAM_CFG_LOCAL
         },
         video_formats: formats,
         color_space: ffi::COLORSPACE_REC_709,

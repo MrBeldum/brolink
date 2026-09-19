@@ -123,6 +123,26 @@ impl Node {
     pub fn is_windows(&self) -> bool {
         self.os.eq_ignore_ascii_case("windows")
     }
+    pub fn is_macos(&self) -> bool {
+        self.os.eq_ignore_ascii_case("macos") || self.os.eq_ignore_ascii_case("mac os")
+    }
+    pub fn is_linux(&self) -> bool {
+        self.os.eq_ignore_ascii_case("linux")
+    }
+    /// Short label for the machine list: "Windows", "macOS", "Linux".
+    pub fn os_label(&self) -> &'static str {
+        if self.is_windows() {
+            "Windows"
+        } else if self.is_macos() {
+            "macOS"
+        } else if self.is_linux() {
+            "Linux"
+        } else if self.os.is_empty() {
+            "Unknown"
+        } else {
+            "Other"
+        }
+    }
     /// True only for `tag:relay`. Other tags leave a stream PC in the list.
     pub fn is_relay(&self) -> bool {
         self.tags.iter().any(|t| t == RELAY_TAG)
@@ -162,14 +182,21 @@ impl Status {
             .get(&self.self_node.user_id.to_string())
             .map(|u| u.login_name.as_str())
     }
-    /// Peers running Windows, the only kind BroLink can host on.
-    /// Relay-tagged nodes are omitted even when they report Windows.
+    /// Peers running Windows. Relay-tagged nodes are omitted even when they
+    /// report Windows. Prefer [`machine_peers`] for the streamable list.
     pub fn windows_peers(&self) -> Vec<&Node> {
         let mut v: Vec<&Node> = self
             .peer
             .values()
             .filter(|n| n.is_windows() && !n.is_relay())
             .collect();
+        v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+        v
+    }
+    /// Every tailnet peer that can share a desktop: any OS, minus `tag:relay`
+    /// nodes that exist only to carry packets. Sorted by hostname.
+    pub fn machine_peers(&self) -> Vec<&Node> {
+        let mut v: Vec<&Node> = self.peer.values().filter(|n| !n.is_relay()).collect();
         v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
         v
     }
@@ -300,6 +327,19 @@ pub fn netcheck() -> Result<NetCheck> {
 }
 
 /// The three-letter code of a DERP region, as `tailscale status` prints it.
+/// True for loopback, RFC 1918, or Tailscale's CGNAT range (`100.64/10`).
+/// BroLink never rides the raw internet, so these addresses are a LAN as
+/// far as the stream protocol is concerned.
+pub fn overlay_or_lan(ip: Ipv4Addr) -> bool {
+    if ip.is_loopback() || ip.is_private() {
+        return true;
+    }
+    // 100.64.0.0/10 (shared address space). `Ipv4Addr::is_shared` is not
+    // stable on the toolchain BroLink pins.
+    let o = ip.octets();
+    o[0] == 100 && o[1] >= 64 && o[1] <= 127
+}
+
 pub fn derp_code(region: i32) -> &'static str {
     match region {
         1 => "nyc",
@@ -470,6 +510,21 @@ mod tests {
             pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
             ["Den", "Gaming-PC-2", "Office"]
         );
+        let machines = st.machine_peers();
+        assert_eq!(
+            machines
+                .iter()
+                .map(|n| n.host_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Den", "Example Mac", "Gaming-PC-2", "Office"],
+            "machine_peers includes every OS, not only Windows"
+        );
+        assert_eq!(st.peer["nodekey:a"].os_label(), "macOS");
+        assert_eq!(st.peer["nodekey:b"].os_label(), "Windows");
+        assert!(overlay_or_lan("100.64.0.10".parse().unwrap()));
+        assert!(overlay_or_lan("192.168.1.10".parse().unwrap()));
+        assert!(overlay_or_lan("127.0.0.1".parse().unwrap()));
+        assert!(!overlay_or_lan("8.8.8.8".parse().unwrap()));
         assert_eq!(
             pcs[2].ipv4(),
             Some("100.64.0.30".parse().unwrap()),
@@ -582,6 +637,14 @@ mod tests {
             pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
             ["Gaming-PC", "tagged-pc"],
             "a Windows node carrying tag:relay is excluded, but any other tag stays"
+        );
+        assert_eq!(
+            st.machine_peers()
+                .iter()
+                .map(|n| n.host_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Gaming-PC", "tagged-pc"],
+            "machine_peers is every OS minus tag:relay"
         );
 
         let relays = st.relay_peers();

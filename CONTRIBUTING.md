@@ -22,12 +22,14 @@ aarch64-apple-darwin` from Windows after `rustup target add`.
   pairing and launch API, `session` drives moonlight-common-c through the C
   shim in `csrc/`, `video` and `audio` decode. It knows nothing about
   windows or Tailscale.
-- `crates/client`: the Mac app. `session.rs` is the path from a listed PC to
-  a live stream; `stream.rs` is the toolbar and input while streaming;
-  `video.rs` draws frames with wgpu.
-- `crates/host`: the Windows service and panel. Anything that needs
-  administrator rights goes into the generated setup script in `setup.rs`,
-  so it runs behind one UAC prompt and stays readable as PowerShell.
+- `crates/client`: the viewer UI (a library plus `brolink-client`).
+  `session.rs` is the path from a listed machine to a live stream;
+  `stream.rs` is the toolbar and input while streaming; `video.rs` draws
+  frames with wgpu.
+- `crates/host`: the node (`brolink-host`): control service, engine setup,
+  and the unified window that both views other machines and shares this
+  one. Windows administrator work stays in the generated setup script in
+  `setup.rs`. macOS/Linux setup is `unix_setup.rs`.
 - `crates/core`: the control API, a small HTTP client and server, the
   Tailscale CLI wrapper and wake packets.
 - `crates/ui`: one palette, one typeface, one set of cards, rows, pills and

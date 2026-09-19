@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "BroLink: your Windows PC on this Mac"
+description = "BroLink: view and share machines on your tailnet"
+
+[lib]
+name = "brolink_client"
+path = "src/lib.rs"
 
 [[bin]]
 name = "brolink-client"

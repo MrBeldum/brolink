@@ -6,6 +6,21 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- BroLink is a mesh. Every install lists every other machine on the
+  Tailscale account — Windows, Mac, Linux, a VPS container — and Connect
+  opens that desktop. The same app shares this machine: Mac and Linux
+  install the streaming engine; Windows still does. There is no designated
+  host or client role.
+- `deploy/node/` is a Docker kit for a VPS or any container: a virtual
+  desktop, the streaming engine, BroLink's control service, and optional
+  Tailscale userspace so the container is its own machine. Several copies
+  on one host are several machines. The packet relay stays `deploy/relay/`.
+- Stream bitrate holds the target instead of swinging with the scene.
+  Sunshine is set to constant bitrate (AMD CBR+HRD, NVENC VBV, VA-API CBR),
+  Tailscale is treated as a LAN so moonlight does not tax 500 kbps or shrink
+  packets to 1024, packets stay 1184 bytes for WireGuard's MTU, and the
+  moonlight cap is 150 Mbps. Recommended quality is 50 Mbps; Sharp is 100.
+
 - One pointer. Freeing the mouse showed the Mac cursor behind egui's back,
   and it stayed on top of the PC's own cursor in the picture until the
   pointer left the window; the cursor is now hidden the one way egui
