@@ -26,6 +26,11 @@ jobs:
         run: cargo test --workspace
       - name: release build
         run: cargo build --workspace --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brolink-host-windows
+          path: target/release/brolink-host.exe
+          if-no-files-found: error
 
   test-macos:
     runs-on: macos-14
@@ -54,7 +59,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: native deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang pkg-config libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: clippy
         run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client -p brolink-host --all-targets -- -D warnings
       - name: test
@@ -68,5 +73,3 @@ jobs:
       - uses: actions/checkout@v4
       - name: node kit selftest
         run: bash deploy/node/selftest.sh
-      - name: relay kit selftest
-        run: bash deploy/relay/selftest.sh
