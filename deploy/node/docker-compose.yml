@@ -1,0 +1,38 @@
+# BroLink node — a virtual desktop on this VPS (or any Docker host) that
+# other BroLink machines on your Tailscale account can open.
+#
+# From the repository root:
+#   cp deploy/node/env.example deploy/node/.env
+#   # put a Tailscale auth key in .env
+#   docker compose -f deploy/node/docker-compose.yml up -d --build
+#
+# Repeat with a different project name / TS_HOSTNAME for another container
+# on the same host; each one is its own tailnet machine.
+
+name: brolink-node
+
+services:
+  node:
+    build:
+      context: ../..
+      dockerfile: deploy/node/Dockerfile
+    image: ${BROLINK_IMAGE:-brolink-node:local}
+    container_name: ${BROLINK_CONTAINER:-brolink-node}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DISPLAY: ":1"
+      SCREEN_SIZE: ${SCREEN_SIZE:-1920x1080x24}
+    volumes:
+      - node-config:/root/.config
+      - node-local:/root/.local
+      - node-tailscale:/var/lib/tailscale
+    # Reachable only through Tailscale userspace. Do not publish GameStream
+    # ports on the public internet.
+    shm_size: "1gb"
+
+volumes:
+  node-config:
+  node-local:
+  node-tailscale:

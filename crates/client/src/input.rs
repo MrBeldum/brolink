@@ -7,6 +7,7 @@ use brolink_stream::ffi::{
 use brolink_stream::Input;
 use egui::{Key, Modifiers, PointerButton};
 use std::collections::BTreeSet;
+use std::ffi::c_char;
 
 pub const VK_SHIFT: i16 = 0x10;
 pub const VK_CONTROL: i16 = 0x11;
@@ -130,7 +131,7 @@ pub fn button(b: PointerButton) -> Option<i32> {
 /// Press `keys` in order and release them in reverse, with `mask` for the
 /// modifiers already held. Usable from any thread, which is what a paste
 /// that first has to reach the PC's clipboard needs.
-pub fn press_chord(input: &Input, keys: &[i16], mask: i8) {
+pub fn press_chord(input: &Input, keys: &[i16], mask: c_char) {
     let mut held = Vec::new();
     for &k in keys {
         held.push(k);
@@ -142,8 +143,8 @@ pub fn press_chord(input: &Input, keys: &[i16], mask: i8) {
     }
 }
 
-fn mask_of(keys: &[i16]) -> i8 {
-    let mut m = 0;
+fn mask_of(keys: &[i16]) -> c_char {
+    let mut m: c_char = 0;
     if keys.contains(&VK_SHIFT) {
         m |= MODIFIER_SHIFT;
     }
@@ -209,7 +210,7 @@ impl Held {
     }
 
     /// The modifier byte Moonlight wants alongside every key event.
-    pub fn mask(&self) -> i8 {
+    pub fn mask(&self) -> c_char {
         [
             (VK_SHIFT, MODIFIER_SHIFT),
             (VK_CONTROL, MODIFIER_CTRL),

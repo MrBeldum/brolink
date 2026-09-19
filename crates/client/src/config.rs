@@ -76,13 +76,13 @@ impl Preset {
     /// Resolution, frames per second, kilobits per second.
     pub fn values(self) -> (Resolution, u32, u32) {
         match self {
-            Preset::Smooth => (Resolution::P1080, 60, 12_000),
-            Preset::Balanced => (Resolution::Native, 60, 35_000),
-            Preset::Sharp => (Resolution::Native, 60, 65_000),
+            Preset::Smooth => (Resolution::P1080, 60, 20_000),
+            Preset::Balanced => (Resolution::Native, 60, 50_000),
+            Preset::Sharp => (Resolution::Native, 60, 100_000),
         }
     }
 
-    /// "1080p · 60 fps · 12 Mbps"
+    /// "1080p · 60 fps · 20 Mbps"
     pub fn describe(self) -> String {
         let (r, fps, kbps) = self.values();
         format!("{} · {fps} fps · {} Mbps", r.label(), kbps / 1000)
@@ -119,7 +119,7 @@ impl Default for StreamSettings {
             quality: Quality::Auto,
             resolution: Resolution::Native,
             fps: 60,
-            bitrate_kbps: 35_000,
+            bitrate_kbps: 50_000,
             codec: Codec::Auto,
             app: "Desktop".into(),
             fullscreen: true,
@@ -144,7 +144,7 @@ impl StreamSettings {
             .find(|p| p.values() == (self.resolution, self.fps, self.bitrate_kbps))
     }
 
-    /// "1080p · 60 fps · 12 Mbps"
+    /// "1080p · 60 fps · 20 Mbps"
     pub fn describe(&self) -> String {
         format!(
             "{} · {} fps · {} Mbps",
@@ -166,6 +166,10 @@ pub struct KnownPc {
     pub public_ip: Option<String>,
     /// Sunshine's certificate (hex DER) from pairing; absent until paired.
     pub server_cert: Option<String>,
+    /// Tailscale OS string, so a remembered machine still shows Windows /
+    /// macOS / Linux when Tailscale is down.
+    #[serde(default)]
+    pub os: String,
     /// The PC's Tailscale address, so it can still be listed and reached
     /// when this Mac's Tailscale cannot say.
     pub tailscale_ip: Option<String>,
@@ -292,8 +296,8 @@ mod tests {
         st.apply_preset(Preset::Smooth);
         assert_eq!(st.quality, Quality::Custom);
         assert_eq!(st.preset(), Some(Preset::Smooth));
-        assert_eq!(st.describe(), "1080p · 60 fps · 12 Mbps");
-        assert_eq!(Preset::Sharp.describe(), "Match screen · 60 fps · 65 Mbps");
+        assert_eq!(st.describe(), "1080p · 60 fps · 20 Mbps");
+        assert_eq!(Preset::Sharp.describe(), "Match screen · 60 fps · 100 Mbps");
         let mut c = ClientConfig::default();
         c.pcs.insert(
             "n".into(),
@@ -305,6 +309,7 @@ mod tests {
                 server_cert: Some("3082".into()),
                 tailscale_ip: Some("100.64.0.10".into()),
                 last_seen_unix: Some(1_788_739_200),
+                ..Default::default()
             },
         );
         let back: ClientConfig = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();

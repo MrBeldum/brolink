@@ -33,14 +33,33 @@ pub struct Install {
 
 impl Install {
     pub fn exe(&self) -> PathBuf {
-        self.dir.join("sunshine.exe")
+        #[cfg(windows)]
+        {
+            self.dir.join("sunshine.exe")
+        }
+        #[cfg(not(windows))]
+        {
+            crate::unix_setup::exe_in(&self.dir)
+        }
+    }
+
+    pub fn conf(&self) -> PathBuf {
+        #[cfg(windows)]
+        {
+            self.dir.join("config").join("sunshine.conf")
+        }
+        #[cfg(not(windows))]
+        {
+            crate::unix_setup::conf_path()
+                .unwrap_or_else(|_| self.dir.join("config").join("sunshine.conf"))
+        }
     }
 }
 
 /// The end of Sunshine's log, which says which encoder it settled on and
 /// whether it could capture audio. `None` when it cannot be read.
 pub fn log_text(install: &Install) -> Option<String> {
-    let path = install.dir.join("config").join("sunshine.log");
+    let path = install.conf().with_file_name("sunshine.log");
     read_tail(&path, 512 * 1024)
 }
 
@@ -126,13 +145,55 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
 }
 
 pub fn find() -> Option<Install> {
-    INSTALL_DIRS
-        .iter()
-        .map(|(kind, dir)| Install {
-            kind,
-            dir: PathBuf::from(dir),
-        })
-        .find(|i| i.exe().exists())
+    #[cfg(windows)]
+    {
+        INSTALL_DIRS
+            .iter()
+            .map(|(kind, dir)| Install {
+                kind,
+                dir: PathBuf::from(dir),
+            })
+            .find(|i| i.exe().exists())
+    }
+    #[cfg(not(windows))]
+    {
+        crate::unix_setup::candidates()
+            .into_iter()
+            .find(|i| i.exe().exists())
+    }
+}
+
+/// Start the engine as a child process. On Windows the engine is a service
+/// and this is a no-op.
+pub fn start(install: &Install) -> Result<()> {
+    if running() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        let _ = install;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let conf = install.conf();
+        let mut c = Command::new(install.exe());
+        if conf.exists() {
+            c.arg(&conf);
+        }
+        c.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        c.spawn().context("start sunshine")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if running() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        anyhow::bail!("streaming engine did not start listening")
+    }
 }
 
 /// Sunshine's GameStream port answers on loopback.
@@ -197,7 +258,8 @@ impl Api<'_> {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
-        let mut c = Command::new("curl.exe");
+        let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+        let mut c = Command::new(curl);
         c.args([
             "-sk",
             "--max-time",
@@ -431,6 +493,9 @@ mod tests {
             "encoder":"amdvce", "max_bitrate":"1000", "dd_resolution_option":"manual", "output_name":"virtual"});
         let profile = stream_profile(&original).unwrap();
         assert_eq!(profile["max_bitrate"], "0");
+        assert_eq!(profile["amd_rc"], "cbr");
+        assert_eq!(profile["fec_percentage"], "20");
+        assert_eq!(profile["packetsize"], "1184");
         assert_eq!(profile["dd_resolution_option"], "auto");
         assert_eq!(profile["dd_refresh_rate_option"], "auto");
         assert_eq!(profile["encoder"], "amdvce");

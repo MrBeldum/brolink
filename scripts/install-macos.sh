@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 rustup target add aarch64-apple-darwin >/dev/null
-cargo build --release -p brolink-client --target aarch64-apple-darwin
+cargo build --release -p brolink-host --target aarch64-apple-darwin
 bash "$ROOT/scripts/bundle-macos.sh"
 APP="$ROOT/dist/BroLink.app"
 if [[ ! -d "$APP" ]]; then
@@ -22,4 +22,4 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 "$LSREGISTER" -f /Applications/BroLink.app 2>/dev/null || true
 rm -rf "$APP"
 echo "installed /Applications/BroLink.app"
-echo "open it; it lists the Windows PCs on your Tailscale account."
+echo "open it; it lists every machine on your Tailscale account, and can share this Mac."

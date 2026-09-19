@@ -26,6 +26,11 @@ jobs:
         run: cargo test --workspace
       - name: release build
         run: cargo build --workspace --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brolink-host-windows
+          path: target/release/brolink-host.exe
+          if-no-files-found: error
 
   test-macos:
     runs-on: macos-14
@@ -37,10 +42,34 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy
-        run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client --all-targets -- -D warnings
+        run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client -p brolink-host --all-targets -- -D warnings
       - name: test
-        run: cargo test -p brolink-core -p brolink-stream -p brolink-client
-      - name: release client
-        run: cargo build --release -p brolink-client --target aarch64-apple-darwin
+        run: cargo test -p brolink-core -p brolink-stream -p brolink-client -p brolink-host
+      - name: release app
+        run: cargo build --release -p brolink-host --target aarch64-apple-darwin
       - name: bundle
         run: bash scripts/bundle-macos.sh
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: native deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang nasm pkg-config libssl-dev libasound2-dev libpulse-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: clippy
+        run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client -p brolink-host --all-targets -- -D warnings
+      - name: test
+        run: cargo test -p brolink-core -p brolink-stream -p brolink-client -p brolink-host
+      - name: release host
+        run: cargo build --release -p brolink-host
+
+  deploy-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: node kit selftest
+        run: bash deploy/node/selftest.sh
