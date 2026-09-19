@@ -19,7 +19,7 @@ mod win {
         Ok(dir)
     }
 
-    pub(crate) fn install_helpers() -> Result<PathBuf> {
+    pub fn install_helpers() -> Result<PathBuf> {
         let dir = helper_dir()?;
         std::fs::write(
             dir.join("take-over-engine.ps1"),
@@ -61,10 +61,7 @@ mod win {
     fn session_id() -> u32 {
         let mut id = 0u32;
         let _ = unsafe {
-            windows::Win32::System::Threading::ProcessIdToSessionId(
-                windows::Win32::System::Threading::GetCurrentProcessId(),
-                &mut id,
-            )
+            windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(std::process::id(), &mut id)
         };
         id
     }
