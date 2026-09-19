@@ -692,7 +692,16 @@ fn run(c: &Connect) -> Result<()> {
     let ri_id: u32 = rand::random();
     let mut ri_iv = [0u8; 16];
     ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
-    let rtsp = client.launch(app.id, w, h, fps, &ri_key, ri_id, info.current_game != 0)?;
+    let rtsp = client.launch(
+        app.id,
+        w,
+        h,
+        fps,
+        settings.bitrate_kbps,
+        &ri_key,
+        ri_id,
+        info.current_game != 0,
+    )?;
 
     // 5. Connect.
     if cancelled(&c.progress) {
@@ -717,7 +726,7 @@ fn run(c: &Connect) -> Result<()> {
             fps,
             bitrate_kbps: settings.bitrate_kbps,
             hevc,
-            remote: !brolink_stream::session::lan_like_stream(t.ip),
+            remote: false,
         },
         ri_key,
         ri_iv,

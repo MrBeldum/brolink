@@ -211,12 +211,11 @@ impl Service {
         } else {
             running && self.streamer.lock().api_ok
         };
-        // Apply the streaming profile on existing BroLink-managed installations,
+        // Apply the streaming profile on any engine BroLink can log into,
         // after any old app has ended. The marker survives panel/config saves.
-        if tick.is_multiple_of(6) && api_ok && install.as_ref().is_some_and(|i| i.kind == "BroLink")
-        {
+        if tick.is_multiple_of(6) && api_ok && install.is_some() {
             if let Ok(dir) = brolink_core::config::data_dir() {
-                let marker = dir.join("stream-profile-v2");
+                let marker = dir.join("stream-profile-v3");
                 if !marker.exists() {
                     let api = Api {
                         user: &cfg.sunshine_user,
@@ -227,7 +226,7 @@ impl Service {
                             if let Err(e) = std::fs::write(&marker, "1") {
                                 self.log(format!("could not save stream profile version: {e}"));
                             }
-                            self.log("stream profile ready: match client display, constant bitrate, 60 fps minimum");
+                            self.log("stream profile ready: match client display, constant bitrate, 60 fps");
                         }
                         Ok(false) => {} // A running app owns the display until it ends.
                         Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
@@ -256,7 +255,7 @@ impl Service {
         let st = Streamer {
             kind: install
                 .as_ref()
-                .map(|i| i.kind.to_string())
+                .map(|_| "BroLink".to_string())
                 .unwrap_or_default(),
             installed: install.is_some(),
             running,
@@ -269,32 +268,27 @@ impl Service {
             if (cur.installed, cur.running, cur.api_ok) != (st.installed, st.running, st.api_ok) {
                 self.log(match (&st.installed, &st.running, &st.api_ok) {
                     (false, _, _) => "the streaming engine is not installed".to_string(),
-                    (true, false, _) => format!("{} is installed but not running", st.kind),
+                    (true, false, _) => "BroLink is installed but not sharing yet".to_string(),
                     (true, true, false) => {
-                        format!("{} is running; BroLink cannot log in to it yet", st.kind)
+                        "BroLink is running; the streaming engine has no working login yet".into()
                     }
-                    (true, true, true) => {
-                        format!("{} is running and BroLink is logged in", st.kind)
-                    }
+                    (true, true, true) => "BroLink is sharing this machine".to_string(),
                 });
             }
             if cur.encoder != st.encoder && !st.encoder.is_empty() {
                 self.log(if st.encoder == "software" {
-                    format!(
-                        "{} encodes in software: no GPU encoder worked, so streams will be slow",
-                        st.kind
-                    )
+                    "encoding in software (no GPU encoder); using every CPU core".into()
                 } else {
-                    format!("{} encodes with {}", st.kind, st.encoder)
+                    format!("encoding with {}", st.encoder)
                 });
             }
             if cur.audio_problem != st.audio_problem {
                 self.log(if st.audio_problem.is_empty() {
-                    format!("{} can capture audio again", st.kind)
+                    "audio capture is working again".into()
                 } else {
                     format!(
-                        "{} has no sound to send: {}. A PC with no monitor or speakers needs a virtual audio device",
-                        st.kind, st.audio_problem
+                        "no sound to send: {}. A PC with no monitor or speakers needs a virtual audio device",
+                        st.audio_problem
                     )
                 });
             }
@@ -388,12 +382,9 @@ impl Service {
         if !streamer.installed {
             setup.push("The streaming engine is not installed.".into());
         } else if !streamer.running {
-            setup.push(format!("{} is installed but not running.", streamer.kind));
+            setup.push("The streaming engine is installed but not running.".into());
         } else if !streamer.api_ok {
-            setup.push(format!(
-                "BroLink has no working login for {}.",
-                streamer.kind
-            ));
+            setup.push("BroLink has no working login for the streaming engine.".into());
         } else if cfg!(windows)
             && streamer.kind == "BroLink"
             && !crate::brand::is_branded_cached(std::path::Path::new(crate::streamer::ENGINE_DIR))

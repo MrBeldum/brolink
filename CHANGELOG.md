@@ -6,6 +6,16 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Software encode (a VPS with no GPU) uses every CPU core and the
+  ultrafast preset so 1080p60 holds instead of collapsing to ~30 fps and a
+  trickle of bitrate. AMD encode prefers speed, with preanalysis off, so
+  the target rate does not sit at ~18 Mbps on a still desktop.
+- The stream protocol always treats Tailscale as a LAN: no 1024-byte
+  packets, no extra 500 kbps tax, and the bitrate is sent at launch as
+  well as over RTSP.
+- The streaming engine is not a second app. Status, logs, the Dock and
+  the app list say BroLink; only Desktop is launched.
+
 - BroLink is a mesh. Every install lists every other machine on the
   Tailscale account — Windows, Mac, Linux, a VPS container — and Connect
   opens that desktop. The same app shares this machine: Mac and Linux
