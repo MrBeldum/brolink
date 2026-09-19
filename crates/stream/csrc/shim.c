@@ -37,7 +37,10 @@ static int dr_submit(PDECODE_UNIT du) {
     }
     int off = 0;
     for (PLENTRY e = du->bufferList; e != NULL; e = e->next) {
-        memcpy(g_frame + off, e->data, e->length);
+        if (e->length < 0 || e->length > g_frame_cap - off) {
+            return DR_NEED_IDR;
+        }
+        memcpy(g_frame + off, e->data, (size_t)e->length);
         off += e->length;
     }
     return g_cb.video_frame(g_ctx, g_frame, off, du->frameType, du->frameNumber,
@@ -157,6 +160,7 @@ int bl_start(const bl_server_info* server, const bl_stream_config* cfg, const bl
 
 void bl_stop(void) {
     LiStopConnection();
+    g_ctx = NULL;
 }
 
 void bl_interrupt(void) {

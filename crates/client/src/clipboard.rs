@@ -181,6 +181,7 @@ fn fetch(ip: Ipv4Addr) -> Result<Clipboard, Fail> {
 fn poll_loop(ip: Ipv4Addr, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, ctx: egui::Context) {
     let mut failures = 0u32;
     let mut pokes_seen = 0u32;
+    let mut primed = false;
     while !stop.load(Ordering::Relaxed) {
         // Sleep in small steps so a poke or a stop is noticed quickly.
         let mut waited = Duration::ZERO;
@@ -200,6 +201,17 @@ fn poll_loop(ip: Ipv4Addr, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, ct
             Ok(c) => {
                 failures = 0;
                 let mut sh = shared.lock();
+                if !primed {
+                    // The PC's existing clipboard is not a copy that happened
+                    // during this stream. Seed last/seq so we do not overwrite
+                    // whatever the Mac was holding.
+                    primed = true;
+                    sh.last_seq = Some(c.seq);
+                    if !c.text.is_empty() {
+                        sh.last = c.text;
+                    }
+                    continue;
+                }
                 if sh.last_seq != Some(c.seq) {
                     sh.last_seq = Some(c.seq);
                     if !c.text.is_empty() && c.text != sh.last {

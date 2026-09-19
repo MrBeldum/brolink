@@ -13,16 +13,16 @@ the picture is drawn in BroLink's own window under a toolbar.
 
 ## Install a prebuilt app
 
-With the [GitHub CLI](https://cli.github.com) installed and signed in
-(`brew install gh && gh auth login`):
+Public releases download with `curl`. If the repository is private, install
+the [GitHub CLI](https://cli.github.com) and sign in
+(`brew install gh && gh auth login`) so the script can fall back to `gh`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
 ```
 
-It fetches the release through `gh` (the repository is private, so a plain
-`curl` cannot), clears the quarantine flag, copies the app to
-`/Applications` and opens it.
+It checks the release SHA-256, verifies the ad-hoc signature, swaps the app
+into `/Applications` (the live copy is not deleted first) and opens it.
 
 By hand: download `brolink-macos-arm64.tar.gz` from the
 [latest release](https://github.com/MrBeldum/brolink/releases/latest), then
@@ -257,7 +257,7 @@ shows the new version a few seconds later. The PC's desktop has to be
 unlocked and in front, since the Run box needs it. From then on updates
 arrive by themselves.
 
-The download needs a GitHub login because the repository is private. The
+Public releases need no GitHub login. If the repository is private, the
 app uses, in order: `github_token` in `client.toml`, `BROLINK_GITHUB_TOKEN`
 in the environment, and the token git has stored for github.com (which is
 there after `install-macos-release.sh` or any `git` use with the osxkeychain

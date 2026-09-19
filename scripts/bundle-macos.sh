@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-client"
-if [[ ! -f "$BIN" ]]; then
-  BIN="$ROOT/target/release/brolink-client"
+CROSS="$ROOT/target/aarch64-apple-darwin/release/brolink-client"
+NATIVE="$ROOT/target/release/brolink-client"
+if [[ -f "$CROSS" && -f "$NATIVE" ]]; then
+  if [[ "$NATIVE" -nt "$CROSS" ]]; then
+    BIN="$NATIVE"
+  else
+    BIN="$CROSS"
+  fi
+elif [[ -f "$CROSS" ]]; then
+  BIN="$CROSS"
+else
+  BIN="$NATIVE"
 fi
 if [[ ! -f "$BIN" ]]; then
   echo "build the client first: cargo build --release -p brolink-client" >&2
@@ -52,7 +61,12 @@ PLIST
 # bundle. Set CODESIGN_IDENTITY to a "Developer ID Application" certificate
 # for a build Gatekeeper accepts once notarized (see docs/MACOS.md).
 IDENTITY="${CODESIGN_IDENTITY:--}"
-codesign --force --deep --sign "$IDENTITY" "$APP"
+if [[ "$IDENTITY" == "-" ]]; then
+  codesign --force --sign "$IDENTITY" "$APP"
+else
+  # Notarization requires the hardened runtime and a secure timestamp.
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+fi
 codesign --verify --deep --strict "$APP"
 if [[ "$IDENTITY" == "-" ]]; then
   echo "wrote $APP (ad-hoc signed; set CODESIGN_IDENTITY for a Developer ID build)"

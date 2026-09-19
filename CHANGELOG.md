@@ -6,6 +6,25 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Settings and pairing no longer wipe each other. The window, discovery and
+  pairing used to rewrite all of `client.toml` from a stale copy, so a
+  bitrate change could drop the PC's certificate and a reconnect right after
+  the first pair could ask for a PIN again.
+- An update no longer installs while a connect is pairing, and a cancelled
+  connect cannot finish into the next one.
+- Connecting no longer overwrites the Mac clipboard with whatever the PC
+  already held. Ctrl+Alt (the host key) is not sent to Windows. Captured
+  mouse movement is scaled to the stream's pixels.
+- Host setup runs `brolink-host --setup-elevated` after UAC instead of a
+  user-writable `setup.ps1`. Repair setup registers the engine service when
+  files exist but the service is down. Firewall `program=` paths are
+  single-quoted so a `$` in the username is not expanded.
+- Auto-update refuses a GitHub asset with no SHA-256. The Mac installer
+  checks that digest, verifies the signature, and swaps `/Applications`
+  without deleting the live app first.
+- Stream teardown waits for in-flight input and keeps the session alive
+  until moonlight's detached termination thread has nowhere to call.
+
 - One pointer. Freeing the mouse showed the Mac cursor behind egui's back,
   and it stayed on top of the PC's own cursor in the picture until the
   pointer left the window; the cursor is now hidden the one way egui

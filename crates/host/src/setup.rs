@@ -225,7 +225,10 @@ pub fn script(p: &Plan<'_>) -> String {
     };
     let install = if p.install_engine {
         format!(
-            r#"if (-not $dir -or $dir -ne '{engine}') {{
+            r#"$needFiles = (-not $dir) -or ($dir -ne '{engine}')
+$svcUp = ((Get-Service -Name '{service}' -ErrorAction SilentlyContinue).Status -eq 'Running') -or ((Get-Service -Name '{upstream}' -ErrorAction SilentlyContinue).Status -eq 'Running')
+if ($needFiles -or -not $svcUp) {{
+    if ($needFiles) {{
     # Every mutating step below is critical: a half-installed engine that the
     # service points at is worse than no engine. 'Stop' turns the cmdlets that
     # report failure as a NON-terminating error - Expand-Archive, Copy-Item,
@@ -275,6 +278,8 @@ pub fn script(p: &Plan<'_>) -> String {
         if (-not (Test-Path (Join-Path '{engine}' $need))) {{ throw "the engine did not copy to {engine}: $need is missing" }}
     }}
     $dir = '{engine}'
+    }}
+    if (-not $dir) {{ $dir = '{engine}' }}
     {migrate_copy}Write-EngineConf $dir
     {brand_new}{stop_old}Step "Registering the {display} service"
     # The engine's service wrapper is SERVICE_WIN32_OWN_PROCESS, so Windows
@@ -287,16 +292,20 @@ pub fn script(p: &Plan<'_>) -> String {
     $svcBin = '"' + (Join-Path $dir 'tools\sunshinesvc.exe') + '"'
     $svc = '{service}'
     if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {{
+        Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
         sc.exe delete $svc | Out-Null
         if ($LASTEXITCODE -ne 0) {{ throw "could not remove the existing $svc service (sc exit $LASTEXITCODE)" }}
-        Start-Sleep -Milliseconds 500
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Service -Name $svc -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 400 }}
     }}
     New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to BroLink.' | Out-Null
     Start-Service -Name $svc -ErrorAction SilentlyContinue
     if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).Status -ne 'Running') {{
         Step "  '{service}' would not start; re-registering under the engine's own service name"
+        Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
         sc.exe delete $svc | Out-Null
-        Start-Sleep -Milliseconds 500
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Service -Name $svc -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 400 }}
         if (Get-Service -Name '{upstream}' -ErrorAction SilentlyContinue) {{ throw "'{service}' would not start and '{upstream}' already exists; leaving that engine alone" }}
         $svc = '{upstream}'
         New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to BroLink.' | Out-Null
@@ -448,10 +457,10 @@ try {{
 }}
 Step "Opening TCP {port} to the tailnet for BroLink Host"
 netsh advfirewall firewall delete rule name="BroLink Host" | Out-Null
-netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program="{exe}" | Out-Null
+netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
 Step "Opening UDP 9 so a Mac can check its wake path while this PC is awake"
 netsh advfirewall firewall delete rule name="BroLink wake" | Out-Null
-netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program="{exe}" | Out-Null
+netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program='{exe}' | Out-Null
 if ($dir) {{
     # BroLink names and scopes these itself rather than running the engine's
     # own add-firewall-rule script, which opens every TCP and UDP port under
@@ -486,7 +495,7 @@ exit 0
         migrate_flag = if p.migrate { "$true" } else { "$false" },
         creds = creds,
         port = CONTROL_PORT,
-        exe = p.exe.display(),
+        exe = q(&p.exe.display().to_string()),
         tcp_rule = TCP_RULE,
         udp_rule = UDP_RULE,
         adapter = adapter,
@@ -498,31 +507,23 @@ exit 0
     )
 }
 
-/// Write the script and run it elevated. Blocks until the elevated
-/// PowerShell exits (or the UAC prompt is declined, which is an error).
+/// Ask Windows for an administrator token, then run [`run_as_admin`] in a
+/// new process. The script is generated only after elevation, so a user-
+/// writable `setup.ps1` cannot be swapped during the UAC prompt.
 pub fn run(p: &Plan<'_>) -> Result<()> {
-    let dir = data_dir()?;
-    let path = dir.join("setup.ps1");
-    // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
-    // a Korean/Japanese username or adapter name ("이더넷") would be mangled
-    // and the firewall rule would point at a path that does not exist.
-    let mut bytes = b"\xEF\xBB\xBF".to_vec();
-    bytes.extend(script(p).as_bytes());
-    std::fs::write(&path, bytes)?;
-    let log = dir.join("setup.log");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let file = path.display().to_string().replace('\'', "''");
-        let logq = log.display().to_string().replace('\'', "''");
+        let exe = q(&p.exe.display().to_string());
+        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("brolink-setup.log"));
         let launch = format!(
-            "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','& ''{file}'' *>&1 | Out-File -Encoding utf8 ''{logq}''; exit $LASTEXITCODE'); exit $p.ExitCode"
+            "$p = Start-Process -FilePath '{exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('--setup-elevated'); if ($null -eq $p) {{ exit 1 }}; exit $p.ExitCode"
         );
         let status = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
             .creation_flags(0x0800_0000)
             .status()
-            .context("launch elevated PowerShell")?;
+            .context("launch elevated BroLink Host")?;
         anyhow::ensure!(
             status.success(),
             "the administrator prompt was declined or setup failed (see {})",
@@ -532,9 +533,64 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let _ = log;
+        let _ = script(p);
         anyhow::bail!("setup runs on Windows only")
     }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn q(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Generate and run the setup script. Called from `--setup-elevated` after
+/// UAC, so the file is written by the elevated process itself.
+pub fn run_as_admin() -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let exe = std::env::current_exe().context("own path")?;
+        let cfg = crate::config::HostConfig::load();
+        let wake = crate::wake::probe();
+        let install = crate::streamer::find();
+        let kind = install.as_ref().map(|i| i.kind).unwrap_or("");
+        let migrate = crate::migrate::uses_old_engine(kind);
+        let running = install.is_some() && crate::streamer::running();
+        let plan = Plan {
+            exe: &exe,
+            install_engine: install.is_none() || migrate || !running,
+            migrate,
+            dry_run: false,
+            sunshine_user: &cfg.sunshine_user,
+            sunshine_pass: &cfg.sunshine_pass,
+            adapter: &wake.adapter,
+            adapter_description: &wake.description,
+        };
+        let tmp = std::env::temp_dir().join(format!("brolink-setup-{}.ps1", std::process::id()));
+        let mut bytes = b"\xEF\xBB\xBF".to_vec();
+        bytes.extend(script(&plan).as_bytes());
+        std::fs::write(&tmp, &bytes)?;
+        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("brolink-setup.log"));
+        let status = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                tmp.to_str().unwrap_or(""),
+            ])
+            .stdout(std::fs::File::create(&log)?)
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(0x0800_0000)
+            .status();
+        let _ = std::fs::remove_file(&tmp);
+        let status = status.context("run setup script")?;
+        anyhow::ensure!(status.success(), "setup failed (see {})", log.display());
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    anyhow::bail!("setup runs on Windows only")
 }
 
 /// Register or remove `brolink-host.exe --background` under the current
@@ -660,11 +716,21 @@ mod tests {
         assert!(s.contains("HiberbootEnabled -Value 0"));
         assert!(s.contains("powercfg /change standby-timeout-ac 0"));
         assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
-        assert!(s.contains("protocol=UDP localport=9 program=\"C:\\x\\brolink-host.exe\""));
+        assert!(s.contains("protocol=UDP localport=9 program='C:\\x\\brolink-host.exe'"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
-        assert!(s.contains(
-            "localport=47850 remoteip=100.64.0.0/10 program=\"C:\\x\\brolink-host.exe\""
-        ));
+        assert!(
+            s.contains("localport=47850 remoteip=100.64.0.0/10 program='C:\\x\\brolink-host.exe'")
+        );
+        let dollar = PathBuf::from(r"C:\Users\joe$lab\BroLink\brolink-host.exe");
+        let s = script(&plan(&dollar, false));
+        assert!(
+            s.contains("program='C:\\Users\\joe$lab\\BroLink\\brolink-host.exe'"),
+            "firewall path must be a single-quoted PowerShell literal:\n{s}"
+        );
+        assert!(
+            !s.contains("program=\"C:\\Users\\joe$lab"),
+            "double-quoted firewall path would expand $lab:\n{s}"
+        );
 
         let s = script(&plan(&exe, true));
         assert!(s.contains("Downloading the streaming engine"));
@@ -1105,8 +1171,12 @@ system_tray = enabled
         assert!(mig.contains(crate::migrate::PRODUCT_CODE), "{mig}");
         assert!(mig.contains("/x"), "{mig}");
         assert!(
-            mig.contains("if (-not $dir -or $dir -ne '"),
+            mig.contains("$needFiles = (-not $dir) -or ($dir -ne '"),
             "Sunshine already installed must still unpack BroLink:\n{mig}"
+        );
+        assert!(
+            mig.contains("Stop-Service -Name $svc -Force"),
+            "a leftover service must be stopped before sc.exe delete:\n{mig}"
         );
 
         let dry = code(&script(&migrate_plan(&exe, true)));

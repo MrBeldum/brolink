@@ -54,17 +54,26 @@ struct Args {
     /// reason on stderr.
     #[arg(long, value_name = "DIR", conflicts_with = "background")]
     brand_engine: Option<std::path::PathBuf>,
+    /// Run setup as administrator. The unelevated panel launches this so
+    /// the script is generated after UAC, not from a user-writable file.
+    #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
+    setup_elevated: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(if args.background {
         "service.log"
+    } else if args.setup_elevated {
+        "setup.log"
     } else {
         "panel.log"
     });
     if args.background {
         return service::Service::new().run_arc(args.replaces.is_some());
+    }
+    if args.setup_elevated {
+        return setup::run_as_admin();
     }
     if let Some(dir) = &args.brand_engine {
         return brand::brand(dir).map_err(|e| {
