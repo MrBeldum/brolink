@@ -2,8 +2,7 @@
 //!
 //! One TCP listener on every interface, one rule for who gets an answer:
 //! loopback (the host's own control panel) or a tailnet address that
-//! `tailscale whois` attributes to the same account this PC is signed in
-//! as. Everyone else gets a 403 and nothing more.
+//! `tailscale whois` recognises. Everyone else gets a 403 and nothing more.
 
 use crate::clipboard;
 use crate::config::HostConfig;
@@ -463,21 +462,20 @@ impl Service {
         }
     }
 
-    /// Loopback is the control panel; a tailnet peer must belong to the
-    /// account this PC is signed in as.
+    /// Loopback is the control panel. A tailnet peer is anyone `whois`
+    /// recognises: user machines and `tag:relay` nodes share a tailnet but
+    /// not a Tailscale user id, and a VPS desktop on the relay box has to
+    /// accept the Macs that found it.
     fn authorized(&self, ip: IpAddr) -> bool {
         if ip.is_loopback() {
             return true;
         }
-        let IpAddr::V4(v4) = ip else { return false };
-        if !is_tailnet(v4) {
+        if !is_tailnet_ip(ip) {
             return false;
         }
-        let me = match &*self.tailscale.lock() {
-            Ok(s) if s.self_node.user_id != 0 => s.self_node.user_id,
-            Ok(_) => return false,
-            Err(_) => return false,
-        };
+        if matches!(&*self.tailscale.lock(), Err(_)) {
+            return false;
+        }
         let now = Instant::now();
         let cached = self
             .auth
@@ -491,14 +489,8 @@ impl Service {
                 let u = match tailscale::whois(ip) {
                     Ok(w) => {
                         self.log(format!(
-                            "{} ({}) asked{}",
-                            w.node.computed_name,
-                            w.user_profile.login_name,
-                            if w.user_profile.id == me {
-                                ""
-                            } else {
-                                ": not this account, refused"
-                            }
+                            "{} ({}) asked",
+                            w.node.computed_name, w.user_profile.login_name
                         ));
                         Some(w.user_profile.id)
                     }
@@ -522,7 +514,7 @@ impl Service {
                 u
             }
         };
-        user == Some(me)
+        user.is_some()
     }
 
     fn handle(&self, peer: SocketAddr, req: &Request) -> Response {
@@ -841,6 +833,14 @@ fn is_tailnet(ip: Ipv4Addr) -> bool {
     o[0] == 100 && (64..128).contains(&o[1])
 }
 
+/// IPv4 CGNAT overlay, or IPv6 unique-local (Tailscale uses fd7a:115c:a1e0::/48).
+fn is_tailnet_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_tailnet(v4),
+        IpAddr::V6(v6) => v6.octets()[0] & 0xfe == 0xfc,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,6 +852,10 @@ mod tests {
         assert!(is_tailnet("100.64.0.10".parse().unwrap()));
         assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
         assert!(!is_tailnet("192.168.1.2".parse().unwrap()));
+        assert!(is_tailnet_ip("100.111.100.57".parse().unwrap()));
+        assert!(is_tailnet_ip("fd7a:115c:a1e0::9e2a:381c".parse().unwrap()));
+        assert!(!is_tailnet_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_tailnet_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[test]
