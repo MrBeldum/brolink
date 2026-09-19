@@ -9,6 +9,9 @@
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake clang pkg-config libssl-dev \
+        libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+        libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev \
+        libxcb-shape0-dev libxcb-xfixes0-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

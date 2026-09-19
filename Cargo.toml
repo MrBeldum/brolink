@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 rand = "0.8"
 directories = "5"
 clap = { version = "4", features = ["derive"] }
-eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
+eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "x11", "wayland"] }
 egui = "0.31"
 egui-wgpu = "0.31"
 
