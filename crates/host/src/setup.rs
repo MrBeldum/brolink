@@ -88,16 +88,34 @@ pub const ENGINE_CONF: &[(&str, &str)] = &[
     ("packetsize", "1184"),
     ("amd_rc", "cbr"),
     ("amd_enforce_hrd", "enabled"),
-    ("amd_quality", "balanced"),
+    ("amd_quality", "speed"),
     ("amd_usage", "ultralowlatency"),
+    ("amd_preanalysis", "disabled"),
+    ("amd_vbaq", "disabled"),
     ("nvenc_twopass", "quarter_res"),
     ("nvenc_vbv_increase", "0"),
     ("vaapi_rc", "cbr"),
     ("vaapi_strict_rc_buffer", "enabled"),
     ("vk_rc_mode", "2"),
+    // Software encode (VPS, no GPU): ultrafast + every core, or 1080p60
+    // drops to ~30 fps and a still desktop sits at a few hundred kbps.
+    ("sw_preset", "ultrafast"),
     ("sw_tune", "zerolatency"),
+    ("min_threads", "4"),
     ("vt_realtime", "enabled"),
 ];
+
+/// The only streamable app BroLink launches. Upstream ships extra entries
+/// (Steam, a low-res desktop) that would show as a second product.
+pub const DESKTOP_APPS_JSON: &str = r#"{
+  "apps": [
+    {
+      "name": "Desktop",
+      "image-path": "desktop.png"
+    }
+  ]
+}
+"#;
 
 fn conf_key(line: &str) -> Option<&str> {
     let line = line.trim();

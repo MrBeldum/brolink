@@ -371,13 +371,15 @@ impl<'a> Client<'a> {
         width: u32,
         height: u32,
         fps: u32,
+        bitrate_kbps: u32,
         ri_key: &[u8; 16],
         ri_key_id: u32,
         resume: bool,
     ) -> Result<String> {
         let query = format!(
-            "appid={app_id}&mode={width}x{height}x{fps}&additionalStates=1&sops=1&rikey={}&rikeyid={ri_key_id}&localAudioPlayMode=0&surroundAudioInfo=196610&remoteControllersBitmap=0&gcmap=0&gcpersist=0{}",
+            "appid={app_id}&mode={width}x{height}x{fps}&additionalStates=1&sops=1&rikey={}&rikeyid={ri_key_id}&localAudioPlayMode=0&surroundAudioInfo=196610&remoteControllersBitmap=0&gcmap=0&gcpersist=0&bitrate={}{}",
             hex(ri_key),
+            bitrate_kbps,
             crate::ffi::launch_query()
         );
         let xml = self.get_https(if resume { "resume" } else { "launch" }, &query)?;
