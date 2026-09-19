@@ -81,6 +81,50 @@ impl HostApp {
         })
     }
 
+    pub(crate) fn shared(&self) -> parking_lot::MutexGuard<'_, Shared> {
+        self.shared.lock()
+    }
+
+    pub(crate) fn request_setup(&mut self) {
+        let status = self.shared.lock().status.clone();
+        if let Some(s) = status {
+            self.start_setup(&s);
+        }
+    }
+
+    pub(crate) fn apply_share_toggles(
+        &mut self,
+        power: Option<bool>,
+        stay_awake: Option<bool>,
+        autostart: Option<bool>,
+    ) {
+        if let Some(v) = power {
+            self.cfg.power_allowed = v;
+            self.dirty = true;
+        }
+        if let Some(v) = stay_awake {
+            self.cfg.stay_awake = v;
+            self.dirty = true;
+        }
+        if let Some(v) = autostart {
+            if let Ok(exe) = std::env::current_exe() {
+                if crate::setup::set_start_with_windows(v, &exe).is_ok() {
+                    self.autostart = v;
+                    self.cfg.start_with_windows = v;
+                    self.dirty = true;
+                }
+            }
+        }
+        self.commit();
+    }
+
+    pub(crate) fn publish_share(&self, local: &brolink_client::share::Slot) {
+        let mut g = local.lock();
+        g.power_allowed = self.cfg.power_allowed;
+        g.stay_awake = self.cfg.stay_awake;
+        g.autostart = self.autostart;
+    }
+
     /// Generate a Sunshine login if there is none, save it, and run the
     /// elevated script on a thread.
     fn start_setup(&mut self, status: &Status) {
@@ -207,7 +251,7 @@ impl eframe::App for HostApp {
                                     });
                                 } else {
                                     ui.label(egui::RichText::new(&s.name).font(ui::theme::semibold(28.0)).color(P.text));
-                                    ui::caption(ui, "Your desktop is available to your Macs through Tailscale.");
+                                    ui::caption(ui, "Your desktop is available to every BroLink on this Tailscale account.");
                                     self.pc_card(ui, s, gamepad);
                                     self.paired_card(ui, &clients);
                                 }
@@ -664,7 +708,7 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                                 Duration::from_secs(2),
                             );
                             std::thread::sleep(Duration::from_secs(1));
-                            crate::ensure_service_running();
+                            crate::service::ensure_service_running();
                         }
                         UpdateAction::RelaunchPanel if relaunch_this_exe() => {
                             std::process::exit(0);
@@ -705,7 +749,7 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                     }
                     drop(s);
                     if failures % 4 == 2 && !stopped_by_user {
-                        crate::ensure_service_running();
+                        crate::service::ensure_service_running();
                     }
                 }
             }
@@ -789,6 +833,7 @@ mod snapshots {
             app: "brolink".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             name: "GAMING-PC".into(),
+            os: "windows".into(),
             tailscale_ip: Some("100.64.0.10".into()),
             tailscale_login: Some("user@example.com".into()),
             lan_ip: Some("192.168.1.10".into()),
