@@ -59,7 +59,9 @@ if [[ -z "$PASS_NAME" ]]; then
 fi
 sunshine "$CONF" --creds "$USER_NAME" "$PASS_NAME" >/dev/null 2>&1 || true
 
-HOST_TOML=/root/.local/share/brolink/BroLink/host.toml
+# Linux ProjectDirs for app "BroLink" is ~/.local/share/brolink, not
+# ~/.local/share/brolink/BroLink (that extra folder is macOS-style).
+HOST_TOML=/root/.local/share/brolink/host.toml
 if [[ ! -f "$HOST_TOML" ]]; then
   cat >"$HOST_TOML" <<EOF
 power_allowed = true
