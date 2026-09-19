@@ -2,6 +2,7 @@
 //! window that both views other machines and shares this one.
 
 pub mod app;
+pub mod audio;
 pub mod brand;
 pub mod clipboard;
 pub mod config;
