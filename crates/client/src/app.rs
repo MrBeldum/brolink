@@ -9,6 +9,7 @@ use crate::path;
 use crate::session::{
     self, Connect, Discovery, Live, Pc, PeerRelayServers, Progress, Step, Target,
 };
+use crate::share;
 use crate::stream::{self, Action, Env};
 use crate::update;
 use brolink_core::api::PowerAction;
@@ -92,6 +93,8 @@ pub struct ClientApp {
     handover: Option<Handover>,
     display_at_connect: (u32, u32),
     display_change: Option<((u32, u32), Instant)>,
+    /// Present when this process also shares this machine.
+    pub local: Option<share::Slot>,
 }
 
 impl ClientApp {
@@ -145,7 +148,14 @@ impl ClientApp {
             handover: None,
             display_at_connect: (0, 0),
             display_change: None,
+            local: None,
         }
+    }
+
+    /// Show "This machine" in the lobby and let the unified app run setup.
+    pub fn with_local(mut self, local: share::Slot) -> Self {
+        self.local = Some(local);
+        self
     }
 
     fn commit(&mut self) {
@@ -591,7 +601,7 @@ impl eframe::App for ClientApp {
                         } else {
                             ui.add_space(8.0);
                             ui.label(egui::RichText::new("Your workspace, anywhere.").font(ui::theme::semibold(30.0)).color(P.text));
-                            ui::caption(ui, "Choose a PC to open its desktop. Your display and quality settings follow you.");
+                            ui::caption(ui, "Choose a machine to open its desktop. Your display and quality settings follow you.");
                             ui.add_space(14.0);
                             self.pcs_card(ui, ctx, &disc, &prog);
                             ui::titled_card(ui, "Next session", None, |ui| {
@@ -629,15 +639,90 @@ impl ClientApp {
             ui::heading(
                 ui,
                 "Tailscale is needed",
-                Some("It connects this Mac to your PC from anywhere and confirms it is yours."),
+                Some("It connects this machine to the others on your account from anywhere and confirms they are yours."),
             );
             ui::setting_row(ui, "Tailscale", Some(&problem), |ui| {
                 if ui::primary_button(ui, "Get Tailscale").clicked() {
-                    ui.ctx()
-                        .open_url(egui::OpenUrl::new_tab("https://tailscale.com/download/mac"));
+                    let url = if cfg!(windows) {
+                        "https://tailscale.com/download/windows"
+                    } else if cfg!(target_os = "linux") {
+                        "https://tailscale.com/download/linux"
+                    } else {
+                        "https://tailscale.com/download/mac"
+                    };
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                 }
             });
         });
+    }
+
+    fn this_machine_row(&mut self, ui: &mut egui::Ui) {
+        let Some(slot) = self.local.clone() else {
+            return;
+        };
+        let g = slot.lock();
+        let running = g.setup_running;
+        let result = g.setup_result.clone();
+        let status = g.status.clone();
+        drop(g);
+        ui::row_separator(ui);
+        let name = status
+            .as_ref()
+            .map(|s| s.name.as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("This machine");
+        let detail = match &status {
+            Some(s) if s.streamer.running && s.streamer.api_ok => {
+                format!(
+                    "Sharing · {}{}",
+                    os_label(&s.os),
+                    s.tailscale_ip
+                        .as_deref()
+                        .map(|ip| format!(" · {ip}"))
+                        .unwrap_or_default()
+                )
+            }
+            Some(s) if s.streamer.installed => {
+                format!(
+                    "{} · streaming engine installed, not sharing yet",
+                    os_label(&s.os)
+                )
+            }
+            Some(s) => format!("{} · set up sharing so others can connect", os_label(&s.os)),
+            None => "Starting the local BroLink service…".into(),
+        };
+        ui::list_row(ui, name, &detail, |ui| {
+            if running {
+                ui::caption(ui, "Setting up…");
+            } else if ui::primary_button(
+                ui,
+                if status
+                    .as_ref()
+                    .is_some_and(|s| s.streamer.running && s.streamer.api_ok)
+                {
+                    "Repair sharing"
+                } else {
+                    "Share this machine"
+                },
+            )
+            .clicked()
+            {
+                slot.lock().want_setup = true;
+            }
+        });
+        if let Some(Err(e)) = result.as_ref() {
+            ui::notice(ui, Tone::Danger, e);
+        } else if let Some(Ok(())) = result.as_ref() {
+            ui::notice(ui, Tone::Success, "Sharing is set up on this machine.");
+        }
+        if let Some(s) = &status {
+            if !s.setup.is_empty() {
+                for item in s.setup.iter().take(3) {
+                    ui::dot_label(ui, Tone::Accent, item);
+                }
+            }
+        }
+        ui::row_separator(ui);
     }
 
     fn pcs_card(
@@ -649,16 +734,17 @@ impl ClientApp {
     ) {
         ui::titled_card(
             ui,
-            "Your PCs",
-            Some("Windows machines on your Tailscale account."),
+            "Your machines",
+            Some("Every machine on your Tailscale account. Connect opens its desktop when BroLink is sharing there."),
             |ui| {
+                self.this_machine_row(ui);
                 if disc.pcs.is_empty() {
                     let text = if disc.error.is_some() || !self.tailscale_ok {
-                        "Sign in to Tailscale to see your PCs."
+                        "Sign in to Tailscale to see your machines."
                     } else if disc.refreshed.is_none() {
-                        "Looking for PCs…"
+                        "Looking for machines…"
                     } else {
-                        "No Windows PC on this tailnet yet. Install BroLink Host on the PC and sign it in to the same Tailscale account."
+                        "No other machines on this tailnet yet. Install BroLink on each one and sign in to the same Tailscale account."
                     };
                     ui::empty_state(ui, text, disc.refreshed.is_none() && disc.error.is_none());
                 }
@@ -900,7 +986,7 @@ impl ClientApp {
                 if let (Some(_), Some(pc)) = (error, self.last_pc.clone()) {
                     // The lighter profile is the likeliest to hold if the
                     // network, not the PC, ended the last one.
-                    if ui::primary_button(ui, "Try again at Smooth (1080p · 12 Mbps)").clicked() {
+                    if ui::primary_button(ui, "Try again at Smooth (1080p · 20 Mbps)").clicked() {
                         self.cfg.stream.apply_preset(crate::config::Preset::Smooth);
                         self.dirty = true;
                         self.reconnect = Some(pc.clone());
@@ -995,10 +1081,47 @@ impl ClientApp {
                 if ui::toggle_row(
                     ui,
                     &mut self.cfg.auto_update,
-                    "Keep BroLink and your PCs up to date",
-                    Some("Checks GitHub every few hours, installs new versions of this app, and sends BroLink Host updates to your PCs over Tailscale."),
+                    "Keep BroLink and your machines up to date",
+                    Some("Checks GitHub every few hours, installs new versions of this app, and sends host updates to your other machines over Tailscale."),
                 ) {
                     self.dirty = true;
+                }
+                if let Some(slot) = self.local.clone() {
+                    ui::row_separator(ui);
+                    ui::caption(ui, "THIS MACHINE");
+                    let g = slot.lock();
+                    let mut power = g.power_allowed;
+                    let mut stay = g.stay_awake;
+                    let mut auto = g.autostart;
+                    drop(g);
+                    if ui::toggle_row(
+                        ui,
+                        &mut power,
+                        "Let others sleep, restart, or shut down this machine",
+                        Some("Only devices on your Tailscale account can ask."),
+                    ) {
+                        slot.lock().want_power = Some(power);
+                    }
+                    ui::row_separator(ui);
+                    if ui::toggle_row(
+                        ui,
+                        &mut stay,
+                        "Keep this machine awake while plugged in",
+                        Some("Tailscale only works while the machine is on."),
+                    ) {
+                        slot.lock().want_stay_awake = Some(stay);
+                    }
+                    ui::row_separator(ui);
+                    if ui::toggle_row(
+                        ui,
+                        &mut auto,
+                        "Start BroLink when you log in",
+                        Some(
+                            "So others can connect after a restart without anyone at the keyboard.",
+                        ),
+                    ) {
+                        slot.lock().want_autostart = Some(auto);
+                    }
                 }
                 let (message, checked) = {
                     let st = self.updates.lock();
@@ -1159,10 +1282,10 @@ fn key_expiry_warnings(disc: &Discovery) -> Vec<String> {
     }
     if let Some(d) = disc.self_key_days {
         out.push(if d <= 0 {
-            "This Mac's Tailscale key has expired; sign in to Tailscale again.".to_string()
+            "This machine's Tailscale key has expired; sign in to Tailscale again.".to_string()
         } else {
             format!(
-                "This Mac's Tailscale key expires in {d} days; disable key expiry for it in the admin console as well."
+                "This machine's Tailscale key expires in {d} days; disable key expiry for it in the admin console as well."
             )
         });
     }
@@ -1179,23 +1302,32 @@ fn days_in(text: &str) -> i64 {
 }
 
 /// The second line under a PC's name. Kept short: it is cut, not wrapped.
+fn os_label(os: &str) -> &'static str {
+    let n = tailscale::Node {
+        os: os.to_string(),
+        ..Default::default()
+    };
+    n.os_label()
+}
+
 fn describe(pc: &Pc) -> String {
     let ip = pc.ip.map(|ip| ip.to_string()).unwrap_or_default();
+    let os = os_label(&pc.os);
     if pc.remembered {
         let seen = pc.known.as_ref().and_then(|k| k.last_seen_unix);
         return match seen {
             Some(t) => format!(
-                "Last seen {} · Tailscale is off on this Mac",
+                "{os} · last seen {} · Tailscale is off here",
                 brolink_core::dates::ymd(t)
             ),
-            None => "Tailscale is off on this Mac".into(),
+            None => format!("{os} · Tailscale is off here"),
         };
     }
     if !pc.online {
         return if pc.can_wake() {
-            "Asleep or off · Connect wakes it".into()
+            format!("{os} · asleep or off · Connect wakes it")
         } else {
-            "Offline · turn it on once with BroLink Host running".into()
+            format!("{os} · offline · turn it on once with BroLink running")
         };
     }
     let path = if pc.path.direct.is_some() {
@@ -1204,11 +1336,11 @@ fn describe(pc: &Pc) -> String {
         String::new()
     };
     match (&pc.host, pc.sunshine) {
-        (Some(h), true) if h.setup.is_empty() => format!("Ready · {ip}{path}"),
-        (Some(_), true) => format!("Ready · {ip} · the PC still needs setup"),
-        (Some(_), false) => format!("Online · {ip} · nothing is streaming from it yet"),
-        (None, true) => format!("Online · {ip}{path} · no BroLink Host: no wake or sleep"),
-        (None, false) => format!("Online · {ip} · nothing to stream from"),
+        (Some(h), true) if h.setup.is_empty() => format!("{os} · Ready · {ip}{path}"),
+        (Some(_), true) => format!("{os} · Ready · {ip} · still needs setup"),
+        (Some(_), false) => format!("{os} · online · {ip} · not sharing yet"),
+        (None, true) => format!("{os} · online · {ip}{path} · no BroLink control"),
+        (None, false) => format!("{os} · online · {ip} · install BroLink to share"),
     }
 }
 
@@ -1276,7 +1408,7 @@ mod tests {
         };
         assert_eq!(
             describe(&pc),
-            "Last seen 2026-09-07 · Tailscale is off on this Mac"
+            "Unknown · last seen 2026-09-07 · Tailscale is off here"
         );
         let disc = Discovery {
             pcs: vec![
@@ -1304,7 +1436,7 @@ mod tests {
         assert!(w[0].contains("Gaming-PC") && w[0].contains("176 days"));
         assert_eq!(days_in(&w[0]), 176);
         assert!(w[1].contains("Office") && w[1].contains("expired"));
-        assert!(w[2].starts_with("This Mac") && days_in(&w[2]) == 12);
+        assert!(w[2].starts_with("This machine") && days_in(&w[2]) == 12);
         assert!(key_expiry_warnings(&Discovery::default()).is_empty());
     }
 
@@ -1315,19 +1447,19 @@ mod tests {
             ip: Some("203.0.113.10".parse().unwrap()),
             ..Default::default()
         };
-        assert!(describe(&pc).starts_with("Offline"));
+        assert!(describe(&pc).contains("offline"));
         pc.known = Some(KnownPc {
             mac: Some("02:00:00:00:00:01".into()),
             ..Default::default()
         });
-        assert!(describe(&pc).starts_with("Asleep"));
+        assert!(describe(&pc).contains("asleep"));
         pc.online = true;
-        assert!(describe(&pc).contains("nothing to stream"));
+        assert!(describe(&pc).contains("install BroLink to share"));
         pc.sunshine = true;
-        assert!(describe(&pc).contains("no BroLink Host"));
-        assert!(describe(&pc).len() < 60, "{}", describe(&pc));
+        assert!(describe(&pc).contains("no BroLink control"));
+        assert!(describe(&pc).len() < 80, "{}", describe(&pc));
         pc.host = Some(brolink_core::api::Status::default());
-        assert_eq!(describe(&pc), "Ready · 203.0.113.10");
+        assert_eq!(describe(&pc), "Unknown · Ready · 203.0.113.10");
         pc.path = crate::path::Path {
             direct: Some(false),
             relay: "tok".into(),
@@ -1336,7 +1468,7 @@ mod tests {
         };
         assert_eq!(
             describe(&pc),
-            "Ready · 203.0.113.10 · Relayed via Tokyo · 210 ms"
+            "Unknown · Ready · 203.0.113.10 · Relayed via Tokyo · 210 ms"
         );
     }
 
@@ -1819,11 +1951,12 @@ mod snapshots {
             login: "user@example.com".into(),
             refreshed: Some(Instant::now()),
             pcs: st
-                .windows_peers()
+                .machine_peers()
                 .into_iter()
                 .map(|n| Pc {
                     node_id: n.id.clone(),
                     name: n.host_name.clone(),
+                    os: n.os.clone(),
                     ip: n.ipv4(),
                     online: n.online,
                     sunshine: true,

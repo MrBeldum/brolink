@@ -82,9 +82,23 @@ pub const ENGINE_CONF: &[(&str, &str)] = &[
     ("dd_config_revert_on_disconnect", "enabled"),
     ("max_bitrate", "0"),
     ("minimum_fps_target", "60"),
+    // Constant bitrate. Sunshine's AMD default is vbr_latency, which
+    // swings the received rate with scene complexity even on a fast path.
+    ("fec_percentage", "20"),
+    ("packetsize", "1184"),
+    ("amd_rc", "cbr"),
+    ("amd_enforce_hrd", "enabled"),
+    ("amd_quality", "balanced"),
+    ("amd_usage", "ultralowlatency"),
+    ("nvenc_twopass", "quarter_res"),
+    ("nvenc_vbv_increase", "0"),
+    ("vaapi_rc", "cbr"),
+    ("vaapi_strict_rc_buffer", "enabled"),
+    ("vk_rc_mode", "2"),
+    ("sw_tune", "zerolatency"),
+    ("vt_realtime", "enabled"),
 ];
 
-#[cfg(test)]
 fn conf_key(line: &str) -> Option<&str> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -99,8 +113,7 @@ fn conf_key(line: &str) -> Option<&str> {
 /// replaced in place (first occurrence wins, later copies of those keys
 /// dropped); everything else is kept. Sunshine's parser uses `emplace`, so
 /// a naive append would leave an old `system_tray = enabled` in force.
-#[cfg(test)]
-fn conceal_conf(existing: &str) -> String {
+pub fn conceal_conf(existing: &str) -> String {
     let existing = existing.strip_prefix('\u{feff}').unwrap_or(existing);
     let mut seen = [false; ENGINE_CONF.len()];
     let mut out = String::new();
@@ -501,17 +514,21 @@ exit 0
 /// Write the script and run it elevated. Blocks until the elevated
 /// PowerShell exits (or the UAC prompt is declined, which is an error).
 pub fn run(p: &Plan<'_>) -> Result<()> {
-    let dir = data_dir()?;
-    let path = dir.join("setup.ps1");
-    // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
-    // a Korean/Japanese username or adapter name ("이더넷") would be mangled
-    // and the firewall rule would point at a path that does not exist.
-    let mut bytes = b"\xEF\xBB\xBF".to_vec();
-    bytes.extend(script(p).as_bytes());
-    std::fs::write(&path, bytes)?;
-    let log = dir.join("setup.log");
+    #[cfg(not(windows))]
+    {
+        crate::unix_setup::run(p)
+    }
     #[cfg(windows)]
     {
+        let dir = data_dir()?;
+        let path = dir.join("setup.ps1");
+        // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
+        // a Korean/Japanese username or adapter name ("이더넷") would be mangled
+        // and the firewall rule would point at a path that does not exist.
+        let mut bytes = b"\xEF\xBB\xBF".to_vec();
+        bytes.extend(script(p).as_bytes());
+        std::fs::write(&path, bytes)?;
+        let log = dir.join("setup.log");
         use std::os::windows::process::CommandExt;
         let file = path.display().to_string().replace('\'', "''");
         let logq = log.display().to_string().replace('\'', "''");
@@ -529,11 +546,6 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
             log.display()
         );
         Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = log;
-        anyhow::bail!("setup runs on Windows only")
     }
 }
 
@@ -569,10 +581,7 @@ pub fn set_start_with_windows(enable: bool, exe: &Path) -> Result<()> {
         Ok(())
     }
     #[cfg(not(windows))]
-    {
-        let _ = (enable, exe);
-        Ok(())
-    }
+    crate::unix_setup::set_autostart(enable, exe)
 }
 
 pub fn starts_with_windows() -> bool {
@@ -592,7 +601,7 @@ pub fn starts_with_windows() -> bool {
             .unwrap_or(false)
     }
     #[cfg(not(windows))]
-    false
+    crate::unix_setup::autostart_enabled()
 }
 
 #[cfg(any(windows, test))]

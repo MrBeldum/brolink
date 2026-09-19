@@ -28,9 +28,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Never ship a binary whose tests were not run.
       - name: test
-        run: cargo test -p brolink-core -p brolink-stream -p brolink-client
-      - name: build client
-        run: cargo build --release -p brolink-client --target aarch64-apple-darwin
+        run: cargo test -p brolink-core -p brolink-stream -p brolink-client -p brolink-host
+      - name: build app
+        run: cargo build --release -p brolink-host --target aarch64-apple-darwin
       # bundle-macos.sh ad-hoc signs and verifies the bundle itself.
       - name: bundle
         run: bash scripts/bundle-macos.sh

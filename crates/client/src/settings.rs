@@ -23,7 +23,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         }
     });
     ui::row_separator(ui);
-    ui::setting_row(ui, "Picture quality", Some("Recommended starts at 35 Mbps. A relay or a long round trip never lowers your frame rate or caps your bitrate."), |ui| {
+    ui::setting_row(ui, "Picture quality", Some("Recommended starts at 50 Mbps. A relay or a long round trip never lowers your frame rate or caps your bitrate."), |ui| {
         if ui::segmented(ui, &[(Quality::Auto, "Recommended"), (Quality::Custom, "Manual")], &mut s.quality) && s.quality == Quality::Auto { s.resolution = Resolution::Native; }
     });
     ui::row_separator(ui);
@@ -41,11 +41,26 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         });
     });
     ui::row_separator(ui);
-    ui::setting_row(ui, "Bitrate target", Some("Received bitrate varies with screen activity. A still desktop can use very little bandwidth."), |ui| {
-        let mut mbps = if s.quality == Quality::Auto { 35 } else { s.bitrate_kbps / 1000 };
-        ui.spacing_mut().slider_width = ui.available_width().min(200.0);
-        if ui.add(egui::Slider::new(&mut mbps, 2..=150).suffix(" Mbps")).changed() { s.quality = Quality::Custom; s.bitrate_kbps = mbps * 1000; }
-    });
+    ui::setting_row(
+        ui,
+        "Bitrate target",
+        Some("The encoder holds this rate (CBR). A still desktop no longer drops to a trickle."),
+        |ui| {
+            let mut mbps = if s.quality == Quality::Auto {
+                50
+            } else {
+                s.bitrate_kbps / 1000
+            };
+            ui.spacing_mut().slider_width = ui.available_width().min(200.0);
+            if ui
+                .add(egui::Slider::new(&mut mbps, 2..=150).suffix(" Mbps"))
+                .changed()
+            {
+                s.quality = Quality::Custom;
+                s.bitrate_kbps = mbps * 1000;
+            }
+        },
+    );
     ui::row_separator(ui);
     ui::setting_row(ui, "Video format", Some("HEVC gives sharper detail per megabit. Auto uses HEVC when supported; H.264 improves compatibility."), |ui| {
         ui::segmented(ui, &[(Codec::Auto, "Auto"), (Codec::Hevc, "HEVC"), (Codec::H264, "H.264")], &mut s.codec);

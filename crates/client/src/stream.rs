@@ -348,7 +348,7 @@ impl View {
                     }
                 });
                 ui.add_space(8.0);
-                ui::caption(ui, "A still desktop uses fewer bits. Compare bitrate and FPS while moving a window or playing video.");
+                ui::caption(ui, "The encoder holds the target bitrate (CBR). Compare received against target; large swings mean the path is dropping packets.");
                 if !stats.audio.is_empty() { ui::caption(ui, &stats.audio); }
                 if ui::ghost_button(ui, "Copy diagnostics").clicked() {
                     ctx.copy_text(format!("BroLink {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",

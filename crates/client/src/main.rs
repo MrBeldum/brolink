@@ -1,18 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod clipboard;
-mod config;
-mod display;
-mod handover;
-mod input;
-mod path;
-mod session;
-mod settings;
-mod stream;
-mod update;
-mod video;
-
 fn viewport_icon() -> egui::IconData {
     if cfg!(target_os = "macos") {
         // eframe calls NSApplication.setApplicationIconImage with this
@@ -59,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "BroLink",
         native,
-        Box::new(|cc| Ok(Box::new(app::ClientApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(brolink_client::app::ClientApp::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }

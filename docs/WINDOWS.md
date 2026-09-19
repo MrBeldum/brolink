@@ -1,9 +1,9 @@
-# Windows host
+# Windows
 
-BroLink Host is one small program with two jobs: a background service a Mac
-talks to over Tailscale, and a window that shows what it knows and runs the
-setup. The streaming engine, which ships in the same zip, does the
-streaming.
+`brolink-host.exe` is BroLink on Windows: a background service other
+machines talk to over Tailscale, and a window that lists every machine on
+your account (Connect opens their desktop) and shares this PC. The
+streaming engine, which ships in the same zip, does the capture.
 
 ## Requirements
 
@@ -18,7 +18,7 @@ streaming.
 1. Unzip the release and run `brolink-host.exe`, or run `install-host.ps1`
    to copy it (and the bundled engine archive) to `%LOCALAPPDATA%\BroLink`,
    add shortcuts, and register the background service to start at logon.
-2. Click **Set up this PC**. One UAC prompt runs a script that:
+2. Click **Share this machine**. One UAC prompt runs a script that:
    - unpacks the bundled engine archive into
      `%ProgramFiles%\BroLink\engine` (downloads that pinned release if the
      archive is not beside the exe), and gives its executables BroLink's

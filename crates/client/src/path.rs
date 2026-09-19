@@ -91,7 +91,7 @@ pub fn effective(settings: &StreamSettings, _path: &Path) -> StreamSettings {
     let mut s = settings.clone();
     if s.quality == Quality::Auto {
         s.resolution = Resolution::Native;
-        s.bitrate_kbps = 35_000;
+        s.bitrate_kbps = 50_000;
     }
     s
 }
@@ -296,7 +296,7 @@ mod tests {
                     let s = effective(&auto, &path);
                     assert_eq!(
                         (s.resolution, s.fps, s.bitrate_kbps),
-                        (Resolution::Native, 120, 35_000)
+                        (Resolution::Native, 120, 50_000)
                     );
                     let custom = StreamSettings {
                         quality: Quality::Custom,

@@ -349,10 +349,9 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         }
     }
 
-    // GFE currently imposes a limit of 100 Mbps for the video bitrate. It will automatically
-    // impose that on maximumBitrateKbps but not on initialBitrateKbps. We will impose the cap
-    // ourselves so initialBitrateKbps does not exceed maximumBitrateKbps.
-    adjustedBitrate = adjustedBitrate > 100000 ? 100000 : adjustedBitrate;
+    // GFE capped video at 100 Mbps. Sunshine does not, and BroLink's slider
+    // goes to 150 Mbps, so latch as high as the user asked (still bounded).
+    adjustedBitrate = adjustedBitrate > 150000 ? 150000 : adjustedBitrate;
 
     // We don't support dynamic bitrate scaling properly (it tends to bounce between min and max and never
     // settle on the optimal bitrate if it's somewhere in the middle), so we'll just latch the bitrate

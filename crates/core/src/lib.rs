@@ -1,10 +1,10 @@
-//! What the BroLink host and client share: the control API they speak, the
-//! Tailscale CLI, wake packets, config files, the icon.
+//! What BroLink nodes share: the control API they speak, the Tailscale CLI,
+//! wake packets, config files, the icon.
 //!
 //! The picture never passes through here. `brolink-stream` speaks the
-//! GameStream protocol to Sunshine on the PC and Tailscale carries it; this
-//! crate holds the rest: finding the PC, waking it, pairing without touching
-//! it, turning it off again, and fetching new releases.
+//! GameStream protocol to the streaming engine and Tailscale carries it;
+//! this crate holds the rest: finding machines, waking them, pairing
+//! without touching them, turning them off again, and fetching new releases.
 
 pub mod api;
 pub mod config;

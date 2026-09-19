@@ -74,7 +74,62 @@ pub fn perform(action: PowerAction) -> Result<()> {
         }
     }
     #[cfg(not(windows))]
-    {
-        anyhow::bail!("{} is only supported on Windows", action.label())
+    unix_perform(action)
+}
+
+#[cfg(not(windows))]
+fn unix_perform(action: PowerAction) -> Result<()> {
+    match action {
+        PowerAction::Sleep => {
+            #[cfg(target_os = "macos")]
+            {
+                let status = std::process::Command::new("pmset")
+                    .arg("sleepnow")
+                    .status()?;
+                anyhow::ensure!(status.success(), "pmset sleepnow failed");
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let status = std::process::Command::new("systemctl")
+                    .arg("suspend")
+                    .status()?;
+                anyhow::ensure!(status.success(), "systemctl suspend failed");
+                Ok(())
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            anyhow::bail!("sleep is not supported on this OS")
+        }
+        PowerAction::Restart | PowerAction::Shutdown => {
+            #[cfg(target_os = "macos")]
+            {
+                let apple = if action == PowerAction::Restart {
+                    "restart"
+                } else {
+                    "shut down"
+                };
+                let status = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!("tell application \"System Events\" to {apple}"),
+                    ])
+                    .status()?;
+                anyhow::ensure!(status.success(), "osascript {apple} failed");
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let unit = if action == PowerAction::Restart {
+                    "reboot"
+                } else {
+                    "poweroff"
+                };
+                let status = std::process::Command::new("systemctl").arg(unit).status()?;
+                anyhow::ensure!(status.success(), "systemctl {unit} failed");
+                Ok(())
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            anyhow::bail!("{} is not supported on this OS", action.label())
+        }
     }
 }

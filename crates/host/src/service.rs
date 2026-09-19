@@ -89,6 +89,10 @@ impl Service {
             .session_active()
     }
 
+    pub fn run_arc(self, replacing: bool) -> Result<()> {
+        Arc::new(self).run(replacing)
+    }
+
     /// Bind, then serve forever. Fails only when the port is taken, which
     /// means another copy is already running. `replacing` is the service an
     /// update just started: the old one is still answering its last request,
@@ -213,7 +217,7 @@ impl Service {
         if tick.is_multiple_of(6) && api_ok && install.as_ref().is_some_and(|i| i.kind == "BroLink")
         {
             if let Ok(dir) = brolink_core::config::data_dir() {
-                let marker = dir.join("stream-profile-v1");
+                let marker = dir.join("stream-profile-v2");
                 if !marker.exists() {
                     let api = Api {
                         user: &cfg.sunshine_user,
@@ -224,7 +228,7 @@ impl Service {
                             if let Err(e) = std::fs::write(&marker, "1") {
                                 self.log(format!("could not save stream profile version: {e}"));
                             }
-                            self.log("stream profile ready: match client display, full bitrate, 60 fps minimum");
+                            self.log("stream profile ready: match client display, constant bitrate, 60 fps minimum");
                         }
                         Ok(false) => {} // A running app owns the display until it ends.
                         Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
@@ -298,6 +302,17 @@ impl Service {
             *cur = st;
         }
         *self.install.lock() = install;
+        #[cfg(not(windows))]
+        if tick.is_multiple_of(6) {
+            let install = self.install.lock().clone();
+            if let Some(install) = install {
+                if !streamer::running() {
+                    if let Err(e) = streamer::start(&install) {
+                        self.log(format!("streaming engine: {e:#}"));
+                    }
+                }
+            }
+        }
 
         if tick.is_multiple_of(12) {
             let w = wake::probe();
@@ -380,7 +395,8 @@ impl Service {
                 "BroLink has no working login for {}.",
                 streamer.kind
             ));
-        } else if streamer.kind == "BroLink"
+        } else if cfg!(windows)
+            && streamer.kind == "BroLink"
             && !crate::brand::is_branded_cached(std::path::Path::new(crate::streamer::ENGINE_DIR))
         {
             setup.push(
@@ -403,6 +419,22 @@ impl Service {
             app: "brolink".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             name: brolink_core::config::machine_name(),
+            os: ts
+                .as_ref()
+                .ok()
+                .map(|s| s.self_node.os.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if cfg!(windows) {
+                        "windows".into()
+                    } else if cfg!(target_os = "macos") {
+                        "macOS".into()
+                    } else if cfg!(target_os = "linux") {
+                        "linux".into()
+                    } else {
+                        std::env::consts::OS.into()
+                    }
+                }),
             tailscale_ip: ts
                 .as_ref()
                 .ok()
@@ -735,6 +767,43 @@ pub fn describe_nat(n: &NatReport) -> String {
         format!("network: easy NAT; direct connections should work (nearest relay {city})")
     } else {
         format!("network: NAT type unknown (nearest relay {city})")
+    }
+}
+
+/// True when a service answers on loopback.
+pub fn service_alive() -> bool {
+    http::request(
+        ("127.0.0.1", CONTROL_PORT),
+        "GET",
+        "/v1/status",
+        None,
+        Duration::from_millis(600),
+    )
+    .map(|r| r.status == 200)
+    .unwrap_or(false)
+}
+
+/// Start `--background` if nothing answers on loopback.
+pub fn ensure_service_running() {
+    if service_alive() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut c = std::process::Command::new(exe);
+    c.arg("--background")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
+    }
+    match c.spawn() {
+        Ok(_) => tracing::info!("started the background service"),
+        Err(e) => tracing::error!("could not start the background service: {e}"),
     }
 }
 
