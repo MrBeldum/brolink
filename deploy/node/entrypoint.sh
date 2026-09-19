@@ -50,7 +50,11 @@ fi
 USER_NAME="${BROLINK_USER:-brolink}"
 PASS_NAME="${BROLINK_PASS:-}"
 if [[ -z "$PASS_NAME" ]]; then
+  # `head` closes the pipe after 20 bytes; `tr` then gets SIGPIPE. With
+  # `pipefail` that would exit 141 and crash the container.
+  set +o pipefail
   PASS_NAME="$(tr -dc 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 20)"
+  set -o pipefail
   log "generated Sunshine login (user ${USER_NAME}); set BROLINK_PASS to pin it"
 fi
 sunshine "$CONF" --creds "$USER_NAME" "$PASS_NAME" >/dev/null 2>&1 || true
