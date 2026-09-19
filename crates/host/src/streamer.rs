@@ -59,16 +59,19 @@ impl Install {
 /// The end of Sunshine's log, which says which encoder it settled on and
 /// whether it could capture audio. `None` when it cannot be read.
 pub fn log_text(install: &Install) -> Option<String> {
-    let mut paths = vec![install.conf().with_file_name("sunshine.log")];
+    #[cfg(windows)]
+    let paths = vec![install.conf().with_file_name("sunshine.log")];
     #[cfg(not(windows))]
-    {
+    let paths = {
+        let mut paths = vec![install.conf().with_file_name("sunshine.log")];
         if let Ok(home) = std::env::var("HOME") {
             paths.push(std::path::PathBuf::from(home).join(".config/sunshine/sunshine.log"));
         }
         paths.push(std::path::PathBuf::from(
             "/root/.config/sunshine/sunshine.log",
         ));
-    }
+        paths
+    };
     paths.into_iter().find_map(|p| read_tail(&p, 512 * 1024))
 }
 
