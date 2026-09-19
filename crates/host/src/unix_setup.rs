@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::setup::{conceal_conf, Plan};
+use crate::setup::{conceal_conf, Plan, DESKTOP_APPS_JSON};
 use crate::streamer::{self, Install};
 
 pub const MAC_DMG: &str = "Sunshine-macOS-arm64.dmg";
@@ -35,28 +35,12 @@ pub fn candidates() -> Vec<Install> {
             dir,
         });
     }
-    #[cfg(target_os = "macos")]
-    {
-        v.push(Install {
-            kind: "Sunshine",
-            dir: PathBuf::from("/Applications/Sunshine.app"),
-        });
-        for p in [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/opt/homebrew/opt/sunshine/bin",
-        ] {
-            v.push(Install {
-                kind: "Sunshine",
-                dir: PathBuf::from(p),
-            });
-        }
-    }
     #[cfg(target_os = "linux")]
     {
-        for p in ["/usr/bin", "/usr/local/bin", "/opt/sunshine"] {
+        // BroLink's renamed engine binary, then the distro package we wrap.
+        for p in ["/usr/local/bin", "/usr/bin"] {
             v.push(Install {
-                kind: "Sunshine",
+                kind: "BroLink",
                 dir: PathBuf::from(p),
             });
         }
@@ -65,19 +49,21 @@ pub fn candidates() -> Vec<Install> {
 }
 
 pub fn exe_in(dir: &Path) -> PathBuf {
-    let app = dir.join("Contents/MacOS/sunshine");
-    if app.exists() {
-        return app;
+    for name in ["BroLinkStreaming", "brolink-engine", "sunshine"] {
+        let app = dir.join("Contents/MacOS").join(name);
+        if app.exists() {
+            return app;
+        }
+        let nested = dir.join("Sunshine.app/Contents/MacOS").join(name);
+        if nested.exists() {
+            return nested;
+        }
+        let bin = dir.join(name);
+        if bin.exists() {
+            return bin;
+        }
     }
-    let nested = dir.join("Sunshine.app/Contents/MacOS/sunshine");
-    if nested.exists() {
-        return nested;
-    }
-    let bin = dir.join("sunshine");
-    if bin.exists() {
-        return bin;
-    }
-    PathBuf::from("sunshine")
+    dir.join("brolink-engine")
 }
 
 pub fn run(p: &Plan<'_>) -> Result<()> {
@@ -108,6 +94,11 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
     let conf = conf_path()?;
     let existing = fs::read_to_string(&conf).unwrap_or_default();
     fs::write(&conf, conceal_conf(&existing)).context("write sunshine.conf")?;
+    let apps = conf
+        .parent()
+        .map(|p| p.join("apps.json"))
+        .unwrap_or_else(|| dir.join("config").join("apps.json"));
+    fs::write(&apps, DESKTOP_APPS_JSON).context("write apps.json")?;
     step(
         log,
         "wrote streaming profile (constant bitrate, Tailscale packet size)",
@@ -159,12 +150,12 @@ fn install_engine(dir: &Path, log: &mut Vec<String>) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        if which("sunshine").is_some() {
-            log.push("using the system sunshine binary".into());
+        if which("brolink-engine").is_some() || which("sunshine").is_some() {
+            log.push("using the system streaming engine".into());
             return Ok(());
         }
         bail!(
-            "Sunshine is not installed. On this VPS use the BroLink node Docker image, or install Sunshine and run setup again."
+            "the streaming engine is not installed. On this VPS use the BroLink node Docker image, or run setup again."
         );
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -174,10 +165,46 @@ fn install_engine(dir: &Path, log: &mut Vec<String>) -> Result<()> {
     }
 }
 
+/// Rename the engine so it does not appear as a second app in the Dock
+/// or Activity Monitor. The on-disk `.app` folder keeps its upstream name
+/// because the engine looks up resources next to that bundle.
+pub fn conceal_info_plist(xml: &str) -> String {
+    let mut xml = set_plist_string(xml, "CFBundleName", "BroLink");
+    xml = set_plist_string(&xml, "CFBundleDisplayName", "BroLink");
+    xml = set_plist_string(&xml, "CFBundleExecutable", "BroLinkStreaming");
+    if xml.contains("LSUIElement") {
+        xml
+    } else {
+        xml.replacen("</dict>", "  <key>LSUIElement</key>\n  <true/>\n</dict>", 1)
+    }
+}
+
+fn set_plist_string(xml: &str, key: &str, value: &str) -> String {
+    let needle = format!("<key>{key}</key>");
+    let Some(at) = xml.find(&needle) else {
+        return xml.to_string();
+    };
+    let rest = &xml[at + needle.len()..];
+    let Some(s) = rest.find("<string>") else {
+        return xml.to_string();
+    };
+    let inner = s + 8;
+    let Some(e) = rest[inner..].find("</string>") else {
+        return xml.to_string();
+    };
+    let start = at + needle.len() + inner;
+    let end = start + e;
+    format!("{}{value}{}", &xml[..start], &xml[end..])
+}
+
 #[cfg(target_os = "macos")]
 fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
-    if Path::new("/Applications/Sunshine.app/Contents/MacOS/sunshine").exists() {
-        log.push("using /Applications/Sunshine.app".into());
+    let dest = dir.join("Sunshine.app");
+    if dest.join("Contents/MacOS/BroLinkStreaming").exists()
+        || dest.join("Contents/MacOS/sunshine").exists()
+    {
+        conceal_engine_bundle(&dest)?;
+        log.push("streaming engine already unpacked".into());
         return Ok(());
     }
     let dmg = dir.join(MAC_DMG);
@@ -185,21 +212,21 @@ fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
         "https://github.com/LizardByte/Sunshine/releases/download/{}/{MAC_DMG}",
         crate::setup::ENGINE_TAG
     );
-    log.push(format!("downloading {url}"));
+    log.push("downloading the streaming engine".into());
     let status = Command::new("curl")
         .args(["-fsSL", "-A", "brolink", "-o"])
         .arg(&dmg)
         .arg(&url)
         .status()
-        .context("curl Sunshine dmg")?;
-    anyhow::ensure!(status.success(), "download of Sunshine failed");
-    let bytes = fs::read(&dmg).context("read dmg")?;
+        .context("download streaming engine")?;
+    anyhow::ensure!(status.success(), "download of the streaming engine failed");
+    let bytes = fs::read(&dmg).context("read engine archive")?;
     let got = sha256_hex(&bytes);
     anyhow::ensure!(
         got.eq_ignore_ascii_case(MAC_DMG_SHA256),
-        "Sunshine dmg digest mismatch: expected {MAC_DMG_SHA256}, got {got}"
+        "streaming engine digest mismatch: expected {MAC_DMG_SHA256}, got {got}"
     );
-    let mount = std::env::temp_dir().join(format!("brolink-sunshine-{}", std::process::id()));
+    let mount = std::env::temp_dir().join(format!("brolink-engine-{}", std::process::id()));
     let _ = fs::create_dir_all(&mount);
     let attach = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
@@ -207,19 +234,18 @@ fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
         .arg(&dmg)
         .status()
         .context("hdiutil attach")?;
-    anyhow::ensure!(attach.success(), "could not mount the Sunshine disk image");
+    anyhow::ensure!(attach.success(), "could not mount the streaming engine");
     let copied = (|| {
         let src = mount.join("Sunshine.app");
-        anyhow::ensure!(src.is_dir(), "Sunshine.app missing from the disk image");
-        let dest = dir.join("Sunshine.app");
+        anyhow::ensure!(src.is_dir(), "engine app missing from the disk image");
         let _ = fs::remove_dir_all(&dest);
         let status = Command::new("cp")
             .args(["-R"])
             .arg(&src)
             .arg(&dest)
             .status()
-            .context("copy Sunshine.app")?;
-        anyhow::ensure!(status.success(), "copy Sunshine.app failed");
+            .context("copy streaming engine")?;
+        anyhow::ensure!(status.success(), "copy of the streaming engine failed");
         Ok(())
     })();
     let _ = Command::new("hdiutil")
@@ -228,7 +254,24 @@ fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
         .status();
     let _ = fs::remove_file(&dmg);
     copied?;
-    log.push("Sunshine.app unpacked into BroLink's engine folder".into());
+    conceal_engine_bundle(&dest)?;
+    log.push("streaming engine unpacked into BroLink's data folder".into());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn conceal_engine_bundle(app: &Path) -> Result<()> {
+    let macos = app.join("Contents/MacOS");
+    let src = macos.join("sunshine");
+    let dest = macos.join("BroLinkStreaming");
+    if src.exists() && !dest.exists() {
+        fs::rename(&src, &dest).context("rename engine binary")?;
+    }
+    let plist = app.join("Contents/Info.plist");
+    if plist.exists() {
+        let xml = fs::read_to_string(&plist).unwrap_or_default();
+        fs::write(&plist, conceal_info_plist(&xml)).context("write engine Info.plist")?;
+    }
     Ok(())
 }
 
@@ -245,11 +288,13 @@ fn which(name: &str) -> Option<PathBuf> {
 }
 
 pub fn stop_engine() {
-    let _ = Command::new("pkill")
-        .args(["-f", "sunshine"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    for name in ["brolink-engine", "BroLinkStreaming", "sunshine"] {
+        let _ = Command::new("pkill")
+            .args(["-x", name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 pub fn set_autostart(enable: bool, exe: &Path) -> Result<()> {
@@ -384,6 +429,12 @@ mod tests {
         assert!(crate::setup::ENGINE_CONF
             .iter()
             .any(|(k, v)| *k == "amd_rc" && *v == "cbr"));
+        assert!(crate::setup::ENGINE_CONF
+            .iter()
+            .any(|(k, v)| *k == "sw_preset" && *v == "ultrafast"));
+        assert!(crate::setup::ENGINE_CONF
+            .iter()
+            .any(|(k, v)| *k == "amd_quality" && *v == "speed"));
     }
 
     #[test]
@@ -393,6 +444,37 @@ mod tests {
         fs::create_dir_all(tmp.join("Sunshine.app/Contents/MacOS")).unwrap();
         fs::write(tmp.join("Sunshine.app/Contents/MacOS/sunshine"), b"").unwrap();
         assert!(exe_in(&tmp).ends_with("Contents/MacOS/sunshine"));
+        fs::write(
+            tmp.join("Sunshine.app/Contents/MacOS/BroLinkStreaming"),
+            b"",
+        )
+        .unwrap();
+        assert!(exe_in(&tmp).ends_with("Contents/MacOS/BroLinkStreaming"));
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn conceal_info_plist_renames_the_engine_and_hides_it_from_the_dock() {
+        let xml = r#"<?xml version="1.0"?>
+<dict>
+  <key>CFBundleName</key>
+  <string>Sunshine</string>
+  <key>CFBundleDisplayName</key>
+  <string>Sunshine</string>
+  <key>CFBundleExecutable</key>
+  <string>sunshine</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.lizardbyte.sunshine</string>
+</dict>
+"#;
+        let got = conceal_info_plist(xml);
+        assert!(got.contains("<string>BroLink</string>"), "{got}");
+        assert!(got.contains("<string>BroLinkStreaming</string>"), "{got}");
+        assert!(got.contains("LSUIElement"), "{got}");
+        assert!(
+            got.contains("dev.lizardbyte.sunshine"),
+            "identifier stays so the engine still finds its files:\n{got}"
+        );
+        assert_eq!(conceal_info_plist(&got), got);
     }
 }

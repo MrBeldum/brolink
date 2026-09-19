@@ -1369,7 +1369,7 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
         if let Some(h) = &pc.host {
             if h.streamer.encoder == "software" {
                 out.push(format!(
-                    "{} encodes video in software: the streaming engine found no GPU encoder there, so frames are slow to make whatever the network does. Check the GPU driver on the PC, or keep the stream at 1080p and 30 fps.",
+                    "{} encodes video in software: no GPU encoder there, so BroLink uses every CPU core. A still desktop should still hold the bitrate you set.",
                     pc.name
                 ));
             }

@@ -430,7 +430,7 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         width: s.width as c_int,
         height: s.height as c_int,
         fps: s.fps as c_int,
-        bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps, s.remote) as c_int,
+        bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps, false) as c_int,
         // moonlight-common-c would cap a remote IPv4 stream at 1024-byte
         // packets to survive raw-internet fragmentation. BroLink never rides
         // raw internet: every stream goes through a Tailscale (WireGuard)
@@ -439,14 +439,10 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         // 1280-guaranteed IPv6 path. Bigger packets mean fewer per frame,
         // which keeps large frames inside Sunshine's four-FEC-block limit
         // instead of shipping them unprotected and stalling on the first loss.
-        // Always 1184: STREAM_CFG_LOCAL on Tailscale must not reopen 1392,
-        // which fragments inside the tunnel and makes bitrate swing.
+        // Always LOCAL + 1184: a "remote" flag would reopen 1024-byte packets
+        // and subtract another 500 kbps, which is what made bitrate swing.
         packet_size: 1184,
-        remote: if s.remote {
-            ffi::STREAM_CFG_REMOTE
-        } else {
-            ffi::STREAM_CFG_LOCAL
-        },
+        remote: ffi::STREAM_CFG_LOCAL,
         video_formats: formats,
         color_space: ffi::COLORSPACE_REC_709,
         color_range: ffi::COLOR_RANGE_LIMITED,
@@ -954,7 +950,16 @@ mod real {
         ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
         let resume = info.current_game != 0;
         let rtsp = client
-            .launch(desktop.id, width, height, fps, &ri_key, ri_id, resume)
+            .launch(
+                desktop.id,
+                width,
+                height,
+                fps,
+                bitrate_kbps,
+                &ri_key,
+                ri_id,
+                resume,
+            )
             .unwrap();
         eprintln!("rtsp: {rtsp} (resume={resume})");
         let frames = Arc::new(FrameSlot::default());

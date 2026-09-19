@@ -130,11 +130,11 @@ pub struct Status {
     pub log: Vec<String>,
 }
 
-/// The streaming server on the PC: Sunshine, or its fork Apollo.
+/// The streaming engine BroLink runs on this machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Streamer {
-    /// "BroLink", "Sunshine" or "Apollo"; empty when no engine is installed.
+    /// "BroLink" when sharing is set up; empty when no engine is installed.
     pub kind: String,
     pub installed: bool,
     /// Its GameStream port answers.
@@ -142,7 +142,7 @@ pub struct Streamer {
     /// The host can log in to its web API with the saved credentials, which
     /// is what auto-pairing needs.
     pub api_ok: bool,
-    /// The encoder family Sunshine settled on ("nvenc", "amf", "quicksync",
+    /// The encoder family the engine settled on ("nvenc", "amf", "quicksync",
     /// "software"), read from its log; empty when unknown. Software
     /// encoding is why a stream can be slow on a fast network.
     pub encoder: String,
