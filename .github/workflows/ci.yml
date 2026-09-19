@@ -59,7 +59,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: native deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang nasm pkg-config libssl-dev libasound2-dev libpulse-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: clippy
         run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client -p brolink-host --all-targets -- -D warnings
       - name: test
