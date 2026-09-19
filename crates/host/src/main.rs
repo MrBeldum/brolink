@@ -33,6 +33,11 @@ struct Args {
     /// reason on stderr.
     #[arg(long, value_name = "DIR", conflicts_with = "background")]
     brand_engine: Option<std::path::PathBuf>,
+    /// Install and start the streaming engine, then exit. Used by Mac/Linux
+    /// setup and by the Docker node; on Windows this is the same path as
+    /// Share this machine (UAC).
+    #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
+    setup: bool,
 }
 
 fn main() -> Result<()> {
@@ -44,6 +49,9 @@ fn main() -> Result<()> {
     });
     if args.background {
         return Service::new().run_arc(args.replaces.is_some());
+    }
+    if args.setup {
+        return run_setup();
     }
     if let Some(dir) = &args.brand_engine {
         return brand::brand(dir).map_err(|e| {
@@ -82,6 +90,26 @@ fn main() -> Result<()> {
         Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn run_setup() -> Result<()> {
+    let mut cfg = brolink_host::config::HostConfig::load();
+    if !cfg.has_creds() {
+        cfg.sunshine_user = "brolink".into();
+        cfg.sunshine_pass = brolink_host::config::random_password();
+        cfg.save()?;
+    }
+    let exe = std::env::current_exe()?;
+    brolink_host::setup::run(&brolink_host::setup::Plan {
+        exe: &exe,
+        install_engine: true,
+        migrate: false,
+        dry_run: false,
+        sunshine_user: &cfg.sunshine_user,
+        sunshine_pass: &cfg.sunshine_pass,
+        adapter: "",
+        adapter_description: "",
+    })
 }
 
 /// Logs go to a file in the data directory: neither mode has a console.
