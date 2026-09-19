@@ -295,14 +295,16 @@ impl Service {
             *cur = st;
         }
         *self.install.lock() = install;
-        #[cfg(not(windows))]
         if tick.is_multiple_of(6) {
             let install = self.install.lock().clone();
             if let Some(install) = install {
+                let audio_problem = self.streamer.lock().audio_problem.clone();
                 if !streamer::running() {
                     if let Err(e) = streamer::start(&install) {
                         self.log(format!("streaming engine: {e:#}"));
                     }
+                } else if cfg!(windows) && !audio_problem.is_empty() {
+                    let _ = crate::audio::take_over_engine();
                 }
             }
         }

@@ -6,6 +6,13 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- On Windows, the streaming engine runs as the signed-in user and the
+  only active speakers stay the default. The engine's own startup was
+  clearing Steam Streaming Speakers on a PC with no other playback
+  device, which left `Couldn't get default audio endpoint` and a silent
+  stream. Startup probe errors are no longer reported as a missing sound
+  device.
+
 - Software encode (a VPS with no GPU) uses every CPU core and the
   ultrafast preset so 1080p60 holds instead of collapsing to ~30 fps and a
   trickle of bitrate. AMD encode prefers speed, with preanalysis off, so
