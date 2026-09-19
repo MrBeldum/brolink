@@ -39,7 +39,12 @@ pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
 pub fn save<T: Serialize>(name: &str, value: &T) -> Result<()> {
     let path = data_dir()?.join(name);
     let text = toml::to_string_pretty(value)?;
-    let tmp = path.with_extension("tmp");
+    // `with_extension("tmp")` on `client.toml` is `client.tmp`, which collides
+    // if another file of the same stem is being written. Keep the full name.
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, &path).with_context(|| path.display().to_string())
 }

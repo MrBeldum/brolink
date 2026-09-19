@@ -197,10 +197,11 @@ is_uint "$wait_secs" 5 3600 ||
 # TS_AUTH_ONCE=true only logs in when the state directory has no identity yet.
 # This probes the size of the state file, never its contents.
 has_authenticated_state() {
-	local mountpoint
-	mountpoint=$(docker volume inspect -f '{{.Mountpoint}}' "$STATE_VOLUME" 2>/dev/null) || return 1
-	[ -n "$mountpoint" ] || return 1
-	$SUDO test -s "$mountpoint/tailscaled.state"
+	docker volume inspect "$STATE_VOLUME" >/dev/null 2>&1 || return 1
+	# The volume's host mountpoint is root-owned. Probe through Docker so a
+	# docker-group user without sudo still sees an authenticated node.
+	docker run --rm -v "$STATE_VOLUME":/var/lib/tailscale:ro alpine:3.20 \
+		test -s /var/lib/tailscale/tailscaled.state >/dev/null 2>&1
 }
 
 if grep -Eq '^TS_AUTHKEY=.+' .env; then

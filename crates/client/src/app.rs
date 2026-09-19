@@ -103,6 +103,7 @@ impl ClientApp {
             app.updates.clone(),
             discovery,
             app.live.clone(),
+            app.progress.clone(),
             cc.egui_ctx.clone(),
         );
         app
@@ -151,8 +152,9 @@ impl ClientApp {
     fn commit(&mut self) {
         if self.dirty {
             self.dirty = false;
-            if let Err(e) = self.cfg.save() {
-                tracing::warn!("could not save settings: {e:#}");
+            match self.cfg.save_settings() {
+                Ok(merged) => self.cfg = merged,
+                Err(e) => tracing::warn!("could not save settings: {e:#}"),
             }
         }
     }

@@ -61,6 +61,7 @@ pub fn spawn(
     state: Arc<Mutex<State>>,
     discovery: Arc<Mutex<Discovery>>,
     live: Arc<Mutex<Option<Live>>>,
+    connecting: Arc<Mutex<crate::session::Progress>>,
     ctx: egui::Context,
 ) {
     std::thread::spawn(move || {
@@ -140,7 +141,9 @@ pub fn spawn(
             }
             let ready = state.lock().ready.clone();
             if let Some(v) = ready {
-                if live.lock().is_none() {
+                // `Live` is stored only after wake/pair/launch succeed. Installing
+                // while a connect is in flight kills the PIN dialog and the worker.
+                if live.lock().is_none() && !connecting.lock().active() {
                     match install_self(rel) {
                         Ok(()) => relaunch(),
                         Err(e) => {
@@ -232,6 +235,7 @@ fn fetch_asset(rel: &Release, name: &str, token: Option<&str>) -> Result<PathBuf
     let asset = rel
         .asset(name)
         .ok_or_else(|| anyhow!("release {} has no {name}", rel.tag))?;
+    update::require_digest(asset)?;
     let dest = updates_dir(rel)?.join(name);
     if update::verify_asset(asset, &dest).is_err() {
         update::download(asset, token, &dest)?;

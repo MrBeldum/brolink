@@ -12,9 +12,14 @@ use brolink_stream::{Client, Event, FrameSlot, Identity, Input, Session, Setting
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Each [`connect`] call gets a new id so a cancelled worker cannot finish
+/// into a later attempt's `progress` / `live`.
+static NEXT_CONNECT: AtomicU64 = AtomicU64::new(1);
 
 /// How often this Mac's own NAT is re-examined. `tailscale netcheck` takes
 /// seconds and networks change when the Mac moves, not more often.
@@ -165,15 +170,14 @@ fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, ctx: egui::Context
 }
 
 /// Save what a scan taught about each PC: address, wake details, when it
-/// was last seen.
-fn learn(cfg: &ClientConfig, scan: &Discovery) {
-    {
-        let mut learned = cfg.clone();
+/// was last seen. Settings the window owns are left as they are on disk.
+fn learn(_cfg: &ClientConfig, scan: &Discovery) {
+    if let Err(e) = ClientConfig::update_pcs(|pcs| {
         for pc in &scan.pcs {
             if pc.remembered {
                 continue;
             }
-            let entry = learned.pcs.entry(pc.node_id.clone()).or_default();
+            let entry = pcs.entry(pc.node_id.clone()).or_default();
             entry.name = pc.name.clone();
             if let Some(ip) = pc.ip {
                 entry.tailscale_ip = Some(ip.to_string());
@@ -191,15 +195,12 @@ fn learn(cfg: &ClientConfig, scan: &Discovery) {
                     entry.lan_ip = h.lan_ip.clone();
                 }
             }
-            if let Some(p) = &scan_public(pc) {
+            if let Some(p) = scan_public(pc) {
                 entry.public_ip = Some(p.to_string());
             }
         }
-        if learned.pcs != cfg.pcs {
-            if let Err(e) = learned.save() {
-                tracing::warn!("could not save what was learned: {e:#}");
-            }
-        }
+    }) {
+        tracing::warn!("could not save what was learned: {e:#}");
     }
 }
 
@@ -378,6 +379,8 @@ pub struct Progress {
     pub cancel: bool,
     /// Sunshine's app names, once listed.
     pub apps: Vec<String>,
+    /// Distinguishes this attempt from an older worker that is still running.
+    pub generation: u64,
 }
 
 impl Default for Progress {
@@ -389,6 +392,7 @@ impl Default for Progress {
             since: Instant::now(),
             cancel: false,
             apps: Vec::new(),
+            generation: 0,
         }
     }
 }
@@ -478,7 +482,8 @@ impl Target {
             public_ip: parse(k.and_then(|k| k.public_ip.as_ref())),
             server_cert: k
                 .and_then(|k| k.server_cert.as_deref())
-                .and_then(brolink_stream::nvhttp::unhex),
+                .and_then(brolink_stream::nvhttp::unhex)
+                .or_else(|| ClientConfig::stored_cert(&pc.node_id)),
             path: pc.path.clone(),
         })
     }
@@ -498,17 +503,22 @@ pub struct Connect {
 /// Wake, wait, pair, launch, connect: on its own thread, reporting into
 /// `progress` and leaving the stream in `live`.
 pub fn connect(c: Connect) {
+    let generation = NEXT_CONNECT.fetch_add(1, Ordering::Relaxed);
     {
         let mut p = c.progress.lock();
         *p = Progress {
             pc: c.target.name.clone(),
+            generation,
             ..Default::default()
         };
         p.set(Step::Launching, "Starting…");
     }
     std::thread::spawn(move || {
-        let result = run(&c);
+        let result = run(&c, generation);
         let mut p = c.progress.lock();
+        if p.generation != generation {
+            return;
+        }
         match result {
             Ok(()) => {}
             Err(e) if p.cancel => {
@@ -526,11 +536,12 @@ pub fn connect(c: Connect) {
     });
 }
 
-fn cancelled(progress: &Mutex<Progress>) -> bool {
-    progress.lock().cancel
+fn stale(progress: &Mutex<Progress>, generation: u64) -> bool {
+    let p = progress.lock();
+    p.cancel || p.generation != generation
 }
 
-fn run(c: &Connect) -> Result<()> {
+fn run(c: &Connect, generation: u64) -> Result<()> {
     let t = &c.target;
     let report = |step: Step, detail: String| {
         c.progress.lock().set(step, detail);
@@ -545,7 +556,7 @@ fn run(c: &Connect) -> Result<()> {
         let start = Instant::now();
         let mut last_wake = Instant::now() - Duration::from_secs(60);
         loop {
-            if cancelled(&c.progress) {
+            if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
             if last_wake.elapsed() >= Duration::from_secs(5) {
@@ -575,7 +586,7 @@ fn run(c: &Connect) -> Result<()> {
     // 2. Sunshine's port.
     let start = Instant::now();
     while !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
-        if cancelled(&c.progress) {
+        if stale(&c.progress, generation) {
             bail!("cancelled");
         }
         report(
@@ -594,7 +605,11 @@ fn run(c: &Connect) -> Result<()> {
     // 3. Pair if this Mac is not known to the PC yet.
     report(Step::Launching, "Checking pairing…".into());
     let identity = Identity::load_or_create(&brolink_core::config::data_dir()?.join("identity"))?;
-    let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
+    let cert = t
+        .server_cert
+        .clone()
+        .or_else(|| ClientConfig::stored_cert(&t.node_id));
+    let mut client = Client::new(&identity, IpAddr::V4(t.ip), cert)?;
     let mut info = match client.server_info() {
         Ok(i) => i,
         Err(e) if brolink_stream::nvhttp::is_pin_mismatch(&e) => {
@@ -602,9 +617,12 @@ fn run(c: &Connect) -> Result<()> {
             // Forget it and pair again so the user does not have to edit
             // client.toml.
             tracing::warn!("{}: {e:#}; pairing again", t.name);
-            let mut cfg = ClientConfig::load();
-            if cfg.forget_pin_on_mismatch(&t.node_id, &e) {
-                if let Err(e) = cfg.save() {
+            if brolink_stream::nvhttp::is_pin_mismatch(&e) {
+                if let Err(e) = ClientConfig::update_pcs(|pcs| {
+                    if let Some(pc) = pcs.get_mut(&t.node_id) {
+                        pc.server_cert = None;
+                    }
+                }) {
                     tracing::warn!("could not forget the PC's old certificate: {e:#}");
                 }
             }
@@ -625,7 +643,7 @@ fn run(c: &Connect) -> Result<()> {
             bail!("{} did not accept the pairing", t.name);
         }
     }
-    if cancelled(&c.progress) {
+    if stale(&c.progress, generation) {
         bail!("cancelled");
     }
 
@@ -656,7 +674,7 @@ fn run(c: &Connect) -> Result<()> {
         client.quit()?;
         let stopped = Instant::now();
         loop {
-            if cancelled(&c.progress) {
+            if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
             info = client.server_info()?;
@@ -681,7 +699,7 @@ fn run(c: &Connect) -> Result<()> {
     let rtsp = client.launch(app.id, w, h, fps, &ri_key, ri_id, info.current_game != 0)?;
 
     // 5. Connect.
-    if cancelled(&c.progress) {
+    if stale(&c.progress, generation) {
         let _ = client.quit();
         bail!("cancelled");
     }
@@ -711,6 +729,11 @@ fn run(c: &Connect) -> Result<()> {
         tx,
         move || ctx.request_repaint(),
     );
+    if stale(&c.progress, generation) {
+        drop(session);
+        let _ = client.quit();
+        bail!("cancelled");
+    }
     let input = session.input();
     *c.live.lock() = Some(Live {
         pc: t.name.clone(),
@@ -774,11 +797,12 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
 }
 
 fn remember_cert(node_id: &str, name: &str, der: &[u8]) {
-    let mut cfg = ClientConfig::load();
-    let e = cfg.pcs.entry(node_id.to_string()).or_default();
-    e.name = name.to_string();
-    e.server_cert = Some(brolink_stream::nvhttp::hex(der));
-    if let Err(e) = cfg.save() {
+    let hex = brolink_stream::nvhttp::hex(der);
+    if let Err(e) = ClientConfig::update_pcs(|pcs| {
+        let entry = pcs.entry(node_id.to_string()).or_default();
+        entry.name = name.to_string();
+        entry.server_cert = Some(hex);
+    }) {
         tracing::warn!("could not save the PC's certificate: {e:#}");
     }
 }

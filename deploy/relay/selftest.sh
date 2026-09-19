@@ -84,6 +84,12 @@ make_stubs() { # $1 = sandbox dir
 		  volume)
 		    [ -n "${STUB_STATE_DIR:-}" ] || exit 1
 		    echo "$STUB_STATE_DIR"; exit 0 ;;
+		  run)
+		    # has_authenticated_state probes the volume through Docker, not sudo.
+		    if [ -n "${STUB_STATE_DIR:-}" ] && [ -s "$STUB_STATE_DIR/tailscaled.state" ]; then
+		      exit 0
+		    fi
+		    exit 1 ;;
 		  exec)
 		    case "$*" in
 		      "brolink-relay tailscale status --json")
