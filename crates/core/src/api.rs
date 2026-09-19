@@ -87,15 +87,18 @@ pub struct NatReport {
     pub derp: String,
 }
 
-/// Everything the Mac needs to know about the PC, and everything the host's
-/// own control panel shows.
+/// Everything a peer needs to know about this machine, and everything the
+/// host's own control panel shows.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Status {
     pub app: String,
     pub version: String,
-    /// The PC's name as Windows knows it.
+    /// This machine's name as the OS knows it.
     pub name: String,
+    /// Tailscale's OS string: "windows", "macOS", "linux". Empty on hosts
+    /// older than 4.0.
+    pub os: String,
     pub tailscale_ip: Option<String>,
     /// Who the PC is signed in to Tailscale as. Only this account may talk
     /// to the host from the tailnet.

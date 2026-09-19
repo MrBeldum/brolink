@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-client"
+# Unified node binary first (views and shares); viewer-only as a fallback.
+BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-host"
+if [[ ! -f "$BIN" ]]; then
+  BIN="$ROOT/target/release/brolink-host"
+fi
+if [[ ! -f "$BIN" ]]; then
+  BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-client"
+fi
 if [[ ! -f "$BIN" ]]; then
   BIN="$ROOT/target/release/brolink-client"
 fi
 if [[ ! -f "$BIN" ]]; then
-  echo "build the client first: cargo build --release -p brolink-client" >&2
+  echo "build the app first: cargo build --release -p brolink-host" >&2
   exit 1
 fi
 APP="$ROOT/dist/BroLink.app"

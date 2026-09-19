@@ -1,15 +1,19 @@
 # macOS client (Apple Silicon)
 
-BroLink for the Mac is one native app: your PCs, a Connect button each, a
-power menu, and the stream itself. BroLink's stream protocol is compiled
-in, video is decoded by VideoToolbox (H.264 and HEVC), audio by Opus, and
-the picture is drawn in BroLink's own window under a toolbar.
+BroLink for the Mac is one native app: every machine on your Tailscale
+account, a Connect button each, a power menu, the stream itself, and
+**Share this machine** so a Windows PC or another Mac can open this
+desktop. BroLink's stream protocol is compiled in, video is decoded by
+VideoToolbox (H.264 and HEVC), audio by Opus, and the picture is drawn in
+BroLink's own window under a toolbar.
 
 ## Requirements
 
 - macOS 13+ on Apple Silicon
 - [Tailscale](https://tailscale.com/download/mac), signed in with the same
-  account as the PC
+  account as your other machines
+- Screen Recording permission when you first **Share this machine** (so
+  others can see this Mac's desktop)
 
 ## Install a prebuilt app
 
@@ -131,8 +135,10 @@ both routers. When it cannot, every packet goes through a relay: your own
 peer relay if you run one (the Relay card in Settings), otherwise one of
 Tailscale's (DERP). A relay adds a detour, and the round trip it adds is a
 floor under how quickly the PC answers a click; it changes nothing about
-what BroLink asks for. Recommended quality is this screen's size at 35
-Mbps on every path, so a relayed stream is laggier, not blurrier.
+what BroLink asks for. Recommended quality is this screen's size at 50
+Mbps on every path, so a relayed stream is laggier, not blurrier. The
+encoder holds that rate (CBR); a still desktop no longer drops to a
+trickle.
 Tailscale's own relays are shared, so a stream through one can also
 stutter at busy times; a peer relay you run is yours alone.
 
@@ -160,11 +166,11 @@ details BroLink has learned; it sends the packet without connecting.
 
 | Setting | What it changes |
 |---------|-----------------|
-| Quick profiles | **Smooth** 1080p · 60 fps · 12 Mbps, **Balanced** match screen · 60 · 35, **Sharp** match screen · 60 · 65; **Reset** returns to Recommended |
-| Picture quality | **Recommended** (the default) asks for this screen's own size at 35 Mbps, on every path. **Manual** uses the rows below; changing the resolution or the bitrate switches to it |
+| Quick profiles | **Smooth** 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100; **Reset** returns to Recommended |
+| Picture quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Manual** uses the rows below; changing the resolution or the bitrate switches to it |
 | Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
 | Frame rate | 30 to 240; the PC's display is switched to match when it can |
-| Bitrate target | 2 to 150 Mbps. What arrives varies with what is on screen: a still desktop uses very little |
+| Bitrate target | 2 to 150 Mbps. The encoder holds this rate. Large swings mean the path is dropping packets |
 | Video format | Auto (HEVC when the PC can encode it), HEVC, H.264 |
 | Full screen | How a session starts |
 | App | The app on the PC to launch; "Desktop" is the whole PC. The list fills in after the first connection |

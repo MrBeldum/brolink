@@ -113,12 +113,16 @@ unsafe fn open() -> Result<()> {
 
 #[cfg(not(windows))]
 pub fn read() -> Result<Clipboard> {
-    anyhow::bail!("the clipboard is only served on Windows")
+    let mut clip = arboard::Clipboard::new()?;
+    let text = clip.get_text().unwrap_or_default();
+    Ok(Clipboard::fit(&text, 0))
 }
 
 #[cfg(not(windows))]
-pub fn write(_text: &str) -> Result<()> {
-    anyhow::bail!("the clipboard is only served on Windows")
+pub fn write(text: &str) -> Result<()> {
+    let mut clip = arboard::Clipboard::new()?;
+    clip.set_text(text.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

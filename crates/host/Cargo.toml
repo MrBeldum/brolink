@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "BroLink Host: sets up Sunshine on this PC and lets a Mac wake, pair with, and power it"
+description = "BroLink: share this machine and connect to the others"
 build = "build.rs"
+
+[lib]
+name = "brolink_host"
+path = "src/lib.rs"
 
 [[bin]]
 name = "brolink-host"
@@ -13,7 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 brolink-core.workspace = true
+brolink-client.workspace = true
 brolink-ui.workspace = true
+egui-wgpu.workspace = true
 anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -25,6 +31,9 @@ clap.workspace = true
 semver = "1"
 eframe.workspace = true
 egui.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
