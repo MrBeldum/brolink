@@ -25,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
         xvfb xfce4 xfce4-terminal dbus-x11 \
-        pulseaudio libasound2 \
+        pulseaudio libasound2t64 \
         libcap2-bin \
         iptables iproute2 \
     && rm -rf /var/lib/apt/lists/*
