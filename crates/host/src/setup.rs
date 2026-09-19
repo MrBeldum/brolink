@@ -464,7 +464,7 @@ try {{
 {install}
     if ($dir) {{
         {brand_existing}Write-EngineConf $dir
-{creds}    }} else {{
+{creds}{take_over}    }} else {{
         Step "The streaming engine is not installed and was not requested"
     }}
 }} catch {{
@@ -516,6 +516,19 @@ exit 0
         install = install,
         migrate_flag = if p.migrate { "$true" } else { "$false" },
         creds = creds,
+        take_over = if p.dry_run {
+            String::new()
+        } else {
+            r#"        Step "Running the streaming engine as the signed-in user"
+        $audioHelper = Join-Path $env:LOCALAPPDATA 'BroLink\take-over-engine.ps1'
+        if (Test-Path -LiteralPath $audioHelper) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $audioHelper
+        } else {
+            Write-Output "  audio helper not found; the host will take over the engine on start"
+        }
+"#
+            .to_string()
+        },
         port = CONTROL_PORT,
         exe = p.exe.display(),
         tcp_rule = TCP_RULE,
@@ -539,6 +552,7 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
     #[cfg(windows)]
     {
         let dir = data_dir()?;
+        let _ = crate::audio::install_helpers();
         let path = dir.join("setup.ps1");
         // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
         // a Korean/Japanese username or adapter name ("이더넷") would be mangled
@@ -1090,6 +1104,33 @@ system_tray = enabled
         assert!(
             restart.contains(crate::migrate::SERVICE_MATCH),
             "creds restart must see BroLinkStream:\n{restart}"
+        );
+    }
+
+    #[test]
+    fn setup_starts_the_engine_as_the_signed_in_user_after_the_service() {
+        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let s = script(&plan(&exe, true));
+        let restart = s
+            .lines()
+            .find(|l| l.contains("Restart-Service"))
+            .expect("creds restart");
+        let take = s
+            .find("take-over-engine.ps1")
+            .expect("setup runs the audio take-over helper");
+        let restart_at = s.find(restart).expect("restart in script");
+        assert!(
+            restart_at < take,
+            "the service restart would put SYSTEM back in front of the user engine:\n{s}"
+        );
+        assert!(
+            !code(&script(&plan(&exe, true))).contains("127.0.0.1"),
+            "take-over must not bind the engine to loopback"
+        );
+        let dry = script(&migrate_plan(&exe, true));
+        assert!(
+            !dry.contains("take-over-engine.ps1"),
+            "dry-run must not take over the live engine:\n{dry}"
         );
     }
 
