@@ -8,7 +8,8 @@
 
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake clang pkg-config libssl-dev \
+        build-essential cmake clang nasm pkg-config libssl-dev \
+        libasound2-dev libpulse-dev \
         libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
         libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev \
         libxcb-shape0-dev libxcb-xfixes0-dev \
@@ -24,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
         xvfb xfce4 xfce4-terminal dbus-x11 \
-        pulseaudio \
+        pulseaudio libasound2 \
         libcap2-bin \
         iptables iproute2 \
     && rm -rf /var/lib/apt/lists/*
