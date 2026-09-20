@@ -479,10 +479,10 @@ try {{
 }}
 Step "Opening TCP {port} to the tailnet for BroLink Host"
 netsh advfirewall firewall delete rule name="BroLink Host" | Out-Null
-netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program="{exe}" | Out-Null
+netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
 Step "Opening UDP 9 so a Mac can check its wake path while this PC is awake"
 netsh advfirewall firewall delete rule name="BroLink wake" | Out-Null
-netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program="{exe}" | Out-Null
+netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program='{exe}' | Out-Null
 if ($dir) {{
     # BroLink names and scopes these itself rather than running the engine's
     # own add-firewall-rule script, which opens every TCP and UDP port under
@@ -519,18 +519,13 @@ exit 0
         take_over = if p.dry_run {
             String::new()
         } else {
-            r#"        Step "Running the streaming engine as the signed-in user"
-        $audioHelper = Join-Path $env:LOCALAPPDATA 'BroLink\take-over-engine.ps1'
-        if (Test-Path -LiteralPath $audioHelper) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $audioHelper
-        } else {
-            Write-Output "  audio helper not found; the host will take over the engine on start"
-        }
-"#
-            .to_string()
+            format!(
+                "        Step \"Running the streaming engine as the signed-in user\"\n        & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '{}'\n",
+                q(include_str!("../windows/take-over-engine.ps1"))
+            )
         },
         port = CONTROL_PORT,
-        exe = p.exe.display(),
+        exe = q(&p.exe.display().to_string()),
         tcp_rule = TCP_RULE,
         udp_rule = UDP_RULE,
         adapter = adapter,
@@ -609,7 +604,10 @@ pub fn set_start_with_windows(enable: bool, exe: &Path) -> Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()?;
-        anyhow::ensure!(status.success() || !enable, "could not write the Run key");
+        anyhow::ensure!(
+            status.success() || (!enable && !starts_with_windows()),
+            "could not update the Run key"
+        );
         Ok(())
     }
     #[cfg(not(windows))]
@@ -701,11 +699,11 @@ mod tests {
         assert!(s.contains("HiberbootEnabled -Value 0"));
         assert!(s.contains("powercfg /change standby-timeout-ac 0"));
         assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
-        assert!(s.contains("protocol=UDP localport=9 program=\"C:\\x\\brolink-host.exe\""));
+        assert!(s.contains("protocol=UDP localport=9 program='C:\\x\\brolink-host.exe'"));
         assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
-        assert!(s.contains(
-            "localport=47850 remoteip=100.64.0.0/10 program=\"C:\\x\\brolink-host.exe\""
-        ));
+        assert!(
+            s.contains("localport=47850 remoteip=100.64.0.0/10 program='C:\\x\\brolink-host.exe'")
+        );
 
         let s = script(&plan(&exe, true));
         assert!(s.contains("Downloading the streaming engine"));
@@ -961,7 +959,7 @@ mod tests {
         let fail = s
             .find("if ($engineError)")
             .expect("failure is reported at the end");
-        let exit1 = s.find("exit 1").expect("nonzero exit");
+        let exit1 = s.rfind("exit 1").expect("nonzero exit");
         assert!(wake < fail, "unrelated safe steps still run");
         assert!(fail < exit1);
         assert!(s.contains("exit 0"), "success is an explicit zero");
@@ -1116,7 +1114,7 @@ system_tray = enabled
             .find(|l| l.contains("Restart-Service"))
             .expect("creds restart");
         let take = s
-            .find("take-over-engine.ps1")
+            .find("-Command '# Run the streaming engine")
             .expect("setup runs the audio take-over helper");
         let restart_at = s.find(restart).expect("restart in script");
         assert!(
@@ -1129,7 +1127,7 @@ system_tray = enabled
         );
         let dry = script(&migrate_plan(&exe, true));
         assert!(
-            !dry.contains("take-over-engine.ps1"),
+            !dry.contains("-Command '# Run the streaming engine"),
             "dry-run must not take over the live engine:\n{dry}"
         );
     }

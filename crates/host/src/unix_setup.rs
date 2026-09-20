@@ -18,6 +18,46 @@ use crate::streamer::{self, Install};
 pub const MAC_DMG: &str = "Sunshine-macOS-arm64.dmg";
 pub const MAC_DMG_SHA256: &str = "b630d35a184d8eaff39c5104f3c6a0c40e91ddc447ccf7a0c5b24706465fab6a";
 
+/// Sunshine v2026.906 stores SHA-256(password + salt) as reversed uppercase
+/// hexadecimal (http::save_user_creds / util::Hex). A separate credentials file
+/// avoids modifying its paired-client state and keeps secrets out of argv.
+fn write_engine_login(path: &Path, user: &str, password: &str) -> Result<()> {
+    use std::io::Write;
+    let salt = crate::config::random_password();
+    let hash = brolink_core::update::sha256_hex(format!("{password}{salt}").as_bytes());
+    let hash: String = hash
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .rev()
+        .map(|pair| std::str::from_utf8(pair).expect("hex"))
+        .collect::<String>()
+        .to_uppercase();
+    let body =
+        serde_json::to_vec(&serde_json::json!({"username":user, "salt":salt, "password":hash}))?;
+    let tmp = path.with_extension(format!("{}.tmp", crate::config::random_password()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options.open(&tmp)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 pub fn engine_dir() -> Result<PathBuf> {
     Ok(brolink_core::config::data_dir()?.join("engine"))
 }
@@ -91,9 +131,23 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
         install_engine(&dir, log)?;
     }
 
+    stop_engine();
     let conf = conf_path()?;
     let existing = fs::read_to_string(&conf).unwrap_or_default();
-    fs::write(&conf, conceal_conf(&existing)).context("write sunshine.conf")?;
+    let credentials = conf.with_file_name("brolink-web.json");
+    let profile = conceal_conf(&existing)
+        .lines()
+        .filter(|line| {
+            line.split_once('=')
+                .is_none_or(|(key, _)| key.trim() != "credentials_file")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        &conf,
+        format!("{profile}\ncredentials_file = {}\n", credentials.display()),
+    )
+    .context("write sunshine.conf")?;
     let apps = conf
         .parent()
         .map(|p| p.join("apps.json"))
@@ -107,24 +161,9 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
     let Some(install) = streamer::find() else {
         bail!("the streaming engine is not installed");
     };
-    let exe = install.exe();
     if !p.sunshine_user.is_empty() && !p.sunshine_pass.is_empty() {
-        let out = Command::new(&exe)
-            .arg(&conf)
-            .args(["--creds", p.sunshine_user, p.sunshine_pass])
-            .output()
-            .context("sunshine --creds")?;
-        if !out.status.success() {
-            step(
-                log,
-                format!(
-                    "sunshine --creds: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            );
-        } else {
-            step(log, "engine login set");
-        }
+        write_engine_login(&credentials, p.sunshine_user, p.sunshine_pass)?;
+        step(log, "engine login set");
     }
 
     stop_engine();
@@ -350,7 +389,14 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
         let _ = fs::remove_file(&path);
         return Ok(());
     }
-    let exe = exe.display().to_string();
+    let exe = exe
+        .display()
+        .to_string()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;");
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -369,12 +415,14 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
 "#
     );
     fs::write(&path, plist)?;
-    let _ = Command::new("launchctl")
+    let loaded = Command::new("launchctl")
         .args(["load"])
         .arg(&path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .context("load BroLink launch agent")?;
+    anyhow::ensure!(loaded.success(), "could not load BroLink launch agent");
     Ok(())
 }
 
@@ -398,16 +446,25 @@ fn linux_user_unit(enable: bool, exe: &Path) -> Result<()> {
         return Ok(());
     }
     let unit = format!(
-        "[Unit]\nDescription=BroLink\nAfter=network.target\n\n[Service]\nExecStart={} --background\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-        exe.display()
+        "[Unit]\nDescription=BroLink\nAfter=network.target\n\n[Service]\nExecStart=\"{}\" --background\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+        exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+            .replace('%', "%%").replace('$', "$$").replace('\n', "\\n").replace('\r', "\\r")
     );
     fs::write(&path, unit)?;
-    let _ = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
-    let _ = Command::new("systemctl")
-        .args(["--user", "enable", "--now", "brolink.service"])
-        .status();
+    anyhow::ensure!(
+        Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status()?
+            .success(),
+        "could not reload user services"
+    );
+    anyhow::ensure!(
+        Command::new("systemctl")
+            .args(["--user", "enable", "--now", "brolink.service"])
+            .status()?
+            .success(),
+        "could not enable BroLink service"
+    );
     Ok(())
 }
 
@@ -420,6 +477,43 @@ fn dirs_home() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_login_uses_sunshine_hash_format_without_plaintext() {
+        let dir = std::env::temp_dir().join(format!(
+            "brolink-login-{}",
+            crate::config::random_password()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("login.json");
+        write_engine_login(&path, "user", "secret").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(!text.contains("secret"));
+        assert_eq!(value["username"], "user");
+        let expected = brolink_core::update::sha256_hex(
+            format!("secret{}", value["salt"].as_str().unwrap()).as_bytes(),
+        );
+        let stored = value["password"].as_str().unwrap();
+        let reversed: String = stored
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .rev()
+            .map(|b| std::str::from_utf8(b).unwrap())
+            .collect();
+        assert_eq!(reversed.to_lowercase(), expected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn mac_dmg_pin_is_64_hex() {

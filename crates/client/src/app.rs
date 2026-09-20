@@ -106,6 +106,7 @@ impl ClientApp {
             app.updates.clone(),
             discovery,
             app.live.clone(),
+            app.progress.clone(),
             cc.egui_ctx.clone(),
         );
         app
@@ -163,6 +164,11 @@ impl ClientApp {
             self.dirty = false;
             if let Err(e) = self.cfg.save() {
                 tracing::warn!("could not save settings: {e:#}");
+                self.notice = Some((
+                    Tone::Danger,
+                    format!("Could not save settings: {e}"),
+                    Instant::now(),
+                ));
             }
         }
     }
@@ -735,7 +741,7 @@ impl ClientApp {
         ui::titled_card(
             ui,
             "Your machines",
-            Some("Every machine on your Tailscale account. Connect opens its desktop when BroLink is sharing there."),
+            Some("Every machine reachable on your tailnet. Connect opens its desktop when BroLink is sharing there."),
             |ui| {
                 self.this_machine_row(ui);
                 if disc.pcs.is_empty() {
@@ -1098,7 +1104,7 @@ impl ClientApp {
                         ui,
                         &mut power,
                         "Let others sleep, restart, or shut down this machine",
-                        Some("Only devices on your Tailscale account can ask."),
+                        Some("Devices allowed by your Tailscale access rules can ask."),
                     ) {
                         slot.lock().want_power = Some(power);
                     }

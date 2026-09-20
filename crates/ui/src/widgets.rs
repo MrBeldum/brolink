@@ -252,7 +252,7 @@ pub fn display_digits(ui: &mut Ui, digits: &str) -> Response {
 pub fn empty_state(ui: &mut Ui, text: &str, busy: bool) {
     ui.horizontal_wrapped(|ui| {
         if busy {
-            ui.add(egui::Spinner::new().size(14.0).color(P.faint));
+            ui.add(spinner(14.0, P.faint));
         }
         ui.label(RichText::new(text).color(P.muted));
     });
@@ -815,6 +815,29 @@ impl Brand {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), right);
         });
+    }
+}
+
+/// A paced activity indicator: unlike egui's immediate-repaint spinner this
+/// stays bounded when the low-latency stream renderer has vsync disabled.
+pub fn spinner(size: f32, color: egui::Color32) -> impl egui::Widget {
+    move |ui: &mut egui::Ui| {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let time = ui.input(|i| i.time) as f32;
+            let points = (0..=20)
+                .map(|i| {
+                    let angle = time * 4.0 + i as f32 * std::f32::consts::PI / 15.0;
+                    rect.center() + egui::vec2(angle.cos(), angle.sin()) * (size * 0.4)
+                })
+                .collect();
+            ui.painter()
+                .add(egui::Shape::line(points, egui::Stroke::new(2.0_f32, color)));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        response
     }
 }
 

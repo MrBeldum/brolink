@@ -228,7 +228,7 @@ impl View {
                     let c = video.center();
                     ui.put(
                         Rect::from_center_size(c, Vec2::new(300.0, 60.0)),
-                        egui::Spinner::new().size(22.0).color(P.accent),
+                        ui::spinner(22.0, P.accent),
                     );
                     ui.painter().text(
                         c + Vec2::new(0.0, 36.0),
@@ -930,6 +930,13 @@ impl View {
             overlay,
             over_overlay,
         );
+        if self.captured && !popup && !overlay {
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
         let keys_to_pc =
             focused && !ctx.wants_keyboard_input() && !popup && !overlay && input.connected();
         let ppp = ctx.pixels_per_point();
@@ -940,17 +947,18 @@ impl View {
             }
             return;
         }
+        // The escape chord must remain available even if an overlay took focus.
+        let ctrl_alt = modifiers.ctrl && modifiers.alt;
+        if !ctrl_alt {
+            self.capture_chord_held = false;
+        }
+        if ctrl_alt && !self.capture_chord_held && input.connected() {
+            self.capture_chord_held = true;
+            self.host_key(ctx, live, cfg);
+            return;
+        }
         if keys_to_pc {
-            let ctrl_alt = modifiers.ctrl && modifiers.alt;
-            if !ctrl_alt {
-                self.capture_chord_held = false;
-            }
             self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
-            if ctrl_alt && !self.capture_chord_held {
-                self.capture_chord_held = true;
-                self.host_key(ctx, live, cfg);
-                return;
-            }
             // A paste's chord releases the modifier it pressed once the text
             // has reached the PC. If ⌘ is still held here, press it again
             // on the PC, so ⌘V ⌘V in one hold pastes twice.
