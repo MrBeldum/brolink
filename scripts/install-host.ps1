@@ -63,6 +63,7 @@ New-ItemProperty -Path $Run -Name "BroLinkHost" -Value "`"$DestExe`" --backgroun
 
 Write-Host "Shortcut: Desktop\BroLink Host.lnk"
 Write-Host "Open BroLink Host and click 'Set up this PC' once."
+Write-Host "If you already ran setup from the unzipped copy, run it once more from this install so the firewall allows $DestExe."
 if (-not $NoStart) {
     Start-Process -FilePath $DestExe -WorkingDirectory $DestDir
 }

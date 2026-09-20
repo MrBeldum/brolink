@@ -9,10 +9,10 @@
 set -euo pipefail
 REPO="${BROLINK_REPO:-MrBeldum/brolink}"
 URL="https://github.com/$REPO/releases/latest/download/brolink-macos-arm64.tar.gz"
+API="https://api.github.com/repos/$REPO/releases/latest"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-# Public releases download anonymously. Keep the authenticated fallback so
-# this script still works if the repository is made private again.
+
 echo "downloading $URL"
 if ! curl -fsSL -o "$TMP/brolink-macos-arm64.tar.gz" "$URL"; then
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
@@ -23,9 +23,64 @@ if ! curl -fsSL -o "$TMP/brolink-macos-arm64.tar.gz" "$URL"; then
     exit 1
   fi
 fi
+
+echo "checking SHA-256"
+DIGEST=""
+if JSON=$(curl -fsSL -H "Accept: application/vnd.github+json" "$API" 2>/dev/null); then
+  DIGEST=$(printf '%s' "$JSON" | python3 -c '
+import json, sys
+rel = json.load(sys.stdin)
+for a in rel.get("assets") or []:
+    if a.get("name") == "brolink-macos-arm64.tar.gz":
+        d = a.get("digest") or ""
+        print(d[7:] if d.lower().startswith("sha256:") else d)
+        break
+' 2>/dev/null || true)
+fi
+if [[ -z "$DIGEST" ]] && command -v gh >/dev/null 2>&1; then
+  DIGEST=$(gh api "repos/$REPO/releases/latest" --jq '
+    .assets[] | select(.name=="brolink-macos-arm64.tar.gz") | .digest // ""
+  ' 2>/dev/null | sed 's/^[Ss][Hh][Aa]256://' || true)
+fi
+if [[ ! "$DIGEST" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "release published no SHA-256 for brolink-macos-arm64.tar.gz; refusing to install" >&2
+  exit 1
+fi
+GOT=$(shasum -a 256 "$TMP/brolink-macos-arm64.tar.gz" | awk '{print $1}')
+lc() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+if [[ "$(lc "$GOT")" != "$(lc "$DIGEST")" ]]; then
+  echo "download does not match the published SHA-256" >&2
+  echo "  expected $DIGEST" >&2
+  echo "  got      $GOT" >&2
+  exit 1
+fi
+
 tar xzf "$TMP/brolink-macos-arm64.tar.gz" -C "$TMP"
-xattr -dr com.apple.quarantine "$TMP/BroLink.app" 2>/dev/null || true
-rm -rf /Applications/BroLink.app
-cp -R "$TMP/BroLink.app" /Applications/BroLink.app
-echo "installed /Applications/BroLink.app"
-open /Applications/BroLink.app
+APP="$TMP/BroLink.app"
+if [[ ! -x "$APP/Contents/MacOS/BroLink" ]]; then
+  echo "the download holds no BroLink.app" >&2
+  exit 1
+fi
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+codesign --verify --deep --strict "$APP"
+
+DEST="/Applications/BroLink.app"
+STAGE="/Applications/.BroLink-install-$$.app"
+rm -rf "$STAGE"
+cp -R "$APP" "$STAGE"
+# Swap last: a failed copy must not delete the live app.
+if [[ -d "$DEST" ]]; then
+  PREV="/Applications/.BroLink-previous-$$.app"
+  rm -rf "$PREV"
+  mv "$DEST" "$PREV"
+  if ! mv "$STAGE" "$DEST"; then
+    mv "$PREV" "$DEST"
+    echo "could not replace /Applications/BroLink.app; previous copy restored" >&2
+    exit 1
+  fi
+  rm -rf "$PREV"
+else
+  mv "$STAGE" "$DEST"
+fi
+echo "installed $DEST"
+open "$DEST"

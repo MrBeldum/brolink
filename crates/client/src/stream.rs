@@ -940,6 +940,19 @@ impl View {
         let keys_to_pc =
             focused && !ctx.wants_keyboard_input() && !popup && !overlay && input.connected();
         let ppp = ctx.pixels_per_point();
+        let motion_scale = {
+            let stats = live.session.stats();
+            let stream_w = if stats.width > 0 {
+                stats.width as f32
+            } else {
+                live.requested.0 as f32
+            };
+            if video.width() >= 1.0 {
+                stream_w / video.width()
+            } else {
+                ppp
+            }
+        };
 
         if !focused {
             if self.held.any_down() || self.captured {
@@ -947,16 +960,19 @@ impl View {
             }
             return;
         }
-        // The escape chord must remain available even if an overlay took focus.
+        // Ctrl+Alt is BroLink's host key. It is read before the keys-to-PC
+        // gate so it works even if an overlay took focus, and while it is
+        // held nothing is forwarded: the PC must not see a held chord after
+        // the toolbar opens (games and the Start menu react to one).
         let ctrl_alt = modifiers.ctrl && modifiers.alt;
-        if !ctrl_alt {
-            self.capture_chord_held = false;
-        }
-        if ctrl_alt && !self.capture_chord_held && input.connected() {
-            self.capture_chord_held = true;
-            self.host_key(ctx, live, cfg);
+        if ctrl_alt {
+            if !self.capture_chord_held && input.connected() {
+                self.capture_chord_held = true;
+                self.host_key(ctx, live, cfg);
+            }
             return;
         }
+        self.capture_chord_held = false;
         if keys_to_pc {
             self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
             // A paste's chord releases the modifier it pressed once the text
@@ -1022,8 +1038,12 @@ impl View {
                 }
                 Event::PointerMoved(p) if !self.captured && over_video => position = Some(p),
                 Event::MouseMoved(d) if self.captured => {
-                    self.motion.0 += d.x;
-                    self.motion.1 += d.y;
+                    // Deltas arrive in points; the PC moves in stream pixels.
+                    // Scale by the picture's size here so a hand movement
+                    // crosses the same share of the PC's desktop as of the
+                    // picture, whatever the window size or the stream size.
+                    self.motion.0 += d.x * motion_scale;
+                    self.motion.1 += d.y * motion_scale;
                 }
                 Event::PointerButton {
                     button, pressed, ..

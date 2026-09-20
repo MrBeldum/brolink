@@ -2,15 +2,24 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Unified node binary first (views and shares); viewer-only as a fallback.
-BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-host"
-if [[ ! -f "$BIN" ]]; then
+# When both a cross-compiled and a native build exist, the newer one is the
+# one that was just built.
+newest() {
+  local pick=""
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    if [[ -z "$pick" || "$f" -nt "$pick" ]]; then
+      pick="$f"
+    fi
+  done
+  printf '%s' "$pick"
+}
+BIN="$(newest "$ROOT/target/aarch64-apple-darwin/release/brolink-host" "$ROOT/target/release/brolink-host")"
+if [[ -z "$BIN" ]]; then
+  BIN="$(newest "$ROOT/target/aarch64-apple-darwin/release/brolink-client" "$ROOT/target/release/brolink-client")"
+fi
+if [[ -z "$BIN" ]]; then
   BIN="$ROOT/target/release/brolink-host"
-fi
-if [[ ! -f "$BIN" ]]; then
-  BIN="$ROOT/target/aarch64-apple-darwin/release/brolink-client"
-fi
-if [[ ! -f "$BIN" ]]; then
-  BIN="$ROOT/target/release/brolink-client"
 fi
 if [[ ! -f "$BIN" ]]; then
   echo "build the app first: cargo build --release -p brolink-host" >&2
@@ -59,7 +68,12 @@ PLIST
 # bundle. Set CODESIGN_IDENTITY to a "Developer ID Application" certificate
 # for a build Gatekeeper accepts once notarized (see docs/MACOS.md).
 IDENTITY="${CODESIGN_IDENTITY:--}"
-codesign --force --deep --sign "$IDENTITY" "$APP"
+if [[ "$IDENTITY" == "-" ]]; then
+  codesign --force --sign "$IDENTITY" "$APP"
+else
+  # Notarization requires the hardened runtime and a secure timestamp.
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+fi
 codesign --verify --deep --strict "$APP"
 if [[ "$IDENTITY" == "-" ]]; then
   echo "wrote $APP (ad-hoc signed; set CODESIGN_IDENTITY for a Developer ID build)"

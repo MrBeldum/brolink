@@ -12,9 +12,14 @@ use brolink_stream::{Client, Event, FrameSlot, Identity, Input, Session, Setting
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Each [`connect`] call gets a new id so a cancelled worker cannot finish
+/// into a later attempt's `progress` / `live`.
+static NEXT_CONNECT: AtomicU64 = AtomicU64::new(1);
 
 /// How often this Mac's own NAT is re-examined. `tailscale netcheck` takes
 /// seconds and networks change when the Mac moves, not more often.
@@ -198,7 +203,7 @@ fn learn(scan: &Discovery) {
                     entry.lan_ip = h.lan_ip.clone();
                 }
             }
-            if let Some(p) = &scan_public(pc) {
+            if let Some(p) = scan_public(pc) {
                 entry.public_ip = Some(p.to_string());
             }
         }
@@ -393,6 +398,8 @@ pub struct Progress {
     pub updating: bool,
     /// Sunshine's app names, once listed.
     pub apps: Vec<String>,
+    /// Distinguishes this attempt from an older worker that is still running.
+    pub generation: u64,
 }
 
 impl Default for Progress {
@@ -405,6 +412,7 @@ impl Default for Progress {
             cancel: false,
             updating: false,
             apps: Vec::new(),
+            generation: 0,
         }
     }
 }
@@ -514,6 +522,7 @@ pub struct Connect {
 /// Wake, wait, pair, launch, connect: on its own thread, reporting into
 /// `progress` and leaving the stream in `live`.
 pub fn connect(c: Connect) {
+    let generation = NEXT_CONNECT.fetch_add(1, Ordering::Relaxed);
     {
         let mut p = c.progress.lock();
         if p.active() {
@@ -521,13 +530,17 @@ pub fn connect(c: Connect) {
         }
         *p = Progress {
             pc: c.target.name.clone(),
+            generation,
             ..Default::default()
         };
         p.set(Step::Launching, "Starting…");
     }
     std::thread::spawn(move || {
-        let result = run(&c);
+        let result = run(&c, generation);
         let mut p = c.progress.lock();
+        if p.generation != generation {
+            return;
+        }
         match result {
             Ok(()) => {}
             Err(e) if p.cancel => {
@@ -545,11 +558,12 @@ pub fn connect(c: Connect) {
     });
 }
 
-fn cancelled(progress: &Mutex<Progress>) -> bool {
-    progress.lock().cancel
+fn stale(progress: &Mutex<Progress>, generation: u64) -> bool {
+    let p = progress.lock();
+    p.cancel || p.generation != generation
 }
 
-fn run(c: &Connect) -> Result<()> {
+fn run(c: &Connect, generation: u64) -> Result<()> {
     let t = &c.target;
     let report = |step: Step, detail: String| {
         c.progress.lock().set(step, detail);
@@ -564,7 +578,7 @@ fn run(c: &Connect) -> Result<()> {
         let start = Instant::now();
         let mut last_wake = Instant::now() - Duration::from_secs(60);
         loop {
-            if cancelled(&c.progress) {
+            if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
             if last_wake.elapsed() >= Duration::from_secs(5) {
@@ -594,7 +608,7 @@ fn run(c: &Connect) -> Result<()> {
     // 2. Sunshine's port.
     let start = Instant::now();
     while !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
-        if cancelled(&c.progress) {
+        if stale(&c.progress, generation) {
             bail!("cancelled");
         }
         report(
@@ -636,7 +650,7 @@ fn run(c: &Connect) -> Result<()> {
         report(Step::Pairing { pin: pin.clone() }, String::new());
         let der = client.pair_cancellable(&pin, &brolink_core::config::machine_name(), || {
             submit_pin(t.ip, &pin, &c.progress);
-            cancelled(&c.progress)
+            stale(&c.progress, generation)
         })?;
         remember_cert(&t.node_id, &t.name, &der);
         info = client.server_info()?;
@@ -644,7 +658,7 @@ fn run(c: &Connect) -> Result<()> {
             bail!("{} did not accept the pairing", t.name);
         }
     }
-    if cancelled(&c.progress) {
+    if stale(&c.progress, generation) {
         bail!("cancelled");
     }
 
@@ -675,7 +689,7 @@ fn run(c: &Connect) -> Result<()> {
         client.quit()?;
         let stopped = Instant::now();
         loop {
-            if cancelled(&c.progress) {
+            if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
             info = client.server_info()?;
@@ -709,7 +723,7 @@ fn run(c: &Connect) -> Result<()> {
     )?;
 
     // 5. Connect.
-    if cancelled(&c.progress) {
+    if stale(&c.progress, generation) {
         let _ = client.quit();
         bail!("cancelled");
     }
@@ -739,6 +753,11 @@ fn run(c: &Connect) -> Result<()> {
         tx,
         move || ctx.request_repaint(),
     );
+    if stale(&c.progress, generation) {
+        drop(session);
+        let _ = client.quit();
+        bail!("cancelled");
+    }
     let input = session.input();
     *c.live.lock() = Some(Live {
         pc: t.name.clone(),
