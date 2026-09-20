@@ -6,6 +6,10 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Docker desktops now publish a valid streaming app catalog. The missing
+  environment object made a healthy-looking VPS report "offers nothing to
+  stream"; node self-tests now check the catalog and persisted login setup.
+
 - On Windows, the streaming engine runs as the signed-in user and the
   only active speakers stay the default. The engine's own startup was
   clearing Steam Streaming Speakers on a PC with no other playback
