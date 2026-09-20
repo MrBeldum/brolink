@@ -273,6 +273,7 @@ fn fetch_asset(rel: &Release, name: &str, token: Option<&str>) -> Result<PathBuf
     let asset = rel
         .asset(name)
         .ok_or_else(|| anyhow!("release {} has no {name}", rel.tag))?;
+    update::require_digest(asset)?;
     let dest = updates_dir(rel)?.join(name);
     if update::verify_asset(asset, &dest).is_err() {
         update::download(asset, token, &dest)?;

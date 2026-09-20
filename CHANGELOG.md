@@ -37,6 +37,56 @@ GitHub release notes, so each version gets a heading of the form
   Tailscale is treated as a LAN so moonlight does not tax 500 kbps or shrink
   packets to 1024, packets stay 1184 bytes for WireGuard's MTU, and the
   moonlight cap is 150 Mbps. Recommended quality is 50 Mbps; Sharp is 100.
+- Settings and pairing no longer wipe each other. The window, discovery and
+  pairing used to rewrite all of `client.toml` from a stale copy, so a
+  bitrate change could drop the PC's certificate and its wake details, and
+  a reconnect right after the first pair could ask for a PIN again. Every
+  write is now one read-modify-write under a lock: the window overlays its
+  preferences, discovery and pairing edit only what they learned, and the
+  host panel does the same with `host.toml`. Config files are written 0600
+  in a 0700 folder, and a damaged file is kept beside the new one as
+  `.bad-*` instead of being replaced.
+- An update no longer installs while a connect is waking, pairing or
+  launching, a connect refuses to start while an install is under way, and
+  a cancelled connect cannot finish into the next one. Cancel takes effect
+  while the PC is still being asked for the PIN. The update cache keeps
+  this release and the previous one only.
+- Connecting no longer overwrites the Mac clipboard with whatever the PC
+  already held. Ctrl+Alt (the host key) is never sent to the PC, and it
+  works even when a control has focus; while the mouse is captured, keys go
+  to the PC rather than to a focused control. Captured mouse movement is
+  scaled to the stream's pixels, so a hand movement crosses the same share
+  of the PC's desktop as of the picture.
+- Every Tailscale CLI call is bounded (10 s; the per-request `whois` 2 s),
+  and its output is drained while it runs, so a slow or chatty CLI cannot
+  hang the window or the control service.
+- Host setup runs `brolink-host --setup-elevated` after UAC, writes its
+  script under `%SystemRoot%\Temp` (administrators only) and passes the
+  engine take-over helper as an encoded command, instead of running a
+  user-writable `setup.ps1`. Repair setup registers the engine service when
+  files exist but the service is down, and stops a leftover service before
+  deleting it. Firewall `program=` paths are single-quoted so a `$` in the
+  username is not expanded. The logon task for the take-over helper runs
+  with limited rights.
+- The engine login is written as the engine's own hashed credentials file
+  (`brolink-web.json`, `credentials_file =` in `sunshine.conf`) instead of
+  `sunshine --creds` on a command line, and the engine's web API is called
+  with the password on stdin (`curl --config -`), so neither the setup log
+  nor the process list shows it. The Docker node does the same through
+  `deploy/node/bootstrap.py`, which also keeps an existing `host.toml`
+  (preferences, pairing) intact across restarts.
+- Auto-update refuses a GitHub asset with no SHA-256. The Mac installer
+  checks that digest, verifies the signature, and swaps `/Applications`
+  without deleting the live app first. `git credential` is killed if its
+  stdin closes early.
+- Stream teardown waits for in-flight input and keeps the session alive
+  until moonlight's detached termination thread has nowhere to call; a
+  decode unit whose buffer list overruns its declared length is refused.
+- The migration check reads the installed engine's real kind instead of
+  labelling every install "BroLink". The macOS launch agent and Linux user
+  unit escape the executable path, and a failure to register them is
+  reported instead of ignored. Spawned engine and service processes are
+  reaped. A settings save failure shows in the window.
 
 - One pointer. Freeing the mouse showed the Mac cursor behind egui's back,
   and it stayed on top of the PC's own cursor in the picture until the

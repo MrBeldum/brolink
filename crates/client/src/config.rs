@@ -233,9 +233,19 @@ impl ClientConfig {
         }
     }
 
-    /// The window owns preferences; discovery and pairing own `pcs`.
-    pub fn save(&self) -> anyhow::Result<()> {
-        Self::update(|current| current.apply_preferences(self))
+    /// The window owns preferences; discovery and pairing own `pcs`. The
+    /// window's copy of `pcs` is refreshed from the file at the same time, so
+    /// a PC paired or seen during the run is known to the window too.
+    pub fn save(&mut self) -> anyhow::Result<()> {
+        let mut pcs = None;
+        Self::update(|current| {
+            current.apply_preferences(self);
+            pcs = Some(current.pcs.clone());
+        })?;
+        if let Some(pcs) = pcs {
+            self.pcs = pcs;
+        }
+        Ok(())
     }
 
     fn apply_preferences(&mut self, settings: &Self) {
@@ -244,6 +254,7 @@ impl ClientConfig {
         self.pcs = pcs;
     }
 
+    /// One read-modify-write of the file, under the process-wide config lock.
     pub fn update(edit: impl FnOnce(&mut Self)) -> anyhow::Result<()> {
         brolink_core::config::update(FILE, edit)
     }

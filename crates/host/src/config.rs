@@ -39,9 +39,22 @@ impl HostConfig {
     pub fn load() -> Self {
         brolink_core::config::load(FILE)
     }
+    /// Overlay this copy's settings on the file rather than replacing it:
+    /// `--setup` or a container's bootstrap may have written the engine
+    /// login since this copy was loaded, and an empty login here never
+    /// erases one on disk.
     pub fn save(&self) -> anyhow::Result<()> {
-        brolink_core::config::save(FILE, self)
+        brolink_core::config::update(FILE, |disk: &mut Self| {
+            disk.power_allowed = self.power_allowed;
+            disk.start_with_windows = self.start_with_windows;
+            disk.stay_awake = self.stay_awake;
+            if self.has_creds() {
+                disk.sunshine_user = self.sunshine_user.clone();
+                disk.sunshine_pass = self.sunshine_pass.clone();
+            }
+        })
     }
+
     pub fn has_creds(&self) -> bool {
         !self.sunshine_user.is_empty() && !self.sunshine_pass.is_empty()
     }

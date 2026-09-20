@@ -138,8 +138,9 @@ impl HostApp {
         if !self.cfg.has_creds() && !migrate {
             self.cfg.sunshine_user = "brolink".into();
             self.cfg.sunshine_pass = config::random_password();
-            self.dirty = true;
-            self.commit();
+            if let Err(e) = self.cfg.save() {
+                tracing::warn!("could not save engine login: {e:#}");
+            }
         }
         let shared = self.shared.clone();
         {
@@ -149,7 +150,7 @@ impl HostApp {
             s.setup_log.clear();
         }
         let cfg = self.cfg.clone();
-        let install_engine = !status.streamer.installed || migrate;
+        let install_engine = !status.streamer.installed || migrate || !status.streamer.running;
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
         std::thread::spawn(move || {
