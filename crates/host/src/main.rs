@@ -38,10 +38,16 @@ struct Args {
     /// Share this machine (UAC).
     #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
     setup: bool,
+    /// Run setup as administrator. The unelevated panel launches this so
+    /// the script is generated after UAC, not from a user-writable file.
+    #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
+    setup_elevated: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // The elevated setup helper logs with the panel; `setup.log` is the
+    // script's own output, which the setup card shows.
     init_logging(if args.background {
         "service.log"
     } else {
@@ -52,6 +58,9 @@ fn main() -> Result<()> {
     }
     if args.setup {
         return run_setup();
+    }
+    if args.setup_elevated {
+        return brolink_host::setup::run_as_admin();
     }
     if let Some(dir) = &args.brand_engine {
         return brand::brand(dir).map_err(|e| {

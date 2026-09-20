@@ -41,6 +41,7 @@ CONF=/root/.config/sunshine/sunshine.conf
 cat >"$CONF" <<'EOF'
 system_tray = disabled
 origin_web_ui_allowed = pc
+credentials_file = /root/.config/sunshine/brolink-web.json
 max_bitrate = 0
 minimum_fps_target = 60
 fec_percentage = 20
@@ -64,30 +65,9 @@ cat >/root/.config/sunshine/apps.json <<'EOF'
 }
 EOF
 
-USER_NAME="${BROLINK_USER:-brolink}"
-PASS_NAME="${BROLINK_PASS:-}"
-if [[ -z "$PASS_NAME" ]]; then
-  # `head` closes the pipe after 20 bytes; `tr` then gets SIGPIPE. With
-  # `pipefail` that would exit 141 and crash the container.
-  set +o pipefail
-  PASS_NAME="$(tr -dc 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 20)"
-  set -o pipefail
-  log "generated engine login (user ${USER_NAME}); set BROLINK_PASS to pin it"
-fi
-"$ENGINE" "$CONF" --creds "$USER_NAME" "$PASS_NAME" >/dev/null 2>&1 || true
-
-# Linux ProjectDirs for app "BroLink" is ~/.local/share/brolink, not
-# ~/.local/share/brolink/BroLink (that extra folder is macOS-style).
-HOST_TOML=/root/.local/share/brolink/host.toml
-if [[ ! -f "$HOST_TOML" ]]; then
-  cat >"$HOST_TOML" <<EOF
-power_allowed = true
-start_with_windows = true
-stay_awake = true
-sunshine_user = "${USER_NAME}"
-sunshine_pass = "${PASS_NAME}"
-EOF
-fi
+# One persisted source of truth for the host and engine. Fails closed on a
+# damaged config, and never exposes the engine password in process arguments.
+python3 /opt/brolink/bootstrap.py
 
 log "starting streaming engine"
 "$ENGINE" "$CONF" >/var/log/sunshine.log 2>&1 &

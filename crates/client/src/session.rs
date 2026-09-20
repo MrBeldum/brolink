@@ -12,9 +12,14 @@ use brolink_stream::{Client, Event, FrameSlot, Identity, Input, Session, Setting
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Each [`connect`] call gets a new id so a cancelled worker cannot finish
+/// into a later attempt's `progress` / `live`.
+static NEXT_CONNECT: AtomicU64 = AtomicU64::new(1);
 
 /// How often this Mac's own NAT is re-examined. `tailscale netcheck` takes
 /// seconds and networks change when the Mac moves, not more often.
@@ -128,7 +133,7 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
             }
             scan.self_nat = nat.lock().clone();
             scan.peer_relay_servers = servers.lock().clone();
-            learn(&cfg, &scan);
+            learn(&scan);
             *shared.lock() = scan;
             ctx.request_repaint();
             std::thread::sleep(Duration::from_secs(3));
@@ -168,9 +173,8 @@ fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, ctx: egui::Context
 
 /// Save what a scan taught about each PC: address, wake details, when it
 /// was last seen.
-fn learn(cfg: &ClientConfig, scan: &Discovery) {
-    {
-        let mut learned = cfg.clone();
+fn learn(scan: &Discovery) {
+    if let Err(e) = ClientConfig::update(|learned| {
         for pc in &scan.pcs {
             if pc.remembered {
                 continue;
@@ -186,7 +190,10 @@ fn learn(cfg: &ClientConfig, scan: &Discovery) {
             if pc.online {
                 // Coarse on purpose: the file is rewritten only when this moves.
                 let now = brolink_core::dates::now_unix();
-                if entry.last_seen_unix.is_none_or(|t| now - t > 600) {
+                if entry
+                    .last_seen_unix
+                    .is_none_or(|t| now.saturating_sub(t) > 600)
+                {
                     entry.last_seen_unix = Some(now);
                 }
             }
@@ -196,15 +203,12 @@ fn learn(cfg: &ClientConfig, scan: &Discovery) {
                     entry.lan_ip = h.lan_ip.clone();
                 }
             }
-            if let Some(p) = &scan_public(pc) {
+            if let Some(p) = scan_public(pc) {
                 entry.public_ip = Some(p.to_string());
             }
         }
-        if learned.pcs != cfg.pcs {
-            if let Err(e) = learned.save() {
-                tracing::warn!("could not save what was learned: {e:#}");
-            }
-        }
+    }) {
+        tracing::warn!("could not save what was learned: {e:#}");
     }
 }
 
@@ -390,8 +394,12 @@ pub struct Progress {
     pub detail: String,
     pub since: Instant,
     pub cancel: bool,
+    /// Blocks new connections while the updater swaps and relaunches this app.
+    pub updating: bool,
     /// Sunshine's app names, once listed.
     pub apps: Vec<String>,
+    /// Distinguishes this attempt from an older worker that is still running.
+    pub generation: u64,
 }
 
 impl Default for Progress {
@@ -402,14 +410,16 @@ impl Default for Progress {
             detail: String::new(),
             since: Instant::now(),
             cancel: false,
+            updating: false,
             apps: Vec::new(),
+            generation: 0,
         }
     }
 }
 
 impl Progress {
     pub fn active(&self) -> bool {
-        !matches!(self.step, Step::Idle | Step::Ended { .. })
+        self.updating || !matches!(self.step, Step::Idle | Step::Ended { .. })
     }
     fn set(&mut self, step: Step, detail: impl Into<String>) {
         if self.step != step {
@@ -512,17 +522,25 @@ pub struct Connect {
 /// Wake, wait, pair, launch, connect: on its own thread, reporting into
 /// `progress` and leaving the stream in `live`.
 pub fn connect(c: Connect) {
+    let generation = NEXT_CONNECT.fetch_add(1, Ordering::Relaxed);
     {
         let mut p = c.progress.lock();
+        if p.active() {
+            return;
+        }
         *p = Progress {
             pc: c.target.name.clone(),
+            generation,
             ..Default::default()
         };
         p.set(Step::Launching, "Starting…");
     }
     std::thread::spawn(move || {
-        let result = run(&c);
+        let result = run(&c, generation);
         let mut p = c.progress.lock();
+        if p.generation != generation {
+            return;
+        }
         match result {
             Ok(()) => {}
             Err(e) if p.cancel => {
@@ -540,11 +558,12 @@ pub fn connect(c: Connect) {
     });
 }
 
-fn cancelled(progress: &Mutex<Progress>) -> bool {
-    progress.lock().cancel
+fn stale(progress: &Mutex<Progress>, generation: u64) -> bool {
+    let p = progress.lock();
+    p.cancel || p.generation != generation
 }
 
-fn run(c: &Connect) -> Result<()> {
+fn run(c: &Connect, generation: u64) -> Result<()> {
     let t = &c.target;
     let report = |step: Step, detail: String| {
         c.progress.lock().set(step, detail);
@@ -559,7 +578,7 @@ fn run(c: &Connect) -> Result<()> {
         let start = Instant::now();
         let mut last_wake = Instant::now() - Duration::from_secs(60);
         loop {
-            if cancelled(&c.progress) {
+            if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
             if last_wake.elapsed() >= Duration::from_secs(5) {
@@ -589,7 +608,7 @@ fn run(c: &Connect) -> Result<()> {
     // 2. Sunshine's port.
     let start = Instant::now();
     while !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
-        if cancelled(&c.progress) {
+        if stale(&c.progress, generation) {
             bail!("cancelled");
         }
         report(
@@ -616,11 +635,10 @@ fn run(c: &Connect) -> Result<()> {
             // Forget it and pair again so the user does not have to edit
             // client.toml.
             tracing::warn!("{}: {e:#}; pairing again", t.name);
-            let mut cfg = ClientConfig::load();
-            if cfg.forget_pin_on_mismatch(&t.node_id, &e) {
-                if let Err(e) = cfg.save() {
-                    tracing::warn!("could not forget the PC's old certificate: {e:#}");
-                }
+            if let Err(save_error) = ClientConfig::update(|cfg| {
+                cfg.forget_pin_on_mismatch(&t.node_id, &e);
+            }) {
+                tracing::warn!("could not forget the PC's old certificate: {save_error:#}");
             }
             client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
             retry(8, || client.server_info())?
@@ -630,8 +648,9 @@ fn run(c: &Connect) -> Result<()> {
     if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
-        let der = client.pair(&pin, &brolink_core::config::machine_name(), || {
-            submit_pin(t.ip, &pin, &c.progress)
+        let der = client.pair_cancellable(&pin, &brolink_core::config::machine_name(), || {
+            submit_pin(t.ip, &pin, &c.progress);
+            stale(&c.progress, generation)
         })?;
         remember_cert(&t.node_id, &t.name, &der);
         info = client.server_info()?;
@@ -639,7 +658,7 @@ fn run(c: &Connect) -> Result<()> {
             bail!("{} did not accept the pairing", t.name);
         }
     }
-    if cancelled(&c.progress) {
+    if stale(&c.progress, generation) {
         bail!("cancelled");
     }
 
@@ -670,7 +689,7 @@ fn run(c: &Connect) -> Result<()> {
         client.quit()?;
         let stopped = Instant::now();
         loop {
-            if cancelled(&c.progress) {
+            if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
             info = client.server_info()?;
@@ -704,7 +723,7 @@ fn run(c: &Connect) -> Result<()> {
     )?;
 
     // 5. Connect.
-    if cancelled(&c.progress) {
+    if stale(&c.progress, generation) {
         let _ = client.quit();
         bail!("cancelled");
     }
@@ -734,6 +753,11 @@ fn run(c: &Connect) -> Result<()> {
         tx,
         move || ctx.request_repaint(),
     );
+    if stale(&c.progress, generation) {
+        drop(session);
+        let _ = client.quit();
+        bail!("cancelled");
+    }
     let input = session.input();
     *c.live.lock() = Some(Live {
         pc: t.name.clone(),
@@ -778,14 +802,14 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
         if progress.lock().cancel {
             return;
         }
-        match http::post_json::<_, Ack>(
-            (ip, CONTROL_PORT),
-            "/v1/pin",
-            &req,
-            Duration::from_secs(10),
-        ) {
+        match http::post_json::<_, Ack>((ip, CONTROL_PORT), "/v1/pin", &req, Duration::from_secs(1))
+        {
             Ok(a) if a.ok => return,
-            Ok(a) => tracing::info!("PIN not accepted yet: {}", a.error.unwrap_or_default()),
+            Ok(a) => {
+                let reason = a.error.unwrap_or_else(|| "PIN not accepted yet".into());
+                tracing::info!("PIN not accepted yet: {reason}");
+                progress.lock().detail = reason;
+            }
             Err(e) => {
                 tracing::info!("BroLink Host did not take the PIN: {e}");
                 progress.lock().detail =
@@ -797,11 +821,11 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
 }
 
 fn remember_cert(node_id: &str, name: &str, der: &[u8]) {
-    let mut cfg = ClientConfig::load();
-    let e = cfg.pcs.entry(node_id.to_string()).or_default();
-    e.name = name.to_string();
-    e.server_cert = Some(brolink_stream::nvhttp::hex(der));
-    if let Err(e) = cfg.save() {
+    if let Err(e) = ClientConfig::update(|cfg| {
+        let e = cfg.pcs.entry(node_id.to_string()).or_default();
+        e.name = name.to_string();
+        e.server_cert = Some(brolink_stream::nvhttp::hex(der));
+    }) {
         tracing::warn!("could not save the PC's certificate: {e:#}");
     }
 }
@@ -847,6 +871,32 @@ mod tests {
 
     /// Against BroLink Host running on this machine: the packet goes out on
     /// the LAN and the host reports it. `cargo test -p brolink-client wake_test_real -- --ignored`
+    #[test]
+    fn update_reservation_blocks_connect_in_every_idle_state() {
+        for step in [Step::Idle, Step::Ended { error: None }] {
+            let mut p = Progress {
+                step,
+                ..Default::default()
+            };
+            assert!(!p.active());
+            p.updating = true;
+            assert!(p.active());
+        }
+        for step in [
+            Step::Waking,
+            Step::Waiting,
+            Step::Pairing { pin: "1234".into() },
+            Step::Connecting,
+            Step::Streaming,
+        ] {
+            assert!(Progress {
+                step,
+                ..Default::default()
+            }
+            .active());
+        }
+    }
+
     #[test]
     #[ignore = "needs BroLink Host running on this machine"]
     fn wake_test_real() {

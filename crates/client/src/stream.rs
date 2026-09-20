@@ -228,7 +228,7 @@ impl View {
                     let c = video.center();
                     ui.put(
                         Rect::from_center_size(c, Vec2::new(300.0, 60.0)),
-                        egui::Spinner::new().size(22.0).color(P.accent),
+                        ui::spinner(22.0, P.accent),
                     );
                     ui.painter().text(
                         c + Vec2::new(0.0, 36.0),
@@ -930,9 +930,29 @@ impl View {
             overlay,
             over_overlay,
         );
+        if self.captured && !popup && !overlay {
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
         let keys_to_pc =
             focused && !ctx.wants_keyboard_input() && !popup && !overlay && input.connected();
         let ppp = ctx.pixels_per_point();
+        let motion_scale = {
+            let stats = live.session.stats();
+            let stream_w = if stats.width > 0 {
+                stats.width as f32
+            } else {
+                live.requested.0 as f32
+            };
+            if video.width() >= 1.0 {
+                stream_w / video.width()
+            } else {
+                ppp
+            }
+        };
 
         if !focused {
             if self.held.any_down() || self.captured {
@@ -940,17 +960,21 @@ impl View {
             }
             return;
         }
-        if keys_to_pc {
-            let ctrl_alt = modifiers.ctrl && modifiers.alt;
-            if !ctrl_alt {
-                self.capture_chord_held = false;
-            }
-            self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
-            if ctrl_alt && !self.capture_chord_held {
+        // Ctrl+Alt is BroLink's host key. It is read before the keys-to-PC
+        // gate so it works even if an overlay took focus, and while it is
+        // held nothing is forwarded: the PC must not see a held chord after
+        // the toolbar opens (games and the Start menu react to one).
+        let ctrl_alt = modifiers.ctrl && modifiers.alt;
+        if ctrl_alt {
+            if !self.capture_chord_held && input.connected() {
                 self.capture_chord_held = true;
                 self.host_key(ctx, live, cfg);
-                return;
             }
+            return;
+        }
+        self.capture_chord_held = false;
+        if keys_to_pc {
+            self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
             // A paste's chord releases the modifier it pressed once the text
             // has reached the PC. If ⌘ is still held here, press it again
             // on the PC, so ⌘V ⌘V in one hold pastes twice.
@@ -1014,8 +1038,12 @@ impl View {
                 }
                 Event::PointerMoved(p) if !self.captured && over_video => position = Some(p),
                 Event::MouseMoved(d) if self.captured => {
-                    self.motion.0 += d.x;
-                    self.motion.1 += d.y;
+                    // Deltas arrive in points; the PC moves in stream pixels.
+                    // Scale by the picture's size here so a hand movement
+                    // crosses the same share of the PC's desktop as of the
+                    // picture, whatever the window size or the stream size.
+                    self.motion.0 += d.x * motion_scale;
+                    self.motion.1 += d.y * motion_scale;
                 }
                 Event::PointerButton {
                     button, pressed, ..
