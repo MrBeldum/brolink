@@ -255,7 +255,7 @@ impl Service {
         let st = Streamer {
             kind: install
                 .as_ref()
-                .map(|_| "BroLink".to_string())
+                .map(|i| i.kind.to_string())
                 .unwrap_or_default(),
             installed: install.is_some(),
             running,
@@ -503,7 +503,9 @@ impl Service {
                         cache.remove(&oldest);
                     }
                 }
-                cache.insert(ip, (Instant::now(), u));
+                if u.is_some() {
+                    cache.insert(ip, (Instant::now(), u));
+                }
                 u
             }
         };
@@ -578,7 +580,8 @@ impl Service {
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
-        if update::refuse_self_update(self.streamer.lock().running, self.session_active()) {
+        let engine_running = self.streamer.lock().running;
+        if update::refuse_self_update(engine_running, self.session_active()) {
             self.update_running.store(false, Ordering::Release);
             self.log("update deferred: a stream is running");
             return Response::json(
@@ -787,7 +790,12 @@ pub fn ensure_service_running() {
         c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
     }
     match c.spawn() {
-        Ok(_) => tracing::info!("started the background service"),
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            tracing::info!("started the background service");
+        }
         Err(e) => tracing::error!("could not start the background service: {e}"),
     }
 }

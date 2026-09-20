@@ -233,8 +233,19 @@ impl ClientConfig {
         }
     }
 
+    /// The window owns preferences; discovery and pairing own `pcs`.
     pub fn save(&self) -> anyhow::Result<()> {
-        brolink_core::config::save(FILE, self)
+        Self::update(|current| current.apply_preferences(self))
+    }
+
+    fn apply_preferences(&mut self, settings: &Self) {
+        let pcs = std::mem::take(&mut self.pcs);
+        *self = settings.clone();
+        self.pcs = pcs;
+    }
+
+    pub fn update(edit: impl FnOnce(&mut Self)) -> anyhow::Result<()> {
+        brolink_core::config::update(FILE, edit)
     }
 
     pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
@@ -251,6 +262,32 @@ impl ClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_window_settings_preserve_new_pairing_and_wake_details() {
+        let mut window = ClientConfig::default();
+        let mut disk = window.clone();
+        disk.pcs.insert(
+            "pc".into(),
+            KnownPc {
+                server_cert: Some("new-cert".into()),
+                mac: Some("02:00:00:00:00:01".into()),
+                ..Default::default()
+            },
+        );
+        window.stream.fullscreen = false;
+        disk.apply_preferences(&window);
+        assert!(!disk.stream.fullscreen);
+        assert_eq!(disk.pcs["pc"].server_cert.as_deref(), Some("new-cert"));
+        assert_eq!(disk.pcs["pc"].mac.as_deref(), Some("02:00:00:00:00:01"));
+        window = disk.clone();
+        disk.pcs.get_mut("pc").unwrap().server_cert = None;
+        disk.apply_preferences(&window);
+        assert_eq!(
+            disk.pcs["pc"].server_cert, None,
+            "never revive a revoked pin"
+        );
+    }
 
     #[test]
     fn defaults_and_round_trip() {

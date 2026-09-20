@@ -213,7 +213,10 @@ pub fn start(install: &Install) -> Result<()> {
         c.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        c.spawn().context("start streaming engine")?;
+        let mut child = c.spawn().context("start streaming engine")?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         let deadline = std::time::Instant::now() + Duration::from_secs(8);
         while std::time::Instant::now() < deadline {
             if running() {
@@ -289,15 +292,9 @@ impl Api<'_> {
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
         let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
         let mut c = Command::new(curl);
-        c.args([
-            "-sk",
-            "--max-time",
-            "8",
-            "-u",
-            &format!("{}:{}", self.user, self.pass),
-        ])
-        .args(["-X", method, "-H", "Content-Type: application/json"])
-        .arg(format!("https://localhost:{SUNSHINE_WEB_PORT}{path}"));
+        c.args(["-sk", "--max-time", "8", "--config", "-"])
+            .args(["-X", method, "-H", "Content-Type: application/json"])
+            .arg(format!("https://localhost:{SUNSHINE_WEB_PORT}{path}"));
         if let Some(b) = body {
             c.args(["-d", b]);
         }
@@ -306,7 +303,32 @@ impl Api<'_> {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000);
         }
-        let out = c.output().context("run curl")?;
+        use std::io::Write;
+        use std::process::Stdio;
+        // Curl config quoting keeps the password out of process listings.
+        let credential = format!("{}:{}", self.user, self.pass)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        let mut child = c
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("run curl")?;
+        let written = child
+            .stdin
+            .take()
+            .context("curl stdin")
+            .and_then(|mut stdin| {
+                writeln!(stdin, "user = \"{credential}\"").context("write curl config")
+            });
+        if written.is_err() {
+            let _ = child.kill();
+        }
+        let out = child.wait_with_output().context("wait for curl")?;
+        written?;
         if !out.status.success() {
             bail!("curl: {}", String::from_utf8_lossy(&out.stderr).trim());
         }

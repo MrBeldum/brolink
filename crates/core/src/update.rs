@@ -107,11 +107,16 @@ fn git_token() -> Option<String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    child
-        .stdin
-        .take()?
-        .write_all(b"protocol=https\nhost=github.com\n\n")
-        .ok()?;
+    let written = child.stdin.take().is_some_and(|mut stdin| {
+        stdin
+            .write_all(b"protocol=https\nhost=github.com\n\n")
+            .is_ok()
+    });
+    if !written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
     let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;

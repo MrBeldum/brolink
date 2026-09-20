@@ -89,6 +89,12 @@ impl HostApp {
         let status = self.shared.lock().status.clone();
         if let Some(s) = status {
             self.start_setup(&s);
+        } else {
+            crate::service::ensure_service_running();
+            self.shared.lock().setup_result = Some(Err(
+                "The sharing service is starting. Wait for its status, then try setup again."
+                    .into(),
+            ));
         }
     }
 
@@ -527,7 +533,7 @@ impl HostApp {
                 ui,
                 &mut self.cfg.power_allowed,
                 "Let a paired Mac sleep, restart, or shut down this PC",
-                Some("Only devices on your Tailscale account can ask. Waking a sleeping PC requires access to its local network."),
+                Some("Devices allowed by your Tailscale access rules can ask. Waking a sleeping PC requires access to its local network."),
             ) {
                 self.dirty = true;
             }

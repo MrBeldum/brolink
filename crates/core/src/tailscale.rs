@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// The ACL tag BroLink uses for a tailnet peer-relay node.
 pub const RELAY_TAG: &str = "tag:relay";
 
-/// Bound on `tailscale debug peer-relay-servers` only. [`run`] has no timeout.
+/// Short deadline for the optional relay probe. Other CLI calls are bounded too.
 const PEER_RELAY_SERVERS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Where the CLI lives, first hit wins. The macOS App Store build keeps it
@@ -269,7 +269,10 @@ pub struct WhoIsNode {
 
 pub fn whois(ip: std::net::IpAddr) -> Result<WhoIs> {
     let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
-    let out = run(Command::new(cli).args(["whois", "--json", &ip.to_string()]))?;
+    let out = run_limited(
+        Command::new(cli).args(["whois", "--json", &ip.to_string()]),
+        Duration::from_secs(2),
+    )?;
     serde_json::from_str(&out).context("parse tailscale whois")
 }
 
@@ -441,8 +444,7 @@ fn finish(out: std::process::Output) -> Result<String> {
 }
 
 fn run(cmd: &mut Command) -> Result<String> {
-    prepare(cmd);
-    finish(cmd.output().context("run tailscale")?)
+    run_limited(cmd, Duration::from_secs(10))
 }
 
 fn run_limited(cmd: &mut Command, limit: Duration) -> Result<String> {
@@ -450,6 +452,15 @@ fn run_limited(cmd: &mut Command, limit: Duration) -> Result<String> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().context("run tailscale")?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    };
+    let stdout = std::thread::spawn(move || read(Box::new(stdout)));
+    let stderr = std::thread::spawn(move || read(Box::new(stderr)));
     let start = Instant::now();
     let status = loop {
         match child.try_wait().context("run tailscale")? {
@@ -462,14 +473,12 @@ fn run_limited(cmd: &mut Command, limit: Duration) -> Result<String> {
             None => std::thread::sleep(Duration::from_millis(20)),
         }
     };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut s) = child.stdout.take() {
-        let _ = s.read_to_end(&mut stdout);
-    }
-    if let Some(mut s) = child.stderr.take() {
-        let _ = s.read_to_end(&mut stderr);
-    }
+    let stdout = stdout
+        .join()
+        .map_err(|_| anyhow::anyhow!("tailscale stdout reader failed"))?;
+    let stderr = stderr
+        .join()
+        .map_err(|_| anyhow::anyhow!("tailscale stderr reader failed"))?;
     finish(std::process::Output {
         status,
         stdout,
@@ -678,10 +687,31 @@ mod tests {
 
     #[test]
     fn run_limited_kills_a_hung_command() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 30"]);
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.args(["-c", "exec sleep 30"]);
+            c
+        };
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-Command", "Start-Sleep 30"]);
+            c
+        };
         let err = run_limited(&mut cmd, Duration::from_millis(100)).unwrap_err();
         assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_output_larger_than_a_pipe_is_drained_before_waiting() {
+        let output = run_limited(
+            Command::new("sh").args(["-c", "head -c 1048576 /dev/zero"]),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        assert_eq!(output.len(), 1048576);
     }
 
     #[test]

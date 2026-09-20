@@ -23,7 +23,7 @@ ARG SUNSHINE_TAG=v2026.906.222525
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl \
+        ca-certificates curl python3 \
         xvfb xfce4 xfce4-terminal dbus-x11 \
         pulseaudio libasound2t64 \
         libcap2-bin \
@@ -48,6 +48,7 @@ COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscale /usr/l
 
 COPY --from=build /src/target/release/brolink-host /usr/local/bin/brolink-host
 COPY deploy/node/entrypoint.sh /entrypoint.sh
+COPY deploy/node/bootstrap.py /opt/brolink/bootstrap.py
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /root/.config /var/lib/tailscale
 
