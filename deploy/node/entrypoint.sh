@@ -56,6 +56,7 @@ encoder = software
 EOF
 cat >/root/.config/sunshine/apps.json <<'EOF'
 {
+  "env": {},
   "apps": [
     {
       "name": "Desktop",
