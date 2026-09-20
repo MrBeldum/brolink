@@ -84,6 +84,12 @@ make_stubs() { # $1 = sandbox dir
 		  volume)
 		    [ -n "${STUB_STATE_DIR:-}" ] || exit 1
 		    echo "$STUB_STATE_DIR"; exit 0 ;;
+		  run)
+		    # has_authenticated_state probes the volume through Docker, not sudo.
+		    if [ -n "${STUB_STATE_DIR:-}" ] && [ -s "$STUB_STATE_DIR/tailscaled.state" ]; then
+		      exit 0
+		    fi
+		    exit 1 ;;
 		  exec)
 		    case "$*" in
 		      "brolink-relay tailscale status --json")
@@ -294,9 +300,20 @@ check "does not say it is closed" "$(! has "$d/out" 'is NOT open for' && echo 0 
 echo "== case 6: ip6tables missing =="
 d=$(sandbox)
 rm "$d/bin/ip6tables"
+# CI images ship /usr/sbin/ip6tables. run_case keeps the host PATH, so after the
+# stub is removed command -v finds the real binary and open_udp takes the
+# permissions-failure path instead of "not installed". Drop sbin so only the
+# sandbox stubs (plus /usr/bin:/bin) remain visible for this case.
 printf 'TS_AUTHKEY=tskey-not-a-real-key\nRELAY_PORT=40000\n' >"$d/kit/.env"
 rc=0
-STUB_PREFS_PORT=40000 run_case "$d" || rc=$?
+(
+	cd "$d/kit"
+	PATH="$d/bin:/usr/bin:/bin" \
+		STUB_LOG="$d/calls.log" STUB_DIR="$d" \
+		TUN_DEVICE="$d/dev/tun" AUTH_WAIT_SECS=4 PREFS_WAIT_SECS=4 \
+		STUB_PREFS_PORT=40000 \
+		./install-relay.sh
+) >"$d/out" 2>&1 || rc=$?
 check "still completes" "$([ "$rc" -eq 0 ] && echo 0 || echo 1)"
 check "says IPv6 was not opened" "$(has "$d/out" 'ip6tables is not installed' && echo 0 || echo 1)"
 check "repeats it in the final summary" "$(has "$d/out" 'is NOT open for: IPv6' && echo 0 || echo 1)"

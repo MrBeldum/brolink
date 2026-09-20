@@ -107,11 +107,16 @@ fn git_token() -> Option<String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    child
-        .stdin
-        .take()?
-        .write_all(b"protocol=https\nhost=github.com\n\n")
-        .ok()?;
+    let written = child.stdin.take().is_some_and(|mut stdin| {
+        stdin
+            .write_all(b"protocol=https\nhost=github.com\n\n")
+            .is_ok()
+    });
+    if !written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
     let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
@@ -279,6 +284,18 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// GitHub's digest is the only integrity check besides TLS. An asset without
+/// one is refused: a same-size cache swap would otherwise become an update.
+pub fn require_digest(asset: &Asset) -> Result<()> {
+    match &asset.sha256 {
+        Some(h) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Ok(()),
+        _ => bail!(
+            "{} has no SHA-256 in the GitHub release; refusing to install it",
+            asset.name
+        ),
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -300,7 +317,9 @@ pub fn fetch(url: &str, token: Option<&str>, accept: &str, sink: &mut dyn Write)
             env!("CARGO_PKG_VERSION")
         );
         if let Some(t) = auth {
-            head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+            let value = format!("Bearer {t}");
+            crate::http::validate_header("Authorization", &value)?;
+            head.push_str(&format!("Authorization: {value}\r\n"));
         }
         head.push_str("\r\n");
         tls.write_all(head.as_bytes())
@@ -404,6 +423,8 @@ mod tests {
             Some("226ce7321e5185d10f6f83cd38916d25485d1734794119b279a72a9af3cc4ab7")
         );
         assert_eq!(r.asset(WINDOWS_ASSET).unwrap().sha256, None);
+        require_digest(r.asset(MAC_ASSET).unwrap()).unwrap();
+        assert!(require_digest(r.asset(WINDOWS_ASSET).unwrap()).is_err());
         assert!(r.asset("nope").is_none());
         assert!(r.is_newer_than(&Version::new(3, 0, 0)));
         assert!(!r.is_newer_than(&Version::new(3, 1, 0)));

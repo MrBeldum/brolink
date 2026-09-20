@@ -218,6 +218,19 @@ impl<'a> Client<'a> {
         device_name: &str,
         pending: impl FnOnce(),
     ) -> Result<Vec<u8>> {
+        self.pair_cancellable(pin, device_name, || {
+            pending();
+            false
+        })
+    }
+
+    /// Like `pair`, but the PIN callback can abort the outstanding socket read.
+    pub fn pair_cancellable(
+        &mut self,
+        pin: &str,
+        device_name: &str,
+        pending: impl FnOnce() -> bool,
+    ) -> Result<Vec<u8>> {
         let previous_tls = self.tls.clone();
         let previous_cert = self.server_cert.clone();
         let result = self.pair_inner(pin, device_name, pending);
@@ -233,7 +246,7 @@ impl<'a> Client<'a> {
         &mut self,
         pin: &str,
         device_name: &str,
-        pending: impl FnOnce(),
+        pending: impl FnOnce() -> bool,
     ) -> Result<Vec<u8>> {
         let salt: [u8; 16] = rand::random();
         let mut salted = salt.to_vec();
@@ -251,8 +264,9 @@ impl<'a> Client<'a> {
             );
             let ip = self.ip;
             let target = self.target("pair", &query);
+            let mut s = TcpStream::connect_timeout(&SocketAddr::new(ip, HTTP_PORT), TIMEOUT)?;
+            let abort = s.try_clone()?;
             let handle = std::thread::spawn(move || -> Result<String> {
-                let mut s = TcpStream::connect_timeout(&SocketAddr::new(ip, HTTP_PORT), TIMEOUT)?;
                 s.set_read_timeout(Some(PIN_WAIT))?;
                 s.set_write_timeout(Some(TIMEOUT))?;
                 let r = http::exchange(&mut s, "GET", &target, &ip.to_string(), "")?;
@@ -260,7 +274,11 @@ impl<'a> Client<'a> {
                 Ok(r.body)
             });
             std::thread::sleep(Duration::from_millis(400));
-            pending();
+            if pending() {
+                let _ = abort.shutdown(std::net::Shutdown::Both);
+                let _ = handle.join();
+                bail!("pairing cancelled");
+            }
             handle
                 .join()
                 .map_err(|_| anyhow!("pairing thread panicked"))??

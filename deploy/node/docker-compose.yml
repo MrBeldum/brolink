@@ -19,6 +19,7 @@ services:
     image: ${BROLINK_IMAGE:-brolink-node:local}
     container_name: ${BROLINK_CONTAINER:-brolink-node}
     restart: unless-stopped
+    init: true
     env_file:
       - .env
     environment:

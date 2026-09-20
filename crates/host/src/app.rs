@@ -89,6 +89,12 @@ impl HostApp {
         let status = self.shared.lock().status.clone();
         if let Some(s) = status {
             self.start_setup(&s);
+        } else {
+            crate::service::ensure_service_running();
+            self.shared.lock().setup_result = Some(Err(
+                "The sharing service is starting. Wait for its status, then try setup again."
+                    .into(),
+            ));
         }
     }
 
@@ -132,8 +138,9 @@ impl HostApp {
         if !self.cfg.has_creds() && !migrate {
             self.cfg.sunshine_user = "brolink".into();
             self.cfg.sunshine_pass = config::random_password();
-            self.dirty = true;
-            self.commit();
+            if let Err(e) = self.cfg.save() {
+                tracing::warn!("could not save engine login: {e:#}");
+            }
         }
         let shared = self.shared.clone();
         {
@@ -143,7 +150,7 @@ impl HostApp {
             s.setup_log.clear();
         }
         let cfg = self.cfg.clone();
-        let install_engine = !status.streamer.installed || migrate;
+        let install_engine = !status.streamer.installed || migrate || !status.streamer.running;
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
         std::thread::spawn(move || {
@@ -527,7 +534,7 @@ impl HostApp {
                 ui,
                 &mut self.cfg.power_allowed,
                 "Let a paired Mac sleep, restart, or shut down this PC",
-                Some("Only devices on your Tailscale account can ask. Waking a sleeping PC requires access to its local network."),
+                Some("Devices allowed by your Tailscale access rules can ask. Waking a sleeping PC requires access to its local network."),
             ) {
                 self.dirty = true;
             }

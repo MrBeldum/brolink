@@ -30,24 +30,20 @@ mod win {
             include_str!("../windows/take-over-engine.cmd"),
         )?;
         let cmd = dir.join("take-over-engine.cmd");
-        let tr = cmd.display().to_string();
-        let mut ok = create_logon_task(&tr, true);
-        if !ok {
-            ok = create_logon_task(&tr, false);
-        }
+        let tr = format!("\"{}\"", cmd.display());
+        let ok = create_logon_task(&tr);
         if !ok {
             tracing::info!("could not register {TASK}; the host will start the engine itself");
         }
         Ok(cmd)
     }
 
-    fn create_logon_task(tr: &str, highest: bool) -> bool {
-        let mut args = vec![
-            "/Create", "/TN", TASK, "/TR", tr, "/SC", "ONLOGON", "/IT", "/F",
+    fn create_logon_task(tr: &str) -> bool {
+        // These helpers live in the user's profile and must never gain an
+        // elevated token through a scheduled task, including on upgrades.
+        let args = [
+            "/Create", "/TN", TASK, "/TR", tr, "/SC", "ONLOGON", "/IT", "/F", "/RL", "LIMITED",
         ];
-        if highest {
-            args.extend(["/RL", "HIGHEST"]);
-        }
         Command::new("schtasks")
             .args(args)
             .creation_flags(CREATE_NO_WINDOW)

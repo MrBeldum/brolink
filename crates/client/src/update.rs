@@ -14,7 +14,7 @@
 //! `handover.rs`). A PC that is asleep gets it the next time it is seen.
 
 use crate::config::ClientConfig;
-use crate::session::{Discovery, Live};
+use crate::session::{Discovery, Live, Progress};
 use anyhow::{anyhow, bail, Context, Result};
 use brolink_core::api::{Ack, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
 use brolink_core::update::{self, Release, HOST_EXE, MAC_ASSET, WINDOWS_ASSET};
@@ -61,11 +61,13 @@ pub fn spawn(
     state: Arc<Mutex<State>>,
     discovery: Arc<Mutex<Discovery>>,
     live: Arc<Mutex<Option<Live>>>,
+    progress: Arc<Mutex<Progress>>,
     ctx: egui::Context,
 ) {
     std::thread::spawn(move || {
         let mut next = Instant::now() + FIRST_CHECK;
         let mut release: Option<Release> = None;
+        let mut token = None;
         loop {
             std::thread::sleep(TICK);
             let cfg = ClientConfig::load();
@@ -75,9 +77,9 @@ pub fn spawn(
                 st.notice = None;
                 continue;
             }
-            let token = update::token(cfg.github_token.as_deref());
             let due = state.lock().check_now || Instant::now() >= next;
             if due {
+                token = update::token(cfg.github_token.as_deref());
                 state.lock().check_now = false;
                 match update::latest(token.as_deref()) {
                     Ok(r) => {
@@ -140,7 +142,16 @@ pub fn spawn(
             }
             let ready = state.lock().ready.clone();
             if let Some(v) = ready {
-                if live.lock().is_none() {
+                let idle = {
+                    let mut p = progress.lock();
+                    if !p.active() && live.lock().is_none() {
+                        p.updating = true;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if idle {
                     match install_self(rel) {
                         Ok(()) => relaunch(),
                         Err(e) => {
@@ -149,6 +160,7 @@ pub fn spawn(
                             st.notice = None;
                             st.message = format!("Could not install BroLink {v}: {e}.");
                             tracing::error!("self-update: {e:#}");
+                            progress.lock().updating = false;
                             release = None;
                             next = Instant::now() + RETRY_AFTER;
                         }
@@ -223,7 +235,36 @@ fn updates_dir(rel: &Release) -> Result<PathBuf> {
         .join("updates")
         .join(&rel.tag);
     std::fs::create_dir_all(&dir)?;
+    // Only prune version-named cache directories, never arbitrary user files.
+    // Retain this release and the immediately previous version for rollback.
+    prune_updates(dir.parent().expect("updates parent"), &rel.tag);
     Ok(dir)
+}
+
+fn prune_updates(root: &std::path::Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut old: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            if !e.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let name = e.file_name().to_str()?.to_string();
+            if name == keep {
+                return None;
+            }
+            let version = Version::parse(name.trim_start_matches('v')).ok()?;
+            Some((version, e.path()))
+        })
+        .collect();
+    old.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in old.into_iter().skip(1) {
+        if let Err(e) = std::fs::remove_dir_all(&path) {
+            tracing::warn!("could not prune update cache {}: {e}", path.display());
+        }
+    }
 }
 
 /// Recheck cached assets before using them: an interrupted download or a
@@ -232,6 +273,7 @@ fn fetch_asset(rel: &Release, name: &str, token: Option<&str>) -> Result<PathBuf
     let asset = rel
         .asset(name)
         .ok_or_else(|| anyhow!("release {} has no {name}", rel.tag))?;
+    update::require_digest(asset)?;
     let dest = updates_dir(rel)?.join(name);
     if update::verify_asset(asset, &dest).is_err() {
         update::download(asset, token, &dest)?;
