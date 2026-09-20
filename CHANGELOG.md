@@ -9,6 +9,8 @@ GitHub release notes, so each version gets a heading of the form
 - Docker desktops now publish a valid streaming app catalog. The missing
   environment object made a healthy-looking VPS report "offers nothing to
   stream"; node self-tests now check the catalog and persisted login setup.
+  Startup waits for the engine before launching the control service, which
+  prevents two engine processes racing to bind the same ports.
 
 - On Windows, the streaming engine runs as the signed-in user and the
   only active speakers stay the default. The engine's own startup was
