@@ -143,8 +143,11 @@ pub fn spawn(
             let ready = state.lock().ready.clone();
             if let Some(v) = ready {
                 let idle = {
+                    // The window's order (live, then progress); the reverse
+                    // could deadlock against poll_live.
+                    let live = live.lock();
                     let mut p = progress.lock();
-                    if !p.active() && live.lock().is_none() {
+                    if live.is_none() && !p.active() {
                         p.updating = true;
                         true
                     } else {
@@ -179,6 +182,9 @@ pub fn spawn(
                 let Ok(v) = Version::parse(&h.version) else {
                     continue;
                 };
+                if !update::takes_pushed_host(&h.os) {
+                    continue; // a Mac or a container updates itself
+                }
                 if !update::host_can_receive_update(&v) {
                     // The lobby shows this PC what to do; here, just note it.
                     let mut st = state.lock();
