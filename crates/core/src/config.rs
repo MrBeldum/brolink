@@ -157,12 +157,35 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips_and_junk_falls_back() {
-        let name = format!("test-{}.toml", std::process::id());
+        let stem = format!("test-{}", std::process::id());
+        let name = format!("{stem}.toml");
+        let dir = data_dir().unwrap();
         save(&name, &Cfg { n: 7 }).unwrap();
         assert_eq!(load::<Cfg>(&name), Cfg { n: 7 });
-        std::fs::write(data_dir().unwrap().join(&name), "not = [toml").unwrap();
+        std::fs::write(dir.join(&name), "not = [toml").unwrap();
         assert_eq!(load::<Cfg>(&name), Cfg::default());
-        let _ = std::fs::remove_file(data_dir().unwrap().join(&name));
+        // Loading junk moves it aside as `<stem>.bad-*`. This runs against the
+        // user's real data directory, so remove what the test left behind.
+        let prefix = format!("{stem}.bad-");
+        let preserved: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect();
+        assert_eq!(
+            preserved.len(),
+            1,
+            "damaged config is preserved exactly once"
+        );
+        for path in preserved {
+            std::fs::remove_file(path).unwrap();
+        }
+        assert!(!dir.join(&name).exists());
         assert_eq!(load::<Cfg>("does-not-exist.toml"), Cfg::default());
     }
 
