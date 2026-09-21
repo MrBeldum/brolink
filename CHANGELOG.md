@@ -4,7 +4,7 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## Unreleased
+## 4.0.0 (2026-09-20)
 
 - Docker desktops now publish a valid streaming app catalog. The missing
   environment object made a healthy-looking VPS report "offers nothing to
