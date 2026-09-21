@@ -56,6 +56,7 @@ encoder = software
 EOF
 cat >/root/.config/sunshine/apps.json <<'EOF'
 {
+  "env": {},
   "apps": [
     {
       "name": "Desktop",
@@ -71,6 +72,30 @@ python3 /opt/brolink/bootstrap.py
 
 log "starting streaming engine"
 "$ENGINE" "$CONF" >/var/log/sunshine.log 2>&1 &
+ENGINE_PID=$!
+# The control service starts an engine if this port is not listening yet.
+# Wait for our child so its first refresh cannot race a second engine onto
+# the same ports. A failed startup exits the container for Docker to retry.
+python3 - "$ENGINE_PID" <<'PY'
+import os
+import socket
+import sys
+import time
+
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline:
+    try:
+        os.kill(int(sys.argv[1]), 0)
+    except ProcessLookupError:
+        raise SystemExit("Streaming engine exited; see /var/log/sunshine.log")
+    try:
+        with socket.create_connection(("127.0.0.1", 47984), timeout=0.2):
+            break
+    except OSError:
+        time.sleep(0.1)
+else:
+    raise SystemExit("Streaming engine did not start listening within 15 seconds")
+PY
 
 log "starting BroLink control service"
 exec /usr/local/bin/brolink-host --background
