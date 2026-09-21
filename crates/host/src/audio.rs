@@ -25,17 +25,23 @@ mod win {
             dir.join("take-over-engine.ps1"),
             include_str!("../windows/take-over-engine.ps1"),
         )?;
+        let launcher = dir.join("take-over-engine.vbs");
+        std::fs::write(&launcher, include_str!("../windows/take-over-engine.vbs"))?;
+        // Earlier versions pointed the task at a .cmd, which kept a terminal
+        // on the desktop for as long as the helper ran. A task an
+        // administrator registered cannot be re-pointed from here, so the
+        // .cmd stays, reduced to handing off to the windowless launcher.
         std::fs::write(
             dir.join("take-over-engine.cmd"),
             include_str!("../windows/take-over-engine.cmd"),
         )?;
-        let cmd = dir.join("take-over-engine.cmd");
-        let tr = format!("\"{}\"", cmd.display());
+        let script = dir.join("take-over-engine.ps1");
+        let tr = format!("wscript.exe //B //Nologo \"{}\"", launcher.display());
         let ok = create_logon_task(&tr);
         if !ok {
             tracing::info!("could not register {TASK}; the host will start the engine itself");
         }
-        Ok(cmd)
+        Ok(script)
     }
 
     fn create_logon_task(tr: &str) -> bool {
@@ -66,7 +72,7 @@ mod win {
     /// device. Safe to call often: a running user-session engine is left
     /// alone aside from putting the default back.
     pub fn take_over_engine() -> Result<()> {
-        let cmd = install_helpers()?;
+        let script = install_helpers()?;
         if session_id() == 0 {
             let status = Command::new("schtasks")
                 .args(["/Run", "/TN", TASK])
@@ -80,7 +86,7 @@ mod win {
         }
         let status = Command::new("powershell")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(cmd.with_extension("ps1"))
+            .arg(&script)
             .creation_flags(CREATE_NO_WINDOW)
             .status()
             .context("take over engine")?;
