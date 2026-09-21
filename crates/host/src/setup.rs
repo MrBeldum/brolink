@@ -566,8 +566,20 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         let _ = crate::audio::install_helpers();
         let exe = q(&p.exe.display().to_string());
         let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("brolink-setup.log"));
+        // UAC may run the helper as another administrator, whose profile
+        // holds no host.toml: pass this user's folder so the engine login
+        // and setup.log stay with the account that shares the machine.
+        let args = std::env::var_os("LOCALAPPDATA")
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| {
+                format!(
+                    "'--setup-elevated', '--local-app-data', '{}'",
+                    q(&dir.to_string_lossy())
+                )
+            })
+            .unwrap_or_else(|| "'--setup-elevated'".into());
         let launch = format!(
-            "$p = Start-Process -FilePath '{exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('--setup-elevated'); if ($null -eq $p) {{ exit 1 }}; exit $p.ExitCode"
+            "$p = Start-Process -FilePath '{exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @({args}); if ($null -eq $p) {{ exit 1 }}; exit $p.ExitCode"
         );
         let status = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
@@ -725,6 +737,18 @@ pub fn set_start_with_windows(enable: bool, exe: &Path) -> Result<()> {
     }
     #[cfg(not(windows))]
     crate::unix_setup::set_autostart(enable, exe)
+}
+
+/// Keep the login registration current from the background service: the
+/// Run value on Windows, the launch agent or user unit elsewhere. Written
+/// only; nothing is started or stopped, because the caller is the service.
+pub fn register_autostart(exe: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        set_start_with_windows(true, exe)
+    }
+    #[cfg(not(windows))]
+    crate::unix_setup::register_autostart(exe)
 }
 
 pub fn starts_with_windows() -> bool {

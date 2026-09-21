@@ -336,6 +336,10 @@ pub fn stop_engine() {
     }
 }
 
+/// Register or remove the login item from the control panel. Turning it on
+/// also loads it now unless launchd or systemd already has it; turning it
+/// off only removes the file, so a service they are running now keeps
+/// running until logout.
 pub fn set_autostart(enable: bool, exe: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -348,6 +352,32 @@ pub fn set_autostart(enable: bool, exe: &Path) -> Result<()> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (enable, exe);
+        Ok(())
+    }
+}
+
+/// Write the login item without loading, unloading or starting anything.
+/// The background service calls this every time it starts, and it must
+/// never stop itself (`launchctl unload` of the job that is running kills
+/// it) or start a second copy of itself.
+pub fn register_autostart(exe: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        write_launch_agent(exe).map(|_| ())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        write_user_unit(exe)?;
+        // Links the unit into default.target; without `--now` nothing starts.
+        anyhow::ensure!(
+            systemctl_user(&["enable", "brolink.service"])?,
+            "could not enable BroLink service"
+        );
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = exe;
         Ok(())
     }
 }
@@ -368,27 +398,20 @@ pub fn autostart_enabled() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_agent_path() -> Result<PathBuf> {
-    let home = dirs_home()?;
-    Ok(home.join("Library/LaunchAgents/dev.brolink.node.plist"))
-}
+const LAUNCH_AGENT_LABEL: &str = "dev.brolink.node";
 
 #[cfg(target_os = "macos")]
-fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
-    let path = launch_agent_path()?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let _ = Command::new("launchctl")
-        .args(["unload"])
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if !enable {
-        let _ = fs::remove_file(&path);
-        return Ok(());
-    }
+fn launch_agent_path() -> Result<PathBuf> {
+    let home = dirs_home()?;
+    Ok(home.join(format!("Library/LaunchAgents/{LAUNCH_AGENT_LABEL}.plist")))
+}
+
+/// The launch agent: start at login, and restart only after a failure. A
+/// copy that finds the port taken exits 0 (see `Service::run`), which with
+/// `SuccessfulExit = false` is where launchd leaves it; `KeepAlive = true`
+/// respawned such a copy every ten seconds for the whole session.
+#[cfg(any(target_os = "macos", test))]
+fn launch_agent_plist(exe: &Path) -> String {
     let exe = exe
         .display()
         .to_string()
@@ -397,7 +420,7 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;");
-    let plist = format!(
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -409,12 +432,61 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
     <string>--background</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
 </dict>
 </plist>
 "#
-    );
+    )
+}
+
+/// Write the plist when it differs from what is on disk. `Ok(true)` when
+/// it was written.
+#[cfg(target_os = "macos")]
+fn write_launch_agent(exe: &Path) -> Result<bool> {
+    let path = launch_agent_path()?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let plist = launch_agent_plist(exe);
+    if fs::read_to_string(&path).is_ok_and(|have| have == plist) {
+        return Ok(false);
+    }
     fs::write(&path, plist)?;
+    Ok(true)
+}
+
+/// Whether launchd has the agent in this login session. `launchctl load`
+/// on a loaded job prints an error but exits 0, so it cannot tell us.
+#[cfg(target_os = "macos")]
+fn launch_agent_loaded() -> bool {
+    Command::new("launchctl")
+        .args(["list", LAUNCH_AGENT_LABEL])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
+    let path = launch_agent_path()?;
+    if !enable {
+        // Not starting at login means removing the file. The service launchd
+        // may be running now is left alone rather than killed mid-stream.
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        return Ok(());
+    }
+    write_launch_agent(exe)?;
+    if launch_agent_loaded() {
+        return Ok(());
+    }
+    // RunAtLoad starts the service now. If one already answers on the port,
+    // the new copy exits 0 and launchd does not try again.
     let loaded = Command::new("launchctl")
         .args(["load"])
         .arg(&path)
@@ -433,36 +505,55 @@ fn user_unit_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_user_unit(enable: bool, exe: &Path) -> Result<()> {
+fn systemctl_user(args: &[&str]) -> Result<bool> {
+    Ok(Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success())
+}
+
+/// Write the unit when it differs from what is on disk, and tell systemd.
+/// `Restart=on-failure` leaves a copy that exited 0 because another one
+/// already serves.
+#[cfg(target_os = "linux")]
+fn write_user_unit(exe: &Path) -> Result<()> {
     let path = user_unit_path()?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
-    }
-    if !enable {
-        let _ = Command::new("systemctl")
-            .args(["--user", "disable", "--now", "brolink.service"])
-            .status();
-        let _ = fs::remove_file(&path);
-        return Ok(());
     }
     let unit = format!(
         "[Unit]\nDescription=BroLink\nAfter=network.target\n\n[Service]\nExecStart=\"{}\" --background\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
         exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
             .replace('%', "%%").replace('$', "$$").replace('\n', "\\n").replace('\r', "\\r")
     );
+    if fs::read_to_string(&path).is_ok_and(|have| have == unit) {
+        return Ok(());
+    }
     fs::write(&path, unit)?;
     anyhow::ensure!(
-        Command::new("systemctl")
-            .args(["--user", "daemon-reload"])
-            .status()?
-            .success(),
+        systemctl_user(&["daemon-reload"])?,
         "could not reload user services"
     );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_unit(enable: bool, exe: &Path) -> Result<()> {
+    let path = user_unit_path()?;
+    if !enable {
+        let _ = systemctl_user(&["disable", "brolink.service"]);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        let _ = systemctl_user(&["daemon-reload"]);
+        return Ok(());
+    }
+    write_user_unit(exe)?;
     anyhow::ensure!(
-        Command::new("systemctl")
-            .args(["--user", "enable", "--now", "brolink.service"])
-            .status()?
-            .success(),
+        systemctl_user(&["enable", "--now", "brolink.service"])?,
         "could not enable BroLink service"
     );
     Ok(())
@@ -477,6 +568,21 @@ fn dirs_home() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_agent_restarts_only_after_a_failure_and_escapes_the_path() {
+        let plist = launch_agent_plist(Path::new(
+            "/Applications/B&L's <app>.app/Contents/MacOS/BroLink",
+        ));
+        assert!(
+            plist.contains("<key>SuccessfulExit</key><false/>"),
+            "{plist}"
+        );
+        assert!(!plist.contains("<key>KeepAlive</key><true/>"), "{plist}");
+        assert!(plist.contains("<string>--background</string>"));
+        assert!(plist.contains("B&amp;L&apos;s &lt;app&gt;.app"), "{plist}");
+        assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+    }
 
     #[test]
     fn engine_login_uses_sunshine_hash_format_without_plaintext() {

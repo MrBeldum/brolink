@@ -6,6 +6,22 @@ GitHub release notes, so each version gets a heading of the form
 
 ## 4.0.0 (2026-09-20)
 
+- On macOS and Linux the background service keeps its login item
+  registered without restarting itself: it only writes the launch agent or
+  user unit, and a copy started while another already answers on the port
+  exits quietly instead of failing, so launchd no longer respawns a
+  duplicate every ten seconds for the rest of the session and a service
+  launchd started at login is no longer killed by its own registration.
+  Turning the login item off in the panel leaves the running service alone.
+- Only a Windows PC accepts a pushed `brolink-host.exe`; a Mac or a
+  container answers 400 instead of trying to swap it in, and the Mac only
+  sends one to Windows machines.
+- Elevated Windows setup approved with another administrator's password
+  reads and writes the launching user's BroLink folder, so the engine login
+  it configures is that user's.
+- The updater takes the window's locks in the window's order; the reverse
+  could hang the app when an update was ready just as a stream ended.
+
 - Docker desktops now publish a valid streaming app catalog. The missing
   environment object made a healthy-looking VPS report "offers nothing to
   stream"; node self-tests now check the catalog and persisted login setup.

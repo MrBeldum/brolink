@@ -111,7 +111,20 @@ impl Service {
                 }
             }
         } else {
-            TcpListener::bind(addr)?
+            match TcpListener::bind(addr) {
+                Ok(l) => l,
+                Err(e) if service_alive() => {
+                    // launchd, systemd or the window started this copy while
+                    // another already serves. Exit 0: a supervisor that
+                    // restarts on failure then leaves the running one alone
+                    // instead of respawning this one every few seconds.
+                    self.log(format!(
+                        "another BroLink service already answers on TCP {CONTROL_PORT}; this copy exits ({e})"
+                    ));
+                    return Ok(());
+                }
+                Err(e) => return Err(e).context(format!("bind TCP {CONTROL_PORT}")),
+            }
         };
         self.log(format!(
             "BroLink Host {} listening on TCP {CONTROL_PORT}",
@@ -149,8 +162,9 @@ impl Service {
         }
         // Rewrite even when a Run value already exists: install-host.ps1
         // may have moved the exe after the first setup, and the old path
-        // would start nothing at logon.
-        if let Err(e) = crate::setup::set_start_with_windows(true, exe) {
+        // would start nothing at logon. Written only: this is the service,
+        // so it must not stop itself or start a second copy.
+        if let Err(e) = crate::setup::register_autostart(exe) {
             self.log(format!("could not register start at logon: {e:#}"));
         }
     }
@@ -577,6 +591,15 @@ impl Service {
     /// A newer `brolink-host.exe` from the Mac: stage it, answer, then swap
     /// it in and hand over. See [`crate::update`].
     fn update(&self, req: &Request) -> Response {
+        if !cfg!(windows) {
+            // A Mac replaces its own app from GitHub and a container is
+            // rebuilt; swapping a Windows executable in here would only
+            // fail to start and be retried.
+            return Response::json(
+                400,
+                &Ack::err("only a Windows PC takes a pushed brolink-host.exe; this machine updates itself"),
+            );
+        }
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
@@ -897,7 +920,14 @@ mod tests {
         let svc = Service::new();
         let req = Request::default();
         svc.update_running.store(true, Ordering::Release);
-        assert_eq!(svc.update(&req).status, 409);
+        if cfg!(windows) {
+            assert_eq!(svc.update(&req).status, 409);
+        } else {
+            // Not a Windows PC: refused before the slot is even looked at.
+            let r = svc.update(&req);
+            assert_eq!(r.status, 400);
+            assert!(r.body.contains("Windows PC"), "{}", r.body);
+        }
         svc.update_running.store(false, Ordering::Release);
         assert_eq!(svc.update(&req).status, 400);
         assert!(!svc.update_running.load(Ordering::Acquire));
@@ -978,7 +1008,13 @@ mod tests {
                 body: b"MZ".to_vec(),
             },
         );
-        assert_eq!(r.status, 409, "{}", r.body);
+        // An older version is refused on Windows; any version is elsewhere.
+        assert_eq!(
+            r.status,
+            if cfg!(windows) { 409 } else { 400 },
+            "{}",
+            r.body
+        );
     }
 
     fn json_header() -> Vec<(String, String)> {
