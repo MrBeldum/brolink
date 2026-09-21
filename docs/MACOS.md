@@ -183,7 +183,7 @@ for; the lobby's **Next session** card shows the same. A session also
 reconnects by itself, at the new size, when this Mac's window moves to a
 display of a different size.
 
-Settings are saved in `~/Library/Application Support/BroLink/client.toml`,
+Settings are saved in `~/Library/Application Support/dev.brolink.BroLink/client.toml`,
 along with the MAC, LAN address and pairing certificate of each PC BroLink
 has paired with.
 
@@ -242,7 +242,7 @@ capture failing while the desktop plainly has a picture.
 
 The app checks GitHub for a new release about every six hours and twenty
 seconds after it starts. A newer version is downloaded to
-`~/Library/Application Support/BroLink/updates/<tag>/`, checked against the
+`~/Library/Application Support/dev.brolink.BroLink/updates/<tag>/`, checked against the
 SHA-256 GitHub publishes for the asset and against its own code signature,
 and moved over `/Applications/BroLink.app` once no stream is running; the
 app then relaunches. The Mac also sends the new `brolink-host.exe` to each
