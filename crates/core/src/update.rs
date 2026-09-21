@@ -75,6 +75,13 @@ pub fn host_can_receive_update(running: &Version) -> bool {
     *running >= first_update()
 }
 
+/// Whether a peer takes a pushed `brolink-host.exe` over `/v1/update`:
+/// Windows only. `os` is the peer's `Status.os` (Tailscale's string), or
+/// empty from a host older than 4.0, which was always Windows.
+pub fn takes_pushed_host(os: &str) -> bool {
+    os.is_empty() || os.eq_ignore_ascii_case("windows")
+}
+
 /// The GitHub token to use: the configured one, the environment, then what
 /// git has stored for github.com.
 pub fn token(configured: Option<&str>) -> Option<String> {
@@ -513,6 +520,18 @@ mod tests {
         let mut r = BufReader::new(&raw[..]);
         let (_, headers) = read_head(&mut r).unwrap();
         assert!(read_body(&mut r, &headers, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn only_windows_takes_a_pushed_host() {
+        assert!(takes_pushed_host("windows"));
+        assert!(takes_pushed_host("Windows"));
+        assert!(
+            takes_pushed_host(""),
+            "a pre-4.0 host reports no OS and is Windows"
+        );
+        assert!(!takes_pushed_host("macOS"));
+        assert!(!takes_pushed_host("linux"));
     }
 
     #[test]

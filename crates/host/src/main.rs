@@ -42,10 +42,19 @@ struct Args {
     /// the script is generated after UAC, not from a user-writable file.
     #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
     setup_elevated: bool,
+    /// The launching user's %LOCALAPPDATA%, so an elevated setup approved
+    /// with another administrator's password still uses that user's
+    /// BroLink folder (host.toml, setup.log).
+    #[arg(long, value_name = "DIR", requires = "setup_elevated")]
+    local_app_data: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(dir) = &args.local_app_data {
+        // Before any thread or data_dir() call; edition 2021, so set_var is safe.
+        std::env::set_var("LOCALAPPDATA", dir);
+    }
     // The elevated setup helper logs with the panel; `setup.log` is the
     // script's own output, which the setup card shows.
     init_logging(if args.background {
