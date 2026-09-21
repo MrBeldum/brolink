@@ -1,5 +1,5 @@
 //! Settings and what has been learned about each PC, in
-//! `~/Library/Application Support/BroLink/client.toml`.
+//! `~/Library/Application Support/dev.brolink.BroLink/client.toml`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
