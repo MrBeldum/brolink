@@ -11,6 +11,7 @@
 use anyhow::Result;
 use brolink_core::config::data_dir;
 use brolink_host::brand;
+use brolink_host::logfile::RotatingLog;
 use brolink_host::product::NodeApp;
 use brolink_host::service::{self, Service};
 use clap::Parser;
@@ -130,23 +131,48 @@ fn run_setup() -> Result<()> {
     })
 }
 
+/// What is logged when RUST_LOG says nothing.
+///
+/// wgpu's Vulkan backend warns once for every presented frame whose
+/// swapchain reports suboptimal (`wgpu-hal`, `vulkan/mod.rs`). On Hermes
+/// that is every frame the window draws, and it was **every line** of a
+/// 32 MB `panel.log` — the condition is normal and wgpu recreates the
+/// swapchain itself, so there is nothing to act on. BroLink stays at info
+/// and that one target is heard from only when it is an error.
+const DEFAULT_LOG: &str = "info,wgpu_hal=error";
+
 /// Logs go to a file in the data directory: neither mode has a console.
 fn init_logging(file: &str) {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let sink: Box<dyn std::io::Write + Send> = match data_dir().and_then(|d| {
-        Ok(std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(d.join(file))?)
-    }) {
-        Ok(f) => Box::new(f),
-        Err(_) => Box::new(std::io::stderr()),
-    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
+    let sink: Box<dyn std::io::Write + Send> =
+        match data_dir().and_then(|d| Ok(RotatingLog::open(d.join(file))?)) {
+            Ok(f) => Box::new(f),
+            Err(_) => Box::new(std::io::stderr()),
+        };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .with_ansi(false)
         .with_writer(std::sync::Mutex::new(sink))
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_LOG;
+    use tracing_subscriber::EnvFilter;
+
+    /// A typo here would be silent: `EnvFilter` drops directives it cannot
+    /// parse and carries on, so a broken default would quietly restore the
+    /// per-frame flood rather than fail the build.
+    #[test]
+    fn the_default_filter_parses_and_keeps_both_directives() {
+        let parsed = EnvFilter::builder()
+            .parse(DEFAULT_LOG)
+            .expect("DEFAULT_LOG is a valid filter")
+            .to_string();
+        assert!(parsed.contains("wgpu_hal=error"), "{parsed}");
+        assert!(parsed.contains("info"), "{parsed}");
+    }
 }
