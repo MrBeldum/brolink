@@ -400,20 +400,54 @@ impl Drop for Session {
 /// The bitrate to hand moonlight-common-c so the PC's encoder actually
 /// targets `target_kbps`.
 ///
-/// moonlight does not encode at the number it is given. In
-/// `SdpGenerator.c` it reserves headroom before telling the host: it keeps
-/// 20% for FEC (`bitrate * 0.80`) and, on a remote stream, drops a further
-/// 500 kbps for audio and control. So a plain request of 35 Mbps makes the
-/// encoder aim for only ~27 Mbps, and the received video sits lower still.
-/// BroLink treats the user's number as the video target, not a total
-/// budget, so we invert that arithmetic here: ask for enough that what
-/// survives moonlight's reduction is the target the user chose. moonlight
-/// still caps the result at its own 150 Mbps ceiling.
-pub fn request_bitrate_kbps(target_kbps: u32, remote: bool) -> u32 {
-    let audio_control = if remote { 500 } else { 0 };
-    // Inverse of `adjusted = request * 0.8 - audio_control`, rounded.
-    let request = ((u64::from(target_kbps) + audio_control) * 5).div_ceil(4);
-    (request as u32).min(200_000)
+/// Neither side encodes at the number it is given. moonlight-common-c
+/// (`SdpGenerator.c`) keeps 20% of the request for FEC and, on a remote
+/// stream, another 500 kbps for audio and control (BroLink never flags a
+/// stream remote). Sunshine ignores that reduced figure anyway: it takes the
+/// raw request (`x-ml-video.configuredBitrateKbps`,
+/// `rtsp.cpp`) and makes its own deductions, 20% for FEC, then audio
+/// (512 kbps for high-quality stereo, at most a fifth of what is left) and
+/// 500 kbps for packet and control overhead (at most a tenth). A plain
+/// request of 20 Mbps therefore encodes at 15 Mbps, and one padded only for
+/// moonlight's 20% still lands at 18988 kbps. BroLink treats the user's
+/// number as the video target, not a total budget, so this inverts the
+/// whole chain: the smallest request that survives every deduction at or
+/// above the target.
+pub fn request_bitrate_kbps(target_kbps: u32) -> u32 {
+    let target = u64::from(target_kbps);
+    // Closed form for the regime where both of Sunshine's caps are inactive
+    // (request above 5 Mbps): encoder = request * 0.8 - 512 - 500.
+    let mut request = (target + SUNSHINE_AUDIO_KBPS + SUNSHINE_CONTROL_KBPS) * 5 / 4;
+    // Settle on the exact integer: the caps make small requests deduct
+    // less, and the closed form rounds.
+    while sunshine_encoder_kbps(request) < target {
+        request += 1;
+    }
+    while request > 1 && sunshine_encoder_kbps(request - 1) >= target {
+        request -= 1;
+    }
+    (request as u32).min(MAX_REQUEST_KBPS)
+}
+
+/// The most moonlight-common-c is asked for; keeps the wire budget inside
+/// what a Tailscale path is expected to carry.
+const MAX_REQUEST_KBPS: u32 = 200_000;
+/// Sunshine's deduction for high-quality stereo Opus (256 kbps a channel).
+const SUNSHINE_AUDIO_KBPS: u64 = 512;
+/// Sunshine's deduction for A/V packet and control traffic overhead.
+const SUNSHINE_CONTROL_KBPS: u64 = 500;
+
+/// What Sunshine's encoder targets for a moonlight request of `request`
+/// kbps: `rtsp.cpp`'s arithmetic on `configuredBitrateKbps`, FEC at
+/// BroLink's 20% (`fec_percentage` in the engine profile), high-quality
+/// stereo audio. moonlight's own remote-stream deduction of 500 kbps only
+/// touches the figure Sunshine does not use, so it plays no part.
+fn sunshine_encoder_kbps(request: u64) -> u64 {
+    // configuredBitrateKbps /= 100.f / (100 - fec_percentage)  (float division)
+    let mut kbps = (request as f32 / (100.0 / 80.0)) as u64;
+    kbps -= SUNSHINE_AUDIO_KBPS.min(kbps / 5);
+    kbps -= SUNSHINE_CONTROL_KBPS.min(kbps / 10);
+    kbps
 }
 
 /// Tailscale (and any RFC 1918 path) is a LAN to the stream protocol.
@@ -446,7 +480,7 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         width: s.width as c_int,
         height: s.height as c_int,
         fps: s.fps as c_int,
-        bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps, false) as c_int,
+        bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps) as c_int,
         // moonlight-common-c would cap a remote IPv4 stream at 1024-byte
         // packets to survive raw-internet fragmentation. BroLink never rides
         // raw internet: every stream goes through a Tailscale (WireGuard)
@@ -877,24 +911,30 @@ mod tests {
     }
 
     #[test]
-    fn requested_bitrate_undoes_moonlights_reduction() {
-        // moonlight encodes at request * 0.8 - (remote ? 500 : 0). After our
-        // compensation the encoder should land back on the chosen target.
-        for target in [12_000u32, 35_000, 50_000, 80_000] {
-            for remote in [true, false] {
-                let request = request_bitrate_kbps(target, remote);
-                let audio_control = if remote { 500 } else { 0 };
-                let delivered = (f64::from(request) * 0.8) as i64 - audio_control;
-                // Within rounding of the div_ceil, never below the target.
-                assert!(
-                    (delivered - i64::from(target)).abs() <= 1,
-                    "target={target} remote={remote} request={request} delivered={delivered}"
-                );
-            }
+    fn requested_bitrate_undoes_every_reduction() {
+        // Sunshine encodes at request / 1.25 - 512 - 500 (rtsp.cpp). After
+        // our compensation the encoder should land exactly on the target.
+        for target in [
+            2_000u32, 5_000, 12_000, 20_000, 35_000, 50_000, 80_000, 150_000,
+        ] {
+            let request = request_bitrate_kbps(target);
+            let encoder = sunshine_encoder_kbps(u64::from(request));
+            assert_eq!(
+                encoder,
+                u64::from(target),
+                "target={target} request={request}"
+            );
+            // And it is the smallest such request.
+            assert!(
+                sunshine_encoder_kbps(u64::from(request) - 1) < u64::from(target),
+                "target={target} request={request} is not minimal"
+            );
         }
-        // A plain 35 Mbps request would otherwise have encoded at ~27 Mbps.
-        assert_eq!(request_bitrate_kbps(35_000, true), 44_375);
-        assert!(request_bitrate_kbps(500_000, true) <= 200_000, "clamped");
+        // The figures Sunshine's log showed for the old compensation: a
+        // 20 Mbps target asked for 25 000 and encoded at 18 988.
+        assert_eq!(sunshine_encoder_kbps(25_000), 18_988);
+        assert_eq!(request_bitrate_kbps(20_000), 26_265);
+        assert!(request_bitrate_kbps(500_000) <= MAX_REQUEST_KBPS, "clamped");
     }
 
     #[test]
