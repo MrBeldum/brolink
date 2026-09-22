@@ -7,6 +7,7 @@ pub mod brand;
 pub mod clipboard;
 pub mod config;
 pub mod display;
+pub mod logfile;
 pub mod migrate;
 pub mod power;
 pub mod product;

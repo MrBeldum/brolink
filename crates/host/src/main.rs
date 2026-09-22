@@ -11,6 +11,7 @@
 use anyhow::Result;
 use brolink_core::config::data_dir;
 use brolink_host::brand;
+use brolink_host::logfile::RotatingLog;
 use brolink_host::product::NodeApp;
 use brolink_host::service::{self, Service};
 use clap::Parser;
@@ -134,15 +135,11 @@ fn run_setup() -> Result<()> {
 fn init_logging(file: &str) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let sink: Box<dyn std::io::Write + Send> = match data_dir().and_then(|d| {
-        Ok(std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(d.join(file))?)
-    }) {
-        Ok(f) => Box::new(f),
-        Err(_) => Box::new(std::io::stderr()),
-    };
+    let sink: Box<dyn std::io::Write + Send> =
+        match data_dir().and_then(|d| Ok(RotatingLog::open(d.join(file))?)) {
+            Ok(f) => Box::new(f),
+            Err(_) => Box::new(std::io::stderr()),
+        };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
