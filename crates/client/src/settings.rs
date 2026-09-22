@@ -44,7 +44,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
     ui::setting_row(
         ui,
         "Bitrate target",
-        Some("The encoder holds this rate (CBR). A still desktop no longer drops to a trickle."),
+        Some("The PC's encoder aims at exactly this rate (CBR) while the picture is changing; a still screen uses less."),
         |ui| {
             let mut mbps = if s.quality == Quality::Auto {
                 50

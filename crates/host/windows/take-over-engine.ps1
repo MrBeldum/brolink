@@ -86,9 +86,15 @@ if (-not $sun -or $sun.User -ine $me) {
         Write-Output ("STILL_RUNNING {0} pid={1}" -f $left.User, $left.Pid)
         exit 1
     }
+    # The engine is a console program. Started plainly it owns a console
+    # window on the desktop being streamed, and closing that window ends
+    # the engine and with it the stream. SW_HIDE at creation keeps the
+    # console from ever showing.
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [UInt16]0 }
     $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine      = "`"$exe`" `"$conf`""
-        CurrentDirectory = $engineDir
+        CommandLine               = "`"$exe`" `"$conf`""
+        CurrentDirectory          = $engineDir
+        ProcessStartupInformation = $startup
     }
     if ($created.ReturnValue -ne 0) {
         Write-Output ("CREATE_FAILED {0}" -f $created.ReturnValue)

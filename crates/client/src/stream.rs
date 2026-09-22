@@ -348,7 +348,7 @@ impl View {
                     }
                 });
                 ui.add_space(8.0);
-                ui::caption(ui, "The encoder holds the target bitrate (CBR). Compare received against target; large swings mean the path is dropping packets.");
+                ui::caption(ui, "The PC's encoder aims at the target (CBR) and reaches it when the picture is changing; a still screen needs fewer bits. Received falling well short during motion, or swinging, means the path is dropping packets.");
                 if !stats.audio.is_empty() { ui::caption(ui, &stats.audio); }
                 if ui::ghost_button(ui, "Copy diagnostics").clicked() {
                     ctx.copy_text(format!("BroLink {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",

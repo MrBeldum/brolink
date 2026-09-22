@@ -4,6 +4,21 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## 4.0.1 (2026-09-21)
+
+- The streaming engine on a Windows PC no longer owns a terminal window.
+  The helper that runs it as the signed-in user started it as a plain
+  console program, so a console sat on the streamed desktop and closing it
+  stopped the engine and the stream with it; the engine is now created
+  with its console hidden. The logon task that runs the helper no longer
+  goes through a `.cmd`, which flashed a terminal at every logon and engine
+  restart; it runs through a windowless script host instead.
+- The bitrate the PC's encoder targets is now the number chosen. Sunshine
+  takes 20% off the request for FEC and then 512 kbps for audio and
+  500 kbps for control traffic, on top of moonlight's own 20%, so a 20 Mbps
+  target was encoding at 18988 kbps. The request now compensates for the
+  whole chain.
+
 ## 4.0.0 (2026-09-20)
 
 - On macOS and Linux the background service keeps its login item
