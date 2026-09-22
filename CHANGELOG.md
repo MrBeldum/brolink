@@ -4,6 +4,15 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## 4.0.2 (2026-09-22)
+
+- `panel.log` and `service.log` no longer grow without end. Both were
+  opened in append mode and nothing ever pruned them, so a machine that
+  streams for weeks kept every line it had ever logged: Hermes reached a
+  32 MB `panel.log`. Each file now rolls over at 4 MB, keeping one previous
+  generation as `<name>.1`, so a log costs at most 8 MB however long the
+  service or the window runs.
+
 ## 4.0.1 (2026-09-21)
 
 - The streaming engine on a Windows PC no longer owns a terminal window.
