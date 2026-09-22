@@ -1,0 +1,16 @@
+[Unit]
+Description=BroLink native XFCE desktop
+Requires=brolink-display.service
+After=brolink-display.service
+Wants=pulseaudio.service
+
+[Service]
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=%t/brolink.Xauthority
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1'
+ExecStart=/usr/bin/startxfce4
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
