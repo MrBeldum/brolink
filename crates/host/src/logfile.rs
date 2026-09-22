@@ -29,9 +29,12 @@ pub fn rotated_path(path: &Path) -> PathBuf {
 }
 
 /// An append-only log file that rolls over once it passes `MAX_BYTES`.
+///
+/// The handle is an `Option` only so that a rollover can drop it: see
+/// `rotate`, which has to close the file before it can move it.
 pub struct RotatingLog {
     path: PathBuf,
-    file: File,
+    file: Option<File>,
     written: u64,
     max_bytes: u64,
 }
@@ -45,26 +48,45 @@ impl RotatingLog {
     }
 
     fn with_max(path: PathBuf, max_bytes: u64) -> io::Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = Self::append_to(&path)?;
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             path,
-            file,
+            file: Some(file),
             written,
             max_bytes,
         })
     }
 
-    /// Move what is on disk to `<name>.1` and start the live file again at
-    /// zero. Copy and truncate rather than rename: Windows will not rename
-    /// a file that is open, and this keeps the handle — and so the tracing
-    /// subscriber holding it — valid throughout.
+    fn append_to(path: &Path) -> io::Result<File> {
+        OpenOptions::new().create(true).append(true).open(path)
+    }
+
+    /// Move what is on disk to `<name>.1` and start a new live file.
+    ///
+    /// The close-then-rename order is what makes this work on Windows.
+    /// Truncating in place is not an option there: a handle opened for
+    /// appending is asked for `FILE_APPEND_DATA` without `FILE_WRITE_DATA`,
+    /// so `set_len` is denied and the rollover silently does nothing — on
+    /// the one platform that grew the 32 MB log. Windows also refuses to
+    /// rename a file that is still open, and to replace an existing
+    /// destination, hence dropping the handle and clearing `.1` first.
+    ///
+    /// Logging continues whatever happens: a failed move still leaves an
+    /// open file behind, and the caller keeps writing to it.
     fn rotate(&mut self) -> io::Result<()> {
-        self.file.flush()?;
-        std::fs::copy(&self.path, rotated_path(&self.path))?;
-        self.file.set_len(0)?;
-        self.written = 0;
-        Ok(())
+        if let Some(mut f) = self.file.take() {
+            let _ = f.flush();
+        }
+        let prev = rotated_path(&self.path);
+        let _ = std::fs::remove_file(&prev);
+        let moved = std::fs::rename(&self.path, &prev);
+        let file = Self::append_to(&self.path)?;
+        // After a move this is a new, empty file; if the move failed it is
+        // the old one, still oversized, and the next write tries again.
+        self.written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        self.file = Some(file);
+        moved
     }
 }
 
@@ -76,13 +98,21 @@ impl Write for RotatingLog {
             // live file as it was and the write goes on as an append.
             let _ = self.rotate();
         }
-        let n = self.file.write(buf)?;
+        let file = match self.file.as_mut() {
+            Some(f) => f,
+            // Only reachable if a rollover could not reopen the log.
+            None => self.file.insert(Self::append_to(&self.path)?),
+        };
+        let n = file.write(buf)?;
         self.written += n as u64;
         Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
+        match self.file.as_mut() {
+            Some(f) => f.flush(),
+            None => Ok(()),
+        }
     }
 }
 
