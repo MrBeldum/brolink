@@ -12,6 +12,12 @@ GitHub release notes, so each version gets a heading of the form
   32 MB `panel.log`. Each file now rolls over at 4 MB, keeping one previous
   generation as `<name>.1`, so a log costs at most 8 MB however long the
   service or the window runs.
+- The window no longer logs a line for every frame it draws. wgpu's Vulkan
+  backend warns whenever a presented frame's swapchain reports suboptimal,
+  which on a Windows PC is every frame; it was every single line of that
+  32 MB file. The condition is normal and wgpu recreates the swapchain
+  itself, so that one target is now heard from only when it is an error.
+  `RUST_LOG` still overrides everything.
 
 ## 4.0.1 (2026-09-21)
 
