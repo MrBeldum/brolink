@@ -1,0 +1,11 @@
+[Unit]
+Description=BroLink native headless display
+
+[Service]
+ExecStartPre=/bin/sh -c 'umask 077; touch "%t/brolink.Xauthority"; /usr/bin/xauth -f "%t/brolink.Xauthority" add :1 . "$(/usr/bin/mcookie)"'
+ExecStart=/usr/bin/Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp -auth %t/brolink.Xauthority
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

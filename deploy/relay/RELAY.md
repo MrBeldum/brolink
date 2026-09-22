@@ -141,19 +141,25 @@ not only a healthy container or saved relay preferences.
 
 ## Operations
 
+The default tailnet name is `relay` (`TS_HOSTNAME` in `.env`). To rename an
+existing node, update `.env`, run
+`docker exec brolink-relay tailscale set --hostname=relay`, then
+`docker compose up -d` to persist the container environment. This retains the
+node identity, IP address, tags, and pairing.
+
 **Identity survives restarts.** State lives in the `relay-state` named volume mounted
 at `TS_STATE_DIR=/var/lib/tailscale`, and `TS_AUTH_ONCE=true` stops it re-logging in
 on every boot. `docker compose down && docker compose up -d` keeps the same node — if
-you ever see a second `brolink-relay` in the admin console, the volume was lost.
+you ever see a second `relay` in the admin console, the volume was lost.
 Deleting the volume is the only way to start over:
 `docker compose down -v` (this forces a fresh login and a new node).
 
 **Stale nodes after a re-login.** A `docker compose down -v` (or a `tailscale logout` inside
 the container) leaves the previous node listed *offline* in the admin console, and the new
-node may come up as `brolink-relay-1` because the old one still holds the plain name.
+node may come up as `relay-1` because the old one still holds the plain name.
 Nothing uses the offline node (no grant matches it, and BroLink only looks at `tag:relay`
 nodes that are online), so it is cosmetic. Delete it on the Machines page; there is no CLI
-for that. The live relay is whichever `brolink-relay*` row shows `tag:relay` and is online.
+for that. The live relay is whichever `relay*` row shows `tag:relay` and is online.
 
 **Relay prefs survive restarts too** — `tailscale set` writes them into that same
 state. The entrypoint re-applies them on every start anyway, which is what picks up a
