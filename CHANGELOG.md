@@ -61,6 +61,11 @@ GitHub release notes, so each version gets a heading of the form
 - When the Mac's sound output changes mid-stream (AirPods connect, say),
   the stream's stats name the device the sound moved to. macOS already
   moved it; BroLink kept naming the old one and logged a warning.
+- A host update that lands is no longer reported as a failure. A PC can
+  take the new executable and restart before its reply reaches the Mac;
+  the Mac then retried, heard "this PC already runs BroLink Host 4.0.2",
+  and showed "Could not update" in red. It now asks the PC which version
+  it runs before calling a push failed.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.
