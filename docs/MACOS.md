@@ -1,9 +1,8 @@
 # macOS client (Apple Silicon)
 
 BroLink for the Mac is one native app: every machine on your Tailscale
-account, a Connect button each, a power menu, the stream itself, and
-**Share this machine** so a Windows PC or another Mac can open this
-desktop. BroLink's stream protocol is compiled in, video is decoded by
+account, a Connect button each, a power menu, the stream itself, and a
+**Sharing** tab so a Windows PC or another Mac can open this desktop. BroLink's stream protocol is compiled in, video is decoded by
 VideoToolbox (H.264 and HEVC), audio by Opus, and the picture is drawn in
 BroLink's own window under a toolbar.
 
@@ -12,8 +11,8 @@ BroLink's own window under a toolbar.
 - macOS 13+ on Apple Silicon
 - [Tailscale](https://tailscale.com/download/mac), signed in with the same
   account as your other machines
-- Screen Recording permission when you first **Share this machine** (so
-  others can see this Mac's desktop)
+- Screen Recording permission for the streaming engine, which macOS asks
+  for once after you set up sharing (so others can see this Mac's desktop)
 
 ## Install a prebuilt app
 
@@ -67,17 +66,21 @@ xcrun stapler staple dist/BroLink.app
 
 ## First run
 
-1. If Tailscale is missing or signed out, the top card says so and **Get
-   Tailscale** opens the download page.
-2. **Your machines** lists every other machine on your Tailscale account
-   (Windows, macOS and Linux alike). Each line says whether it is ready,
-   asleep, or missing something on its side.
-3. Click **Connect**. The first time with a PC, BroLink pairs with it: it
-   picks a random PIN, sends it to BroLink Host over Tailscale, and the host
-   enters it for you. You see the PIN but never need it. If there is no
-   BroLink Host on the PC, pairing cannot finish: open BroLink Host there
-   and run setup first.
-4. The PC's desktop appears.
+1. If Tailscale is missing or signed out, a banner at the top of
+   **Machines** says so; **Get Tailscale** opens the download page.
+2. **Machines** lists every machine on your Tailscale account, this Mac
+   first. A dot and one line say whether each is ready, asleep, or
+   missing something on its side.
+3. Click **Connect** (**Wake and connect** for a machine that is asleep).
+   The first time with a machine, BroLink pairs with it: it picks a
+   random PIN, sends it to BroLink on that machine over Tailscale, and
+   BroLink there enters it for you. You see the PIN but never need it. If
+   BroLink is not sharing on that machine, pairing cannot finish: open
+   BroLink there and set up sharing on its **Sharing** tab first.
+4. The desktop appears.
+
+Command-1 opens **Machines**, Command-2 **Sharing** and Command-comma
+**Settings**; Escape goes back to **Machines**.
 
 ## While streaming
 
@@ -87,10 +90,13 @@ bar on any side; a window is resized to the stream's proportions when the
 session starts, for the same reason. A manual 16:9 size on a display of
 another shape leaves a bar above and below.
 
-**Ctrl+Alt** is the host key, as in VMware or VirtualBox. Press it and the
-mouse is freed and the toolbar drops over the top of the picture; press it
-again, or click the picture, and the toolbar goes away and the mouse is
-captured back. A menu or a question keeps the toolbar there until it is
+**Control-Option** (Ctrl+Alt on Windows and Linux) is the host key, as in
+VMware or VirtualBox. Press it and the mouse is freed and the toolbar drops
+over the top of the picture; press it again, or click the picture, and the
+toolbar goes away and the mouse is captured back. The keys are shown when
+a stream starts, and on the toolbar itself. Before the first picture
+arrives, a **Cancel** button under the progress ends the attempt without
+the host key. A menu or a question keeps the toolbar there until it is
 answered. The status line, with the session clock, the frame rate and
 bitrate against what was asked for, and the round trip, is drawn over the
 picture's bottom-left corner while **Stats** is open, or in the bar below
@@ -105,18 +111,21 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 
 | Toolbar item | What it does |
 |--------------|--------------|
-| **● PC name · 1920×1080 · 60 fps · HEVC** | The stream as negotiated; the dot turns red while the connection is poor |
-| **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found to the PC and its round trip. Red means every packet goes through a Tailscale relay, which adds delay; the lobby's **Connection details** say why and what would give a direct path. What BroLink asks for is the same on every path |
-| **Mouse: captured / free** | Captured (the default): a click on the picture hides the cursor and sends raw movement, which games read; **Ctrl+Alt** frees it. Free: the Mac cursor's position is sent 1:1 and nothing is captured. The choice is remembered |
-| **Keys** | Ctrl+Alt+Del, Windows key, Alt+Tab, Esc, Print Screen; and the switch for what ⌘ does on the PC |
-| **Stats** | A Stream performance window: received against target bitrate and frame rate, round trip, packet loss, host, assembly, queue and decode times, and whether the decoder is hardware. **Copy diagnostics** puts it all on the clipboard |
+| **● Machine name · 1920×1080 · 60 fps · HEVC** | The stream as negotiated (the numbers show on wide windows); the dot turns amber while the connection is poor |
+| **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found and its round trip. Amber means every packet goes through one of Tailscale's shared relays, which adds delay; **Connection details** under the machine list say why and what would give a direct path. What BroLink asks for is the same on every path |
+| **Mouse** | **Captured, for games** (the default): a click on the picture hides the cursor and sends raw movement, which games read; the host key frees it. **Free, for desktops**: the Mac cursor's position is sent 1:1 and nothing is captured. The choice is remembered, and is also in Settings |
+| **Keys** | Ctrl+Alt+Delete, Windows key, Alt+Tab, Escape, Print Screen; and **Command acts as Ctrl** |
+| **Stats** | The Stream performance panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
-| **PC** | Sleep, Restart…, Shut down… (the latter two ask twice); **Update BroLink Host…** for a PC whose host is older than 3.1 |
-| **Stream settings** | The same panel as in the lobby: quick profiles, picture quality, resolution, frame rate, bitrate target and video format. **Apply and reconnect** restarts the session with them in a few seconds |
+| **PC** (or **Mac**, **Machine**) | Sleep, Restart…, Shut down… (the latter two ask first); **Update BroLink Host…** for a PC whose host is older than 3.1 |
+| **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
 
-Everything else on the keyboard goes to the PC as pressed. With **⌘ acts
-as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and the rest do on Windows what
+On a narrow window everything but **Stream settings** and **Disconnect**
+folds into one **More** menu.
+
+Everything else on the keyboard goes to the PC as pressed. With **Command
+acts as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and the rest do on Windows what
 they do on the Mac, and ⌘ can stay held across several of them.
 
 ### Clipboard
@@ -132,7 +141,7 @@ something crossed. With an older host, ⌘V pastes what the PC last copied.
 
 Tailscale connects the Mac and the PC directly when it can punch through
 both routers. When it cannot, every packet goes through a relay: your own
-peer relay if you run one (the Relay card in Settings), otherwise one of
+peer relay if you run one (**Relay** in Settings), otherwise one of
 Tailscale's (DERP). A relay adds a detour, and the round trip it adds is a
 floor under how quickly the PC answers a click; it changes nothing about
 what BroLink asks for. Recommended quality is this screen's size at 50
@@ -149,39 +158,43 @@ fix it: UPnP or NAT-PMP turned on in the PC's router, a UDP port forwarded
 to the PC, or IPv6 on both networks. Both machines report their own side
 (`tailscale netcheck`); the PC's report needs BroLink Host 3.1.
 
-## The PC menu in the lobby
+## A machine's menu
 
-Next to a ready PC, **PC** offers **Sleep**, **Restart…**, **Shut
-down…** and **Test wake**. Restart and shut down ask for a second click;
-both force-close programs on the PC. The menu only appears if the host
-allows remote power actions.
+The **…** button at the end of each row offers what that machine allows:
+**Wake** (asleep, and BroLink has learned how to wake it; sends the packet
+without connecting), **Test waking it from this network** (awake), **Sleep**,
+**Restart…** and **Shut down…** (when that machine allows remote power
+actions), and **Copy Tailscale address**. Restart and shut down ask first;
+both force-close programs there.
 
-**Test wake** sends the wake packet to the awake PC and asks BroLink Host
-whether it arrived. A pass means waking the PC from where you are will
-work; a failure means the packets are not reaching it from this network
-(see below). **Wake** appears next to a PC that is asleep and whose wake
-details BroLink has learned; it sends the packet without connecting.
+**Test waking it from this network** sends the wake packet to the awake
+machine and asks BroLink there whether it arrived. A pass means waking it
+from where you are will work; a failure means the packets are not reaching
+it from this network (see below).
 
 ## Settings
 
 | Setting | What it changes |
 |---------|-----------------|
-| Quick profiles | **Smooth** 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100; **Reset** returns to Recommended |
-| Picture quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Manual** uses the rows below; changing the resolution or the bitrate switches to it |
+| Quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Smooth** is 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100. **Custom** uses the rows below; changing one of them switches to it |
 | Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
 | Frame rate | 30 to 240; the PC's display is switched to match when it can |
-| Bitrate target | 2 to 150 Mbps. The encoder holds this rate. Large swings mean the path is dropping packets |
-| Video format | Auto (HEVC when the PC can encode it), HEVC, H.264 |
-| Full screen | How a session starts |
-| App | The app on the PC to launch; "Desktop" is the whole PC. The list fills in after the first connection |
-| Command key acts as Ctrl | Off makes ⌘ the Windows key |
-| Offer to sleep the PC after each session | Off by default. Asleep, Tailscale is off; this Mac can only wake the PC from that PC's own network |
+| Bitrate | 2 to 150 Mbps; arrow keys step by 1, Shift-arrow by 10. The encoder holds this rate. Large swings mean the path is dropping packets |
+| Codec | Auto (HEVC when both ends can), HEVC, H.264 |
+| Open streams full screen | How a session starts |
+| Capture the mouse | The toolbar's Mouse choice, remembered |
+| Command acts as Ctrl | Off makes ⌘ the Windows key (Mac only) |
+| App to open | The app on the PC to launch; "Desktop" is the whole screen. The list fills in after the first connection |
+| Offer to sleep a machine after a session | Off by default. Asleep, Tailscale is off there; this Mac can only wake it from its own network |
+| Keep BroLink up to date | Updates this app and the Windows PCs' BroLink Host; **Check now** checks at once |
+| Relay | Whether a relay of your own is in use, and the grant it needs |
+| About | Version, licence, source, and the open-source notices |
 
 The stream rows are the panel that **Stream settings** opens during a
-session, and the pill under them says exactly what the next connect asks
-for; the lobby's **Next session** card shows the same. A session also
-reconnects by itself, at the new size, when this Mac's window moves to a
-display of a different size.
+session, and **Next stream** under them says exactly what the next connect
+asks for; the machine list shows the same. A session also reconnects by
+itself, at the new size, when this Mac's window moves to a display of a
+different size.
 
 Settings are saved in `~/Library/Application Support/dev.brolink.BroLink/client.toml`,
 along with the MAC, LAN address and pairing certificate of each PC BroLink
@@ -190,7 +203,7 @@ has paired with.
 ## Waking a PC from another network
 
 Asleep, the PC's Tailscale is off, so BroLink cannot reach it over the
-tailnet. Leave the PC on (BroLink Host keeps it awake while plugged in)
+tailnet. Leave the PC on (BroLink keeps it awake while plugged in)
 if you want **Connect** from anywhere.
 
 The wake packet is sent to the LAN broadcast, to the PC's LAN address and

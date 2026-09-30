@@ -18,7 +18,8 @@ streaming engine, which ships in the same zip, does the capture.
 1. Unzip the release and run `brolink-host.exe`, or run `install-host.ps1`
    to copy it (and the bundled engine archive) to `%LOCALAPPDATA%\BroLink`,
    add shortcuts, and register the background service to start at logon.
-2. Click **Share this machine**. One UAC prompt runs a script that:
+2. Open the **Sharing** tab and click **Set up as administrator**. One UAC
+   prompt runs a script that:
    - unpacks the bundled engine archive into
      `%ProgramFiles%\BroLink\engine` (downloads that pinned release if the
      archive is not beside the exe), and gives its executables BroLink's
@@ -44,18 +45,19 @@ streaming engine, which ships in the same zip, does the capture.
      device wake the PC (`powercfg /deviceenablewake`).
 
    The script's transcript is in `%LOCALAPPDATA%\BroLink\setup.log` and is
-   shown in the window if something fails. Every step is idempotent; run
-   setup again after fixing whatever it complained about.
-3. The status pill turns green. Leave the window closed; the service keeps
-   running.
+   shown on the Sharing tab if something fails. Every step is idempotent;
+   run setup again after fixing whatever it complained about.
+3. The Sharing tab says **Shared** with a green dot. Leave the window
+   closed; the service keeps running.
 
 Advanced engine settings are not exposed anywhere in BroLink: BroLink
 configures the engine itself.
 
 ## Slow streams: the network, or the encoder
 
-The **This PC** card has a **Network** line from `tailscale netcheck`. "Hard
-NAT with no UPnP" means a Mac on another network can only reach this PC
+The **This PC** section of the Sharing tab has a **Network** line from
+`tailscale netcheck`. "Hard NAT without UPnP" means a machine on another
+network can only reach this PC
 through a Tailscale relay, which adds a detour. What the Mac asks for is
 the same either way, so a relayed stream is laggier, not blurrier; the Mac
 shows the same thing as **Relayed via …** next to the PC. Turn UPnP (or NAT-PMP) on in the router, or forward a UDP port to
@@ -134,8 +136,8 @@ It supplies a display even when the physical monitor is off and works with BroLi
 bundled engine. Setup lists every screen size a Mac can ask for in the driver's
 settings file, and the engine switches the virtual display to the Mac's size at
 each connect, so there is nothing to choose in Windows Display settings. If the
-driver was installed after setup, run **Set up this PC** again; the setup card
-says when sizes are missing. Installing a display does not require pairing the
+driver was installed after setup, choose **Run setup again** on the Sharing
+tab; its setup list says when sizes are missing. Installing a display does not require pairing the
 Mac again.
 
 ## Using an engine you installed yourself
@@ -151,8 +153,9 @@ own engine; the API and config layout are the same.
 ## Gamepads
 
 The engine no longer installs the virtual controller driver (ViGEmBus) by
-itself. The **This PC** card shows whether it is present and offers
-**Install controller driver**; a reboot afterwards is recommended.
+itself. The **This PC** section of the Sharing tab shows whether it is
+present and offers **Install controller driver**; a reboot afterwards is
+recommended.
 
 ## Troubleshooting
 
@@ -160,22 +163,24 @@ itself. The **This PC** card shows whether it is present and offers
   switch to the size the Mac asked for. On a PC with the Virtual Display
   Driver, run setup again so that size is listed; a monitor only offers its
   own sizes, and the stream is scaled from the nearest.
-- **Orange "Needs setup" that will not clear**: read `setup.log`. The
+- **Amber "Needs setup" that will not clear**: open **Setup log** on the
+  Sharing tab, or read `setup.log`. The
   usual causes are the UAC prompt being dismissed, or a driver that refuses
   the wake keywords.
-- **The Mac lists the PC as online but with no BroLink Host**: the control
-  service is not running or the firewall rule is missing. Open BroLink Host
-  (it restarts the service) and run setup again.
+- **Other machines list the PC as online, but "BroLink isn't installed"**:
+  the control service is not running or the firewall rule is missing. Open
+  BroLink on the PC (it restarts the service) and choose **Run setup again**
+  on the Sharing tab.
 - **The Mac says the PC is asleep but it is on**: Tailscale's online flag
   lags by up to half a minute; Connect probes the PC directly and will work.
-- **Test wake on the Mac says the packet did not arrive**: the packet is
+- **Test waking it from this network says the packet did not arrive**: the packet is
   being sent but not delivered. From another network the PC's router has to
   forward UDP 9 to the PC's LAN address (give the PC a DHCP reservation so
   the address is stable). On the same network, check that Windows classes
   it as Private; a Public network drops the broadcast.
 - **Test wake passes but the PC does not wake**: the network path is fine
-  and Windows is the problem. Check the This PC card for "off" or "Fast
-  Startup on" and run setup again; for wake from power off, look for the
+  and Windows is the problem. Check **Wake-on-LAN** on the Sharing tab for
+  "Off" or "Fast Startup is on" and run setup again; for wake from power off, look for the
   firmware setting named above.
 
 ## Updates
@@ -206,8 +211,9 @@ automatic.
 
 The background service starts with Windows by default and sets that again
 at every start, so a PC nobody can reach in person comes back after a
-restart; the toggle in Settings is the only thing that turns it off.
-It also holds Windows awake while plugged in (same Settings card), because
+restart; **Start BroLink when you log in** on the Sharing tab is the only
+thing that turns it off. It also holds Windows awake while plugged in
+(**Keep this PC awake while plugged in**, same place), because
 a sleeping PC's Tailscale is asleep and a Mac on another network cannot
 wake it.
 The engine runs as a Windows service and streams the sign-in screen, so a

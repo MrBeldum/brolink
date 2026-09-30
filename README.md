@@ -15,16 +15,17 @@ machine answers only peers signed in to the same Tailscale account.
 
 ## How a session goes
 
-1. Open BroLink. Every machine on your Tailscale account is listed with
-   what it can do right now. **Share this machine** sets up the streaming
-   engine so others can Connect here.
+1. Open BroLink. **Machines** lists every machine on your Tailscale
+   account, with a dot and a line for what it can do right now. The
+   **Sharing** tab sets up the streaming engine so others can Connect here.
 2. Click **Connect**. If a Windows PC is asleep, BroLink wakes it and waits.
    The first time, it pairs by itself: the PIN goes to BroLink on that
    machine over Tailscale, which enters it for you.
 3. The desktop appears, full screen by default, and nothing else: the
    mouse is captured the moment you click the picture, as in a game, so
-   games that read raw mouse movement work. **Ctrl+Alt** is the host key,
-   as in a hypervisor: it frees the mouse and drops a toolbar over the
+   games that read raw mouse movement work. **Ctrl+Alt** (Control-Option
+   on a Mac) is the host key, as in a hypervisor: it frees the mouse and
+   drops a toolbar over the
    picture with the stream details, whether the path is direct or relayed,
    the mouse mode, a **Keys** menu for Ctrl+Alt+Del and friends and what the
    Command key does, stats, full screen, the PC's power menu, **Stream
@@ -46,7 +47,7 @@ machine answers only peers signed in to the same Tailscale account.
    [latest release](https://github.com/MrBeldum/brolink/releases/latest)
    and unzip it. Run `brolink-host.exe`, or `install-host.ps1` for
    shortcuts and start-at-logon.
-3. Click **Share this machine**. One administrator prompt installs the bundled
+3. On the **Sharing** tab, click **Set up as administrator**. One administrator prompt installs the bundled
    streaming engine as a Windows service (if none is installed), gives
    BroLink a login to it, opens the control port to your tailnet only,
    turns Fast Startup off and arms the network card for Wake-on-LAN.
@@ -76,8 +77,8 @@ open BroLink.app
 ```
 
 The `xattr` step is needed for a browser download because the app is
-ad-hoc signed rather than Developer-ID signed. Open BroLink and click
-**Share this machine** so a Windows PC (or another Mac) can Connect here;
+ad-hoc signed rather than Developer-ID signed. Open BroLink and set up
+sharing on the **Sharing** tab so a Windows PC (or another Mac) can Connect here;
 macOS will ask for Screen Recording the first time. Details, including the
 toolbar and keyboard behaviour, in [docs/MACOS.md](docs/MACOS.md).
 
@@ -108,7 +109,7 @@ from the Mac to every PC whose host reports an older version, over the same
 Tailscale-authenticated control API that can put the PC to sleep; the host
 verifies the digest, replaces its executable and restarts. That path
 updates only `brolink-host.exe`. The Windows zip on GitHub also contains
-the pinned engine archive for first-time **Set up this PC**; a host update
+the pinned engine archive for first-time setup; a host update
 does not install or migrate the engine. A PC that is asleep gets the host
 update the next time the Mac sees it. Nothing is downloaded on the PC, and
 no GitHub login is needed there.
@@ -147,8 +148,8 @@ and to the PC's public address.
 | Same network as the PC | works | works if the board's firmware allows wake from power off |
 | Elsewhere | needs the PC's router to forward UDP 9 to the PC, or a Tailscale subnet router on that network | same, and the firmware condition |
 
-**Test wake** in the PC menu on the Mac settles it for the network you are
-on: it sends the packet while the PC is awake and asks BroLink Host whether
+**Test waking it from this network** in a machine's **…** menu settles it for the network you are
+on: it sends the packet while the PC is awake and asks BroLink there whether
 it arrived. Setup on the PC takes care of Windows' side (Fast Startup off,
 the adapter's wake keywords, wake allowed in power management). Wired
 Ethernet is strongly preferred; most Wi-Fi adapters cannot wake a PC.
