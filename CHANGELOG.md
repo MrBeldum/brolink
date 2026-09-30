@@ -47,6 +47,11 @@ GitHub release notes, so each version gets a heading of the form
   on a Mac. The Mac served the file from a socket that macOS left
   non-blocking, so sending the executable stopped as soon as the network
   buffer filled and the PC rejected the truncated download.
+- **Share this machine** works on a Windows account whose folder has a
+  space in it ("C:\Users\Ada Lovelace"). The elevated setup was handed
+  that folder through PowerShell's Start-Process, which splits unquoted
+  arguments at spaces, so it received half a path and an unexpected
+  extra argument and failed.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.

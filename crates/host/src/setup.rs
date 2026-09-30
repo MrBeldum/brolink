@@ -573,15 +573,12 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         // UAC may run the helper as another administrator, whose profile
         // holds no host.toml: pass this user's folder so the engine login
         // and setup.log stay with the account that shares the machine.
-        let args = std::env::var_os("LOCALAPPDATA")
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| {
-                format!(
-                    "'--setup-elevated', '--local-app-data', '{}'",
-                    q(&dir.to_string_lossy())
-                )
-            })
-            .unwrap_or_else(|| "'--setup-elevated'".into());
+        let args = elevated_args(
+            std::env::var_os("LOCALAPPDATA")
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .as_deref(),
+        );
         let launch = format!(
             "$p = Start-Process -FilePath '{exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @({args}); if ($null -eq $p) {{ exit 1 }}; exit $p.ExitCode"
         );
@@ -615,6 +612,22 @@ pub(crate) fn powershell(script: &str) -> Result<String> {
         String::from_utf8_lossy(&out.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The `-ArgumentList` array for the elevated `--setup-elevated` run.
+/// Start-Process joins the elements with spaces and quotes none of them,
+/// so a folder with a space in it ("C:\Users\Ada Lovelace\...") has to
+/// carry its own double quotes or it arrives as two arguments. A trailing
+/// backslash would escape the closing quote, and a folder never needs one.
+#[cfg(any(windows, test))]
+fn elevated_args(local_app_data: Option<&str>) -> String {
+    match local_app_data {
+        Some(dir) => format!(
+            "'--setup-elevated', '--local-app-data', '\"{}\"'",
+            q(dir.trim_end_matches('\\'))
+        ),
+        None => "'--setup-elevated'".into(),
+    }
 }
 
 // Only the Windows setup path is compiled in a release build; tests use it everywhere.
@@ -826,6 +839,20 @@ mod tests {
         assert!(helper
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='));
+    }
+
+    #[test]
+    fn the_elevated_run_gets_the_whole_folder_as_one_argument() {
+        assert_eq!(elevated_args(None), "'--setup-elevated'");
+        assert_eq!(
+            elevated_args(Some(r"C:\Users\Ada Lovelace\AppData\Local")),
+            r#"'--setup-elevated', '--local-app-data', '"C:\Users\Ada Lovelace\AppData\Local"'"#
+        );
+        assert_eq!(
+            elevated_args(Some(r"C:\Users\O'Brien\AppData\Local\")),
+            r#"'--setup-elevated', '--local-app-data', '"C:\Users\O''Brien\AppData\Local"'"#,
+            "quote escaped for PowerShell, no trailing backslash before the quote"
+        );
     }
 
     #[test]
