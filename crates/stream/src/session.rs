@@ -546,7 +546,7 @@ unsafe extern "C" fn video_setup(
     _fps: c_int,
 ) -> c_int {
     let Some(inner) = current() else { return -1 };
-    match video::new_decoder(format, w as u32, h as u32) {
+    match video::new_decoder(format) {
         Ok(d) => {
             let mut st = inner.stats.lock();
             st.width = w as u32;

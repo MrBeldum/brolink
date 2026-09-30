@@ -7,7 +7,6 @@ use openh264::formats::YUVSource;
 
 pub struct OpenH264 {
     dec: openh264::decoder::Decoder,
-    uv: Vec<u8>,
 }
 
 impl OpenH264 {
@@ -17,7 +16,6 @@ impl OpenH264 {
         }
         Ok(Self {
             dec: openh264::decoder::Decoder::new()?,
-            uv: Vec::new(),
         })
     }
 }
@@ -30,7 +28,6 @@ impl Decoder for OpenH264 {
         let (w, h) = yuv.dimensions();
         let (ys, us, _) = yuv.strides();
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        interleave_uv(yuv.u(), yuv.v(), us, cw, ch, &mut self.uv);
         let mut frame = spare.unwrap_or_default();
         frame.width = w as u32;
         frame.height = h as u32;
@@ -41,8 +38,7 @@ impl Decoder for OpenH264 {
         for row in yuv.y().chunks(ys).take(h) {
             frame.y.extend_from_slice(&row[..w]);
         }
-        frame.uv.clear();
-        frame.uv.extend_from_slice(&self.uv);
+        interleave_uv(yuv.u(), yuv.v(), us, cw, ch, &mut frame.uv);
         Ok(Some(frame))
     }
 

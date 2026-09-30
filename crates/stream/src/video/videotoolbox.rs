@@ -3,8 +3,9 @@
 //!
 //! Each access unit arrives in Annex B. Parameter sets go into a format
 //! description; the slices are re-framed with 4-byte lengths (AVCC/HVCC) into
-//! one sample buffer and decoded synchronously, so the output callback runs
-//! on this thread before `decode` returns.
+//! one sample buffer and decoded synchronously; `decode` also waits out any
+//! frame the decoder held back, so the output callback has always run, on
+//! this thread, before `decode` returns.
 
 use super::{nal_units, Decoder, Frame};
 use anyhow::{anyhow, bail, Result};
@@ -139,6 +140,9 @@ extern "C" {
         frame_refcon: *mut c_void,
         info_flags_out: *mut u32,
     ) -> OSStatus;
+    fn VTDecompressionSessionWaitForAsynchronousFrames(
+        session: VTDecompressionSessionRef,
+    ) -> OSStatus;
     fn VTDecompressionSessionInvalidate(session: VTDecompressionSessionRef);
     fn VTDecompressionSessionCanAcceptFormatDescription(
         session: VTDecompressionSessionRef,
@@ -157,7 +161,6 @@ extern "C" {
 
 pub struct VideoToolbox {
     hevc: bool,
-    full_range: bool,
     hardware: bool,
     format: CMFormatDescriptionRef,
     session: VTDecompressionSessionRef,
@@ -169,14 +172,13 @@ pub struct VideoToolbox {
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
-    pub fn new(format: i32, _width: u32, _height: u32) -> Result<Self> {
+    pub fn new(format: i32) -> Result<Self> {
         let hevc = format & crate::ffi::VIDEO_FORMAT_MASK_H265 != 0;
         if !hevc && format & crate::ffi::VIDEO_FORMAT_MASK_H264 == 0 {
             bail!("unsupported video format {format:#x}");
         }
         Ok(Self {
             hevc,
-            full_range: false,
             hardware: false,
             format: ptr::null(),
             session: ptr::null(),
@@ -263,11 +265,8 @@ impl VideoToolbox {
 
     fn create_session(&mut self) -> Result<()> {
         unsafe {
-            let pixel_format: i32 = if self.full_range {
-                K_CV_PIXEL_FORMAT_420F
-            } else {
-                K_CV_PIXEL_FORMAT_420V
-            } as i32;
+            // The stream is limited range (`COLOR_RANGE_LIMITED`).
+            let pixel_format = K_CV_PIXEL_FORMAT_420V as i32;
             let number = CFNumberCreate(
                 ptr::null(),
                 K_CF_NUMBER_SINT32,
@@ -495,6 +494,13 @@ impl Decoder for VideoToolbox {
                 ptr::null_mut(),
             );
             CFRelease(sample);
+            // `decoded` lives on this stack frame and the callback writes
+            // through it. Synchronous decode calls it before returning, but
+            // a decoder may still hold a frame back; wait it out here so
+            // the callback can never run after this frame is gone.
+            if status == 0 {
+                VTDecompressionSessionWaitForAsynchronousFrames(self.session);
+            }
             let status = if status != 0 { status } else { decoded.status };
             if status != 0 {
                 // -12903 kVTInvalidSessionErr, -12911 kVTVideoDecoderMalfunctionErr
@@ -531,7 +537,7 @@ mod tests {
     fn decodes_visible_pixels_from_h264() {
         // 64x64, white top half and black bottom half, generated with OpenH264.
         let encoded = include_bytes!("../../tests/fixtures/gray-bars.h264");
-        let mut decoder = VideoToolbox::new(crate::ffi::VIDEO_FORMAT_H264, 64, 64).unwrap();
+        let mut decoder = VideoToolbox::new(crate::ffi::VIDEO_FORMAT_H264).unwrap();
         let frame = decoder
             .decode(encoded, true, None)
             .unwrap()

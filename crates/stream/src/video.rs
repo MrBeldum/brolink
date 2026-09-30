@@ -170,22 +170,20 @@ pub fn capabilities() -> i32 {
     }
 }
 
-pub fn new_decoder(format: i32, width: u32, height: u32) -> Result<Box<dyn Decoder>> {
+pub fn new_decoder(format: i32) -> Result<Box<dyn Decoder>> {
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(videotoolbox::VideoToolbox::new(
-            format, width, height,
-        )?))
+        Ok(Box::new(videotoolbox::VideoToolbox::new(format)?))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (width, height);
         Ok(Box::new(openh264::OpenH264::new(format)?))
     }
 }
 
 /// Split an Annex B byte stream into NAL units without their start codes.
-pub fn nal_units(data: &[u8]) -> Vec<&[u8]> {
+#[cfg(any(target_os = "macos", test))]
+fn nal_units(data: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
     let mut i = 0;
     while i + 3 <= data.len() {
@@ -211,7 +209,8 @@ pub fn nal_units(data: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Interleave I420 chroma planes into one NV12 UV plane.
-pub fn interleave_uv(
+#[cfg(any(not(target_os = "macos"), test))]
+fn interleave_uv(
     u: &[u8],
     v: &[u8],
     stride: usize,
