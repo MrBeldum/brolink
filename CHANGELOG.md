@@ -52,6 +52,12 @@ GitHub release notes, so each version gets a heading of the form
   that folder through PowerShell's Start-Process, which splits unquoted
   arguments at spaces, so it received half a path and an unexpected
   extra argument and failed.
+- The service log keeps what matters. Every machine that polled the
+  service was logged again each minute ("hermes (…) asked" was 2,707 of
+  the 2,810 lines in this Mac's `service.log`), and every change of the
+  nearest Tailscale relay region logged a network line. Each peer is now
+  logged when first seen, when its answer changes or after an hour away,
+  and the network line only when the NAT itself changes.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.

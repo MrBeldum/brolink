@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 const LOG_LINES: usize = 80;
 /// How long a `whois` answer is trusted before asking again.
 const AUTH_TTL: Duration = Duration::from_secs(60);
+/// How long an answer is remembered, so the same peer is not logged again.
+const AUTH_REMEMBER: Duration = Duration::from_secs(3600);
 const AUTH_CACHE_LIMIT: usize = 256;
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
@@ -492,14 +494,11 @@ impl Service {
             return false;
         }
         let now = Instant::now();
-        let cached = self
-            .auth
-            .lock()
-            .get(&ip)
-            .filter(|(at, _)| now - *at < AUTH_TTL)
-            .map(|(_, allowed)| *allowed);
-        if let Some(allowed) = cached {
-            return allowed;
+        let previous = self.auth.lock().get(&ip).copied();
+        if let Some((at, allowed)) = previous {
+            if now - at < AUTH_TTL {
+                return allowed;
+            }
         }
         // Copied out so the lock is not held across the `whois` call.
         let owner = match &*self.tailscale.lock() {
@@ -509,16 +508,21 @@ impl Service {
         let allowed = match tailscale::whois(ip) {
             Ok(w) => {
                 let allowed = owner.admits(&w);
-                self.log(format!(
-                    "{} ({}) asked{}",
-                    w.node.computed_name,
-                    w.user_profile.login_name,
-                    if allowed {
-                        ""
-                    } else {
-                        ": not this account, refused"
-                    }
-                ));
+                // Once per peer, and again if the answer changes or it has
+                // been away an hour: a Mac polling every few seconds used
+                // to put a line here every minute, 96% of a Mac's log.
+                if previous.map(|(_, a)| a) != Some(allowed) {
+                    self.log(format!(
+                        "{} ({}) asked{}",
+                        w.node.computed_name,
+                        w.user_profile.login_name,
+                        if allowed {
+                            ""
+                        } else {
+                            ": not this account, refused"
+                        }
+                    ));
+                }
                 allowed
             }
             Err(e) => {
@@ -527,7 +531,7 @@ impl Service {
             }
         };
         let mut cache = self.auth.lock();
-        cache.retain(|_, (at, _)| at.elapsed() < AUTH_TTL);
+        cache.retain(|_, (at, _)| at.elapsed() < AUTH_REMEMBER);
         if cache.len() >= AUTH_CACHE_LIMIT {
             if let Some(oldest) = cache
                 .iter()
