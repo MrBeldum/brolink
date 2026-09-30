@@ -30,7 +30,7 @@ const NETCHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 const PEER_RELAY_EVERY: Duration = Duration::from_secs(30);
 
 /// A machine on the tailnet BroLink can open, as far as this node can tell.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pc {
     pub node_id: String,
     pub name: String,
@@ -66,7 +66,7 @@ impl Pc {
 }
 
 /// A tailnet node tagged `tag:relay`: a candidate peer relay, never a PC.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Relay {
     pub name: String,
     pub ip: Option<Ipv4Addr>,
@@ -86,7 +86,7 @@ pub enum PeerRelayServers {
     Known(Vec<String>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Discovery {
     /// Why nothing can be probed, when Tailscale is down. The list then
     /// holds what was remembered.
@@ -110,9 +110,9 @@ pub struct Discovery {
 /// be woken.
 pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
     let nat: Arc<Mutex<Option<NatReport>>> = Arc::default();
-    spawn_netcheck(nat.clone(), ctx.clone());
+    spawn_netcheck(nat.clone());
     let servers: Arc<Mutex<PeerRelayServers>> = Arc::default();
-    spawn_peer_relay_probe(servers.clone(), ctx.clone());
+    spawn_peer_relay_probe(servers.clone());
     std::thread::spawn(move || {
         // Round trips per PC, newest last; the smallest of the last few is
         // the path's real round trip (a first connect also pays for the
@@ -134,21 +134,33 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
             scan.self_nat = nat.lock().clone();
             scan.peer_relay_servers = servers.lock().clone();
             learn(&scan);
+            let changed = listing_changed(&shared.lock(), &scan);
             *shared.lock() = scan;
-            ctx.request_repaint();
+            if changed {
+                ctx.request_repaint();
+            }
             std::thread::sleep(Duration::from_secs(3));
         }
     });
 }
 
-/// `tailscale netcheck` now and then, for [`Discovery::self_nat`].
-fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, ctx: egui::Context) {
+/// Whether a new scan shows the window anything new. Every scan has a new
+/// time; that alone is no reason to draw the window again.
+fn listing_changed(old: &Discovery, new: &Discovery) -> bool {
+    old.refreshed.is_none() != new.refreshed.is_none()
+        || *old
+            != (Discovery {
+                refreshed: old.refreshed,
+                ..new.clone()
+            })
+}
+
+/// `tailscale netcheck` now and then, for [`Discovery::self_nat`]. The next
+/// scan carries it to the window.
+fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>) {
     std::thread::spawn(move || loop {
         match tailscale::netcheck() {
-            Ok(n) => {
-                *slot.lock() = Some(n.report());
-                ctx.request_repaint();
-            }
+            Ok(n) => *slot.lock() = Some(n.report()),
             Err(e) => tracing::info!("netcheck: {e}"),
         }
         std::thread::sleep(NETCHECK_EVERY);
@@ -158,15 +170,14 @@ fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, ctx: egui::Context) {
 /// `tailscale debug peer-relay-servers`, at most once every 30 s, on its own
 /// thread so the scan loop and UI never wait on it. The command itself is
 /// bounded (see `tailscale::PEER_RELAY_SERVERS_TIMEOUT`). Any failure leaves
-/// the result `Unknown`, never a denial.
-fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, ctx: egui::Context) {
+/// the result `Unknown`, never a denial. The next scan carries it to the
+/// window.
+fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>) {
     std::thread::spawn(move || loop {
-        let result = match tailscale::peer_relay_servers() {
+        *slot.lock() = match tailscale::peer_relay_servers() {
             Ok(servers) => PeerRelayServers::Known(servers),
             Err(_) => PeerRelayServers::Unknown,
         };
-        *slot.lock() = result;
-        ctx.request_repaint();
         std::thread::sleep(PEER_RELAY_EVERY);
     });
 }
@@ -1037,6 +1048,34 @@ mod tests {
             Ok(tries)
         });
         assert_eq!(r.unwrap(), 2);
+    }
+
+    #[test]
+    fn only_a_scan_that_changes_something_redraws() {
+        let first = Discovery {
+            refreshed: Some(Instant::now()),
+            pcs: vec![Pc {
+                name: "Gaming-PC".into(),
+                online: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            listing_changed(&Discovery::default(), &first),
+            "the first scan"
+        );
+        let again = Discovery {
+            refreshed: Some(Instant::now() + Duration::from_secs(3)),
+            ..first.clone()
+        };
+        assert!(!listing_changed(&first, &again), "only the time moved");
+        let mut asleep = again.clone();
+        asleep.pcs[0].online = false;
+        assert!(listing_changed(&first, &asleep));
+        let mut relay = again;
+        relay.peer_relay_servers = PeerRelayServers::Known(vec!["100.64.0.40".into()]);
+        assert!(listing_changed(&first, &relay));
     }
 
     #[test]
