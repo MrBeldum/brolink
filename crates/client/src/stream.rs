@@ -134,6 +134,10 @@ pub struct View {
     /// until both keys are up. `release_all` clears `Held.modifiers`, so
     /// deriving "was down" from that retriggered the toggle every frame.
     capture_chord_held: bool,
+    /// A video problem to show in place of the session's, for rendering
+    /// the recovery overlay without a broken capture.
+    #[cfg(test)]
+    problem: Option<String>,
 }
 
 impl Default for View {
@@ -156,6 +160,8 @@ impl Default for View {
             hint_since: None,
             pastes_seen: 0,
             capture_chord_held: false,
+            #[cfg(test)]
+            problem: None,
         }
     }
 }
@@ -278,6 +284,11 @@ impl View {
                 Vec2::new(screen.width(), self.bar_h),
             ));
         }
+        #[cfg(test)]
+        let stats = brolink_stream::Stats {
+            video_problem: stats.video_problem.clone().or(self.problem.clone()),
+            ..stats
+        };
         self.toasts(
             ctx,
             screen,
@@ -867,38 +878,39 @@ impl View {
                     });
                 }
                 if let Some(problem) = video_problem {
+                    let help = env.video_help.as_ref();
+                    // Once the machine has answered, "asking why" is stale.
+                    let headline = match help {
+                        Some(_) => problem.trim_end_matches("Asking the PC why…").trim_end(),
+                        None => problem,
+                    };
                     ui::overlay_frame().show(ui, |ui| {
                         ui.set_width(w);
                         ui.spacing_mut().item_spacing.y = space::XS;
                         ui.add(
                             egui::Label::new(
-                                RichText::new(problem)
+                                RichText::new(headline)
                                     .font(theme::medium(theme::text::BODY))
                                     .color(P.text),
                             )
                             .wrap(),
                         );
                         // The machine's own answer, once it has given one.
-                        if let Some(help) = env.video_help.as_ref() {
+                        if let Some(help) = help {
                             ui::muted(ui, &help.message);
                         }
                         ui.add_space(space::XS);
                         ui.horizontal(|ui| {
+                            if let Some(h) = help.filter(|h| h.hdr_is_on) {
+                                let label = format!("Turn off {} there", h.mode);
+                                if h.busy {
+                                    ui::empty_state(ui, &format!("Turning {} off…", h.mode), true);
+                                } else if ui::primary_button(ui, &label).clicked() {
+                                    actions.push(Action::TurnOffHdr);
+                                }
+                            }
                             if ui::secondary_button(ui, "Restart stream").clicked() {
                                 actions.push(Action::RestartStream);
-                            }
-                            let Some(help) = env.video_help.as_ref() else {
-                                return;
-                            };
-                            if !help.hdr_is_on {
-                                return;
-                            }
-                            if help.busy {
-                                ui::empty_state(ui, &format!("Turning {} off…", help.mode), true);
-                            } else if ui::ghost_button(ui, &format!("Turn off {} there", help.mode))
-                                .clicked()
-                            {
-                                actions.push(Action::TurnOffHdr);
                             }
                         });
                     });
@@ -1762,6 +1774,23 @@ pub(crate) mod tests {
                 None,
             ),
             (
+                "black-picture",
+                View {
+                    problem: Some("The PC is sending a black picture: the connection and the video are healthy, but every frame is blank. Asking the PC why…".into()),
+                    ..View::default()
+                },
+                Extra {
+                    video_help: Some(crate::display::Help {
+                        message: "The PC's desktop is composed in HDR. The capture converts it to an ordinary picture, and on this PC that conversion comes out black. Turning HDR off fixes it.".into(),
+                        hdr_is_on: true,
+                        mode: "HDR".into(),
+                        busy: false,
+                    }),
+                    ..windows()
+                },
+                None,
+            ),
+            (
                 "toasts",
                 {
                     let mut v = View::default();
@@ -1806,6 +1835,7 @@ pub(crate) mod tests {
                         .collect(),
                     poor: view.poor,
                     poor_hinted: view.poor_hinted,
+                    problem: view.problem.clone(),
                     ..View::default()
                 };
                 let mut h = harness_with(size, ppp, true, fixture(view, extra.clone()));
