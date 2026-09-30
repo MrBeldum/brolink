@@ -48,7 +48,6 @@ pub struct Player {
     keep: usize,
     packets: u64,
     lost: u64,
-    decoded: u64,
     undecodable: u64,
 }
 
@@ -134,7 +133,6 @@ impl Player {
             keep,
             packets: 0,
             lost: 0,
-            decoded: 0,
             undecodable: 0,
         })
     }
@@ -173,7 +171,6 @@ impl Player {
             }
             return;
         }
-        self.decoded += n as u64;
         let samples = &self.pcm[..n as usize * self.channels];
         let mut q = self.queue.lock();
         q.extend(samples);
@@ -185,16 +182,6 @@ impl Player {
 
     pub fn output(&self) -> Output {
         self.output.lock().clone()
-    }
-
-    /// Packets received from the PC, lost ones not counted.
-    pub fn packets(&self) -> u64 {
-        self.packets
-    }
-
-    /// Samples per channel decoded so far.
-    pub fn decoded(&self) -> u64 {
-        self.decoded
     }
 
     /// Frames the output device has taken so far.
@@ -547,12 +534,12 @@ mod tests {
         for _ in 0..10 {
             p.push(&packet);
         }
-        assert_eq!(p.packets(), 10);
-        assert_eq!(p.decoded(), 10 * 480);
+        assert_eq!(p.packets, 10);
+        assert_eq!(p.queue.lock().len(), 10 * 480 * 2, "480 stereo frames each");
         // A lost packet is concealed at the stream's frame size.
         p.push(&[]);
-        assert_eq!(p.decoded(), 11 * 480);
-        assert_eq!(p.undecodable, 0);
+        assert_eq!(p.queue.lock().len(), 11 * 480 * 2);
+        assert_eq!((p.lost, p.undecodable), (1, 0));
         // The queue never grows past the cap, and never by a partial frame.
         for _ in 0..100 {
             p.push(&packet);

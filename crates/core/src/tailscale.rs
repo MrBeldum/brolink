@@ -192,17 +192,6 @@ impl Status {
             .get(&self.self_node.user_id.to_string())
             .map(|u| u.login_name.as_str())
     }
-    /// Peers running Windows. Relay-tagged nodes are omitted even when they
-    /// report Windows. Prefer [`machine_peers`] for the streamable list.
-    pub fn windows_peers(&self) -> Vec<&Node> {
-        let mut v: Vec<&Node> = self
-            .peer
-            .values()
-            .filter(|n| n.is_windows() && !n.is_relay())
-            .collect();
-        v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
-        v
-    }
     /// Every tailnet peer that can share a desktop: any OS, minus `tag:relay`
     /// nodes that exist only to carry packets. Sorted by hostname.
     pub fn machine_peers(&self) -> Vec<&Node> {
@@ -487,6 +476,14 @@ fn run_limited(cmd: &mut Command, limit: Duration) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// The Windows machines in the list, as the tests below look at them.
+    fn windows_peers(st: &Status) -> Vec<&Node> {
+        st.machine_peers()
+            .into_iter()
+            .filter(|n| n.is_windows())
+            .collect()
+    }
+
     const SAMPLE: &str = r#"{
       "Version": "1.102.3", "BackendState": "Running",
       "Self": {"ID": "nSELF", "HostName": "Gaming-PC", "DNSName": "gaming-pc.example.ts.net.", "OS": "windows",
@@ -511,7 +508,7 @@ mod tests {
         assert!(st.running());
         assert_eq!(st.self_node.ipv4(), Some("100.64.0.10".parse().unwrap()));
         assert_eq!(st.self_login(), Some("user@example.com"));
-        let pcs = st.windows_peers();
+        let pcs = windows_peers(&st);
         assert_eq!(
             pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
             ["Den", "Gaming-PC-2", "Office"]
@@ -580,7 +577,7 @@ mod tests {
     fn a_stopped_daemon_is_not_running() {
         let st = parse_status(r#"{"BackendState":"Stopped"}"#).unwrap();
         assert!(!st.running());
-        assert!(st.windows_peers().is_empty());
+        assert!(windows_peers(&st).is_empty());
         assert_eq!(st.self_login(), None);
     }
 
@@ -634,7 +631,7 @@ mod tests {
         )
         .unwrap();
 
-        let pcs = st.windows_peers();
+        let pcs = windows_peers(&st);
         assert_eq!(
             pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
             ["Gaming-PC", "tagged-pc"],

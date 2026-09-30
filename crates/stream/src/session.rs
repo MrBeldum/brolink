@@ -360,33 +360,6 @@ impl Session {
             inner: self.inner.clone(),
         }
     }
-
-    pub fn mouse_move(&self, dx: i16, dy: i16) {
-        self.input().mouse_move(dx, dy);
-    }
-
-    pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
-        self.input().mouse_position(x, y, width, height);
-    }
-
-    /// `button` is one of `ffi::BUTTON_*`.
-    pub fn mouse_button(&self, button: c_int, down: bool) {
-        self.input().mouse_button(button, down);
-    }
-
-    /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
-    pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
-        self.input().key(vk, down, modifiers);
-    }
-
-    pub fn text(&self, text: &str) {
-        self.input().text(text);
-    }
-
-    /// Vertical and horizontal scroll in 1/120ths of a wheel click.
-    pub fn scroll(&self, vertical: i16, horizontal: i16) {
-        self.input().scroll(vertical, horizontal);
-    }
 }
 
 impl Drop for Session {
@@ -1060,7 +1033,9 @@ mod real {
                 // raw input sees continuous relative motion. Watch the PC's
                 // cursor (GetCursorPos) to confirm the relative injection lands.
                 let phase = (start.elapsed().as_millis() / 400) % 2;
-                session.mouse_move(if phase == 0 { 40 } else { -40 }, 0);
+                session
+                    .input()
+                    .mouse_move(if phase == 0 { 40 } else { -40 }, 0);
             }
             if let Some(f) = frames.take() {
                 if frames.seq() % 60 == 1 {

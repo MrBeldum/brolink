@@ -191,17 +191,19 @@ pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
     )
 }
 
-/// Accept forever, with a bounded number of active connections. `handler` sees the peer
-/// address so it can decide who is allowed to ask.
-pub fn serve<F>(listener: TcpListener, handler: F)
+/// [`serve_with_peer_check`] for everyone, for the tests.
+#[cfg(test)]
+fn serve<F>(listener: TcpListener, handler: F)
 where
     F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
 {
     serve_with_peer_check(listener, |_| true, handler);
 }
 
-/// Authorize the peer before reading headers or allocating a request body.
-/// The check runs in a bounded connection worker, so it may perform I/O.
+/// Accept forever, with a bounded number of active connections. `authorize`
+/// sees the peer before its headers are read or a body is allocated; it
+/// runs in the connection's worker, so it may do I/O. `handler` sees the
+/// peer too, so it can decide per route.
 pub fn serve_with_peer_check<A, F>(listener: TcpListener, authorize: A, handler: F)
 where
     A: Fn(SocketAddr) -> bool + Send + Sync + 'static,

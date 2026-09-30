@@ -208,10 +208,8 @@ impl<'a> Client<'a> {
         })
     }
 
-    /// The Moonlight pairing handshake. `pending` is called once the host is
-    /// holding our first request and waiting for someone to enter `pin` on
-    /// its side. On success the host certificate is pinned for the later
-    /// HTTPS calls and returned.
+    /// [`Client::pair_cancellable`] without the cancel, for the live tests.
+    #[cfg(test)]
     pub fn pair(
         &mut self,
         pin: &str,
@@ -224,7 +222,11 @@ impl<'a> Client<'a> {
         })
     }
 
-    /// Like `pair`, but the PIN callback can abort the outstanding socket read.
+    /// The Moonlight pairing handshake. `pending` is called once the host is
+    /// holding our first request and waiting for someone to enter `pin` on
+    /// its side; it returns `true` to cancel, which aborts that request. On
+    /// success the host certificate is pinned for the later HTTPS calls and
+    /// returned.
     pub fn pair_cancellable(
         &mut self,
         pin: &str,
