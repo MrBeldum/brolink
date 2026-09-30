@@ -340,19 +340,6 @@ pub fn netcheck() -> Result<NetCheck> {
 }
 
 /// The three-letter code of a DERP region, as `tailscale status` prints it.
-/// True for loopback, RFC 1918, or Tailscale's CGNAT range (`100.64/10`).
-/// BroLink never rides the raw internet, so these addresses are a LAN as
-/// far as the stream protocol is concerned.
-pub fn overlay_or_lan(ip: Ipv4Addr) -> bool {
-    if ip.is_loopback() || ip.is_private() {
-        return true;
-    }
-    // 100.64.0.0/10 (shared address space). `Ipv4Addr::is_shared` is not
-    // stable on the toolchain BroLink pins.
-    let o = ip.octets();
-    o[0] == 100 && o[1] >= 64 && o[1] <= 127
-}
-
 pub fn derp_code(region: i32) -> &'static str {
     match region {
         1 => "nyc",
@@ -540,10 +527,6 @@ mod tests {
         );
         assert_eq!(st.peer["nodekey:a"].os_label(), "macOS");
         assert_eq!(st.peer["nodekey:b"].os_label(), "Windows");
-        assert!(overlay_or_lan("100.64.0.10".parse().unwrap()));
-        assert!(overlay_or_lan("192.168.1.10".parse().unwrap()));
-        assert!(overlay_or_lan("127.0.0.1".parse().unwrap()));
-        assert!(!overlay_or_lan("8.8.8.8".parse().unwrap()));
         assert_eq!(
             pcs[2].ipv4(),
             Some("100.64.0.30".parse().unwrap()),

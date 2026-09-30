@@ -2124,7 +2124,6 @@ mod snapshots {
                 fps: 30,
                 bitrate_kbps: 4000,
                 hevc: true,
-                remote: true,
             },
             [0; 16],
             [0; 16],

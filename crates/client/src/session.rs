@@ -641,9 +641,9 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
                 tracing::warn!("could not forget the PC's old certificate: {save_error:#}");
             }
             client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
-            retry(8, || client.server_info())?
+            retry(8, &c.progress, generation, || client.server_info())?
         }
-        Err(_) => retry(8, || client.server_info())?,
+        Err(_) => retry(8, &c.progress, generation, || client.server_info())?,
     };
     if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
@@ -727,7 +727,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         let _ = client.quit();
         bail!("cancelled");
     }
-    let hevc = settings.codec != Codec::H264 && info.codec_mode_support & 0x0F00 != 0;
+    let hevc = wants_hevc(settings.codec, info.codec_mode_support);
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = c.ctx.clone();
@@ -745,7 +745,6 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             fps,
             bitrate_kbps: settings.bitrate_kbps,
             hevc,
-            remote: false,
         },
         ri_key,
         ri_iv,
@@ -778,16 +777,37 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     Ok(())
 }
 
-fn retry<T>(times: u32, mut f: impl FnMut() -> Result<T>) -> Result<T> {
-    let mut last = None;
-    for _ in 0..times {
+/// HEVC when the settings allow it, the PC can encode it (Sunshine's
+/// `ServerCodecModeSupport` HEVC bits) and this machine can decode it.
+/// Windows and Linux decode H.264 only, whatever the PC offers.
+fn wants_hevc(codec: Codec, server_codecs: i32) -> bool {
+    const SCM_HEVC_MASK: i32 = 0x0F00;
+    codec != Codec::H264
+        && server_codecs & SCM_HEVC_MASK != 0
+        && brolink_stream::video::supported_formats() & brolink_stream::ffi::VIDEO_FORMAT_MASK_H265
+            != 0
+}
+
+/// `f` until it succeeds, `times` tries at most, giving up early once the
+/// attempt is cancelled.
+fn retry<T>(
+    times: u32,
+    progress: &Mutex<Progress>,
+    generation: u64,
+    mut f: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut last = anyhow!("not tried");
+    for attempt in 1..=times {
         match f() {
             Ok(v) => return Ok(v),
-            Err(e) => last = Some(e),
+            Err(e) => last = e,
+        }
+        if attempt == times || stale(progress, generation) {
+            break;
         }
         std::thread::sleep(Duration::from_millis(700));
     }
-    Err(last.unwrap())
+    Err(last)
 }
 
 /// Hand the PIN to BroLink Host on the PC, which types it into Sunshine. If
@@ -869,8 +889,6 @@ pub fn wake_only(pc: &Pc) -> Result<usize> {
 mod tests {
     use super::*;
 
-    /// Against BroLink Host running on this machine: the packet goes out on
-    /// the LAN and the host reports it. `cargo test -p brolink-client wake_test_real -- --ignored`
     #[test]
     fn update_reservation_blocks_connect_in_every_idle_state() {
         for step in [Step::Idle, Step::Ended { error: None }] {
@@ -897,6 +915,8 @@ mod tests {
         }
     }
 
+    /// Against BroLink Host running on this machine: the packet goes out on
+    /// the LAN and the host reports it. `cargo test -p brolink-client wake_test_real -- --ignored`
     #[test]
     #[ignore = "needs BroLink Host running on this machine"]
     fn wake_test_real() {
@@ -979,6 +999,44 @@ mod tests {
             );
         }
         assert!(d.error.is_some() || !d.login.is_empty());
+    }
+
+    #[test]
+    fn hevc_needs_the_setting_the_pc_and_this_decoder() {
+        let hevc_pc = 0x0101;
+        assert!(!wants_hevc(Codec::H264, hevc_pc));
+        assert!(!wants_hevc(Codec::Auto, 0x0001), "an H.264-only PC");
+        assert_eq!(
+            wants_hevc(Codec::Auto, hevc_pc),
+            cfg!(target_os = "macos"),
+            "only VideoToolbox decodes HEVC here"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_retry_stops_at_once() {
+        let progress = Mutex::new(Progress {
+            generation: 3,
+            ..Default::default()
+        });
+        let mut tries = 0;
+        let r: Result<()> = retry(8, &progress, 3, || {
+            tries += 1;
+            progress.lock().cancel = true;
+            bail!("the PC is not answering")
+        });
+        assert_eq!(tries, 1);
+        assert_eq!(r.unwrap_err().to_string(), "the PC is not answering");
+        progress.lock().cancel = false;
+        let mut tries = 0;
+        let r = retry(3, &progress, 3, || {
+            tries += 1;
+            if tries < 2 {
+                bail!("not yet")
+            }
+            Ok(tries)
+        });
+        assert_eq!(r.unwrap(), 2);
     }
 
     #[test]

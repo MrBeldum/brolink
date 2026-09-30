@@ -30,6 +30,12 @@ GitHub release notes, so each version gets a heading of the form
 - `brolink-host.exe`'s version details (Explorer's Details tab) named the
   wrong licence, MIT; they now say GPL-3.0-or-later, the licence BroLink
   and moonlight-common-c are under.
+- Cancel stops a connection attempt straight away while the PC is not
+  answering. The pairing check retried eight times regardless, which could
+  hold the window on "Checking pairing…" for most of a minute after Cancel.
+- A Windows or Linux viewer no longer calls its stream HEVC: those decode
+  H.264 only, and the toolbar named the codec the PC could offer instead
+  of the one in use.
 
 ## 4.0.2 (2026-09-22)
 

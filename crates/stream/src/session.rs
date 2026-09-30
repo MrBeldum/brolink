@@ -63,8 +63,6 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     /// Ask for HEVC when both sides can; otherwise H.264.
     pub hevc: bool,
-    /// The PC is not on this LAN: smaller packets, remote pacing.
-    pub remote: bool,
 }
 
 /// What `Session::start` needs from `/serverinfo` and `/launch`.
@@ -448,11 +446,6 @@ fn sunshine_encoder_kbps(request: u64) -> u64 {
     kbps -= SUNSHINE_AUDIO_KBPS.min(kbps / 5);
     kbps -= SUNSHINE_CONTROL_KBPS.min(kbps / 10);
     kbps
-}
-
-/// Tailscale (and any RFC 1918 path) is a LAN to the stream protocol.
-pub fn lan_like_stream(ip: std::net::Ipv4Addr) -> bool {
-    brolink_core::tailscale::overlay_or_lan(ip)
 }
 
 fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: [u8; 16]) {
@@ -969,9 +962,8 @@ mod real {
         let fps = number("BROLINK_TEST_FPS", 60);
         let bitrate_kbps = number("BROLINK_TEST_BITRATE_KBPS", 10_000);
         let seconds = number("BROLINK_TEST_SECONDS", 12);
-        let remote = std::env::var_os("BROLINK_TEST_REMOTE").is_some();
         assert!(width > 0 && height > 0 && fps > 0 && bitrate_kbps > 0 && seconds >= 12);
-        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps remote={remote} duration={seconds}s");
+        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps duration={seconds}s");
         let dir = std::env::var_os("BROLINK_TEST_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("brolink-pair-test"));
@@ -1043,7 +1035,6 @@ mod real {
                 fps,
                 bitrate_kbps,
                 hevc: std::env::var_os("BROLINK_TEST_HEVC").is_some(),
-                remote,
             },
             ri_key,
             ri_iv,
