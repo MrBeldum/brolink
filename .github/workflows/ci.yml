@@ -24,6 +24,34 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      # The setup script is generated, so only a dump of it can be parsed.
+      # Every plan shape, with names that need quoting, through the parser
+      # of the Windows PowerShell that runs it; plus the shipped scripts.
+      - name: PowerShell scripts parse
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:BROLINK_DUMP_EXE = "C:\Users\O'Brien `$lab\AppData\Local\BroLink\brolink-host.exe"
+          $env:BROLINK_DUMP_ADAPTER = "Ethernet 'Realtek' `"2`" `$(x)"
+          $env:BROLINK_DUMP_ADAPTER_DESC = "Realtek PCIe GbE (`"x`")"
+          $files = @('scripts\install-host.ps1', 'crates\host\windows\take-over-engine.ps1')
+          foreach ($migrate in '0', '1') {
+            foreach ($dry in '0', '1') {
+              $out = Join-Path $env:RUNNER_TEMP "setup-$migrate$dry.ps1"
+              $env:BROLINK_DUMP_SETUP_SCRIPT = $out
+              $env:BROLINK_DUMP_MIGRATE = $migrate
+              $env:BROLINK_DUMP_DRY_RUN = $dry
+              cargo test -q -p brolink-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
+              if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
+              $files += $out
+            }
+          }
+          foreach ($f in $files) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Host; throw "$f does not parse" }
+            Write-Host "parses: $f"
+          }
       - name: release build
         run: cargo build --workspace --release
       - uses: actions/upload-artifact@v4
@@ -42,9 +70,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy
-        run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client -p brolink-host --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test -p brolink-core -p brolink-stream -p brolink-client -p brolink-host
+        run: cargo test --workspace
       - name: release app
         run: cargo build --release -p brolink-host --target aarch64-apple-darwin
       - name: bundle
@@ -59,11 +87,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: native deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang nasm pkg-config libssl-dev libasound2-dev libpulse-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang nasm pkg-config libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: clippy
-        run: cargo clippy -p brolink-core -p brolink-stream -p brolink-client -p brolink-host --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test -p brolink-core -p brolink-stream -p brolink-client -p brolink-host
+        run: cargo test --workspace
       - name: release host
         run: cargo build --release -p brolink-host
 
