@@ -68,6 +68,16 @@ pub struct Status {
     pub self_node: Node,
     pub peer: BTreeMap<String, Node>,
     pub user: BTreeMap<String, User>,
+    /// The tailnet this machine is in. Absent before Tailscale 1.26.
+    pub current_tailnet: Option<Tailnet>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct Tailnet {
+    /// The owner's login for a personal tailnet ("ada@example.com"), the
+    /// domain for an organisation's ("example.com").
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -712,6 +722,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.len(), 1048576);
+    }
+
+    #[test]
+    fn the_tailnet_name_is_read_when_present() {
+        let st = parse_status(
+            r#"{"BackendState":"Running","CurrentTailnet":{"Name":"user@example.com","MagicDNSSuffix":"tail0.ts.net"}}"#,
+        )
+        .unwrap();
+        assert_eq!(st.current_tailnet.unwrap().name, "user@example.com");
+        assert!(parse_status(SAMPLE).unwrap().current_tailnet.is_none());
     }
 
     #[test]

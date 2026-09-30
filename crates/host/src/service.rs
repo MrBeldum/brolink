@@ -1,8 +1,13 @@
 //! The background control service: what a Mac on the tailnet talks to.
 //!
 //! One TCP listener on every interface, one rule for who gets an answer:
-//! loopback (the host's own control panel) or a tailnet address that
-//! `tailscale whois` recognises. Everyone else gets a 403 and nothing more.
+//! loopback (the host's own control panel), or a tailnet machine that
+//! `tailscale whois` says belongs to the account this one is signed in as.
+//! A tagged machine (the relay VPS) belongs to no account, so it answers
+//! the members of its own tailnet. Everyone else gets a 403 and nothing
+//! more: a machine shared in from someone else's tailnet can reach the
+//! port, but may not pair, sleep the PC, read its clipboard or push it an
+//! executable.
 
 use crate::clipboard;
 use crate::config::HostConfig;
@@ -43,7 +48,8 @@ pub struct Service {
     install: Mutex<Option<Install>>,
     streamer: Mutex<Streamer>,
     log: Mutex<VecDeque<String>>,
-    auth: Mutex<HashMap<IpAddr, (Instant, Option<u64>)>>,
+    /// `whois` answers for recent peers: when, and whether they may ask.
+    auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -469,18 +475,14 @@ impl Service {
         }
     }
 
-    /// Loopback is the control panel. A tailnet peer is anyone `whois`
-    /// recognises: user machines and `tag:relay` nodes share a tailnet but
-    /// not a Tailscale user id, and a VPS desktop on the relay box has to
-    /// accept the Macs that found it.
+    /// Loopback is the control panel; a tailnet peer must pass
+    /// [`Owner::admits`]. A `whois` answer is remembered for [`AUTH_TTL`],
+    /// a refusal included; a failed `whois` is not remembered.
     fn authorized(&self, ip: IpAddr) -> bool {
         if ip.is_loopback() {
             return true;
         }
         if !is_tailnet_ip(ip) {
-            return false;
-        }
-        if self.tailscale.lock().is_err() {
             return false;
         }
         let now = Instant::now();
@@ -489,41 +491,48 @@ impl Service {
             .lock()
             .get(&ip)
             .filter(|(at, _)| now - *at < AUTH_TTL)
-            .map(|(_, u)| *u);
-        let user = match cached {
-            Some(u) => u,
-            None => {
-                let u = match tailscale::whois(ip) {
-                    Ok(w) => {
-                        self.log(format!(
-                            "{} ({}) asked",
-                            w.node.computed_name, w.user_profile.login_name
-                        ));
-                        Some(w.user_profile.id)
+            .map(|(_, allowed)| *allowed);
+        if let Some(allowed) = cached {
+            return allowed;
+        }
+        // Copied out so the lock is not held across the `whois` call.
+        let owner = match &*self.tailscale.lock() {
+            Ok(st) => Owner::of(st),
+            Err(_) => return false,
+        };
+        let allowed = match tailscale::whois(ip) {
+            Ok(w) => {
+                let allowed = owner.admits(&w);
+                self.log(format!(
+                    "{} ({}) asked{}",
+                    w.node.computed_name,
+                    w.user_profile.login_name,
+                    if allowed {
+                        ""
+                    } else {
+                        ": not this account, refused"
                     }
-                    Err(e) => {
-                        self.log(format!("whois {ip}: {e}"));
-                        None
-                    }
-                };
-                let mut cache = self.auth.lock();
-                cache.retain(|_, (at, _)| at.elapsed() < AUTH_TTL);
-                if cache.len() >= AUTH_CACHE_LIMIT {
-                    if let Some(oldest) = cache
-                        .iter()
-                        .min_by_key(|(_, (at, _))| *at)
-                        .map(|(ip, _)| *ip)
-                    {
-                        cache.remove(&oldest);
-                    }
-                }
-                if u.is_some() {
-                    cache.insert(ip, (Instant::now(), u));
-                }
-                u
+                ));
+                allowed
+            }
+            Err(e) => {
+                self.log(format!("whois {ip}: {e}"));
+                return false;
             }
         };
-        user.is_some()
+        let mut cache = self.auth.lock();
+        cache.retain(|_, (at, _)| at.elapsed() < AUTH_TTL);
+        if cache.len() >= AUTH_CACHE_LIMIT {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(ip, _)| *ip)
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(ip, (Instant::now(), allowed));
+        allowed
     }
 
     fn handle(&self, peer: SocketAddr, req: &Request) -> Response {
@@ -781,6 +790,56 @@ pub fn describe_nat(n: &NatReport) -> String {
     }
 }
 
+/// Whose machine this is, for deciding who may use the control API.
+#[derive(Debug, Clone, PartialEq)]
+struct Owner {
+    /// The Tailscale user this machine is signed in as; for a tagged
+    /// machine, Tailscale's shared "tagged-devices" user.
+    user: u64,
+    /// The machine carries ACL tags, so no person owns it.
+    tagged: bool,
+    /// `CurrentTailnet.Name`: the owner's login for a personal tailnet,
+    /// the domain for an organisation's.
+    tailnet: String,
+}
+
+impl Owner {
+    fn of(st: &tailscale::Status) -> Self {
+        Self {
+            user: st.self_node.user_id,
+            tagged: !st.self_node.tags.is_empty(),
+            tailnet: st
+                .current_tailnet
+                .as_ref()
+                .map(|t| t.name.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The same account may ask. A tagged machine has no account of its
+    /// own, so it takes the members of its tailnet: the owner of a
+    /// personal tailnet, the users of an organisation's domain. A machine
+    /// shared in from another tailnet is neither, even though `whois`
+    /// knows it and the tailnet's rules let it reach this port.
+    fn admits(&self, peer: &tailscale::WhoIs) -> bool {
+        let user = peer.user_profile.id;
+        if user == 0 {
+            return false;
+        }
+        if user == self.user {
+            return true;
+        }
+        if !self.tagged || self.tailnet.is_empty() {
+            return false;
+        }
+        let login = peer.user_profile.login_name.as_str();
+        login.eq_ignore_ascii_case(&self.tailnet)
+            || login
+                .rsplit_once('@')
+                .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(&self.tailnet))
+    }
+}
+
 /// True when a service answers on loopback.
 pub fn service_alive() -> bool {
     http::request(
@@ -880,6 +939,72 @@ mod tests {
         assert!(is_tailnet_ip("fd7a:115c:a1e0::9e2a:381c".parse().unwrap()));
         assert!(!is_tailnet_ip("8.8.8.8".parse().unwrap()));
         assert!(!is_tailnet_ip("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    fn whois(id: u64, login: &str) -> tailscale::WhoIs {
+        tailscale::WhoIs {
+            user_profile: tailscale::User {
+                id,
+                login_name: login.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The shapes of a real tailnet: a PC and a Mac signed in as one
+    /// person, a relay VPS tagged `tag:relay`, and a friend's machine
+    /// shared in from their own tailnet.
+    #[test]
+    fn only_the_account_or_for_a_tagged_machine_its_tailnet_may_ask() {
+        const ADA: u64 = 21;
+        const TAGGED: u64 = 18;
+        let status = |user: u64, tags: &str| {
+            tailscale::parse_status(&format!(
+                r#"{{"BackendState":"Running","Self":{{"UserID":{user},"Tags":[{tags}]}},
+                    "CurrentTailnet":{{"Name":"ada@example.com"}}}}"#
+            ))
+            .unwrap()
+        };
+        let mac = whois(ADA, "ada@example.com");
+        let relay = whois(TAGGED, "tagged-devices");
+        let friend = whois(77, "bob@example.net");
+
+        let pc = Owner::of(&status(ADA, ""));
+        assert!(!pc.tagged);
+        assert!(pc.admits(&mac), "the owner's Mac");
+        assert!(
+            !pc.admits(&friend),
+            "a shared-in machine may not pair, sleep or update the PC"
+        );
+        assert!(
+            !pc.admits(&relay),
+            "an internet-facing relay may not push the PC an executable"
+        );
+        assert!(!pc.admits(&whois(0, "")), "whois without a user");
+
+        let vps = Owner::of(&status(TAGGED, r#""tag:relay""#));
+        assert!(vps.tagged);
+        assert!(vps.admits(&mac), "a tagged VPS serves its tailnet's owner");
+        assert!(
+            vps.admits(&relay),
+            "and machines tagged in the same tailnet"
+        );
+        assert!(!vps.admits(&friend));
+
+        // An organisation's tailnet is named after its domain.
+        let org = Owner {
+            tailnet: "example.com".into(),
+            ..vps.clone()
+        };
+        assert!(org.admits(&whois(5, "ada@EXAMPLE.com")));
+        assert!(!org.admits(&whois(6, "eve@example.com.evil")));
+        // Without a tailnet name a tagged machine takes nobody but its kind.
+        let unnamed = Owner {
+            tailnet: String::new(),
+            ..vps
+        };
+        assert!(!unnamed.admits(&mac));
     }
 
     #[test]

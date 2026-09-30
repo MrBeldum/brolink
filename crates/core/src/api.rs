@@ -13,6 +13,12 @@
 //! | POST   | /v1/update  | `brolink-host.exe` bytes | [`Ack`]     |
 //! | GET    | /v1/clipboard |               | [`Clipboard`] |
 //! | POST   | /v1/clipboard | [`Clipboard`] | [`Ack`]      |
+//! | GET    | /v1/display |                 | display report (JSON) |
+//! | POST   | /v1/display | [`DisplayRequest`] | display report (JSON) |
+//!
+//! Only machines signed in to the same Tailscale account get an answer
+//! (a tagged server answers its tailnet's members); see the host's
+//! `service` module.
 //!
 //! `/v1/update` carries the new executable itself, with its version in
 //! [`UPDATE_VERSION_HEADER`] and its SHA-256 in [`UPDATE_SHA256_HEADER`]. A

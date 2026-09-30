@@ -4,6 +4,16 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- The control service again answers only machines signed in to the same
+  Tailscale account. Since 3.x it answered any machine Tailscale could
+  name, so a machine shared in from someone else's tailnet could pair with
+  the PC, sleep or restart it, read and write its clipboard, and push it a
+  new `brolink-host.exe`. A tagged server such as the relay VPS belongs to
+  no account, so it answers the members of its own tailnet, which keeps a
+  Mac able to open the VPS desktop.
+
 ## 4.0.2 (2026-09-22)
 
 - `panel.log` and `service.log` no longer grow without end. Both were
