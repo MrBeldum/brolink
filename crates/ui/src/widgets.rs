@@ -83,7 +83,7 @@ pub enum Icon {
 }
 
 /// Paint `icon` in a 12-point box centred on `c`.
-pub fn paint_icon(painter: &Painter, c: Pos2, icon: Icon, color: Color32) {
+fn paint_icon(painter: &Painter, c: Pos2, icon: Icon, color: Color32) {
     let s = stroke(1.5, color);
     let p = |x: f32, y: f32| c + Vec2::new(x, y);
     match icon {
@@ -127,7 +127,7 @@ pub fn paint_icon(painter: &Painter, c: Pos2, icon: Icon, color: Color32) {
 /// Keep keyboard navigation visible for controls with custom painting: an
 /// accent outline two points outside the control, so it shows against the
 /// background whatever the control's own fill.
-pub fn focus_ring(ui: &Ui, response: &Response, corner: u8) {
+fn focus_ring(ui: &Ui, response: &Response, corner: u8) {
     if response.has_focus() && ui.is_enabled() {
         ui.painter().rect_stroke(
             response.rect.expand(2.0),
@@ -144,7 +144,7 @@ pub fn focus_ring(ui: &Ui, response: &Response, corner: u8) {
 
 /// The frame of a card: a surface one step up from the window, with a
 /// hairline around it.
-pub fn card_frame() -> Frame {
+fn card_frame() -> Frame {
     Frame::new()
         .fill(P.surface)
         .stroke(stroke(1.0, P.hairline))
@@ -186,19 +186,6 @@ pub fn heading(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
         caption(ui, s);
     }
     ui.add_space(space::XS);
-}
-
-/// [`card`] with a [`heading`].
-pub fn titled_card<R>(
-    ui: &mut Ui,
-    title: &str,
-    subtitle: Option<&str>,
-    add: impl FnOnce(&mut Ui) -> R,
-) -> InnerResponse<R> {
-    card(ui, |ui| {
-        heading(ui, title, subtitle);
-        add(ui)
-    })
 }
 
 /// A grouped list: rows separated by hairlines on one surface, as in the
@@ -500,11 +487,6 @@ pub fn small_print(ui: &mut Ui, text: impl Into<String>) -> Response {
 /// Body text in the secondary colour. Wraps.
 pub fn muted(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(Label::new(RichText::new(text).color(P.text_secondary)).wrap())
-}
-
-/// Body text in the primary colour. Wraps.
-pub fn body(ui: &mut Ui, text: impl Into<String>) -> Response {
-    ui.add(Label::new(RichText::new(text).color(P.text)).wrap())
 }
 
 /// Medium-weight body text, for a name in a row.
@@ -1314,11 +1296,6 @@ pub fn segmented<T: PartialEq + Copy>(
     changed
 }
 
-/// An on/off switch. Returns the response; `changed()` fires on toggle.
-pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
-    labelled_toggle(ui, on, "")
-}
-
 fn labelled_toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let track = size::SWITCH;
     let (rect, mut response) = ui.allocate_exact_size(
@@ -1615,7 +1592,7 @@ pub fn setting_block<R>(
     r
 }
 
-/// A [`setting_row`] whose control is a [`toggle`]. Returns true on change.
+/// A [`setting_row`] whose control is an on/off switch. Returns true on change.
 pub fn toggle_row(ui: &mut Ui, on: &mut bool, label: &str, hint: Option<&str>) -> bool {
     setting_row(ui, label, hint, |ui| {
         labelled_toggle(ui, on, label).changed()
@@ -1810,39 +1787,6 @@ pub fn shortcut(ui: &mut Ui, keys: &[&str], does: &str) -> Response {
         .response;
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &label));
     r
-}
-
-/// Where a multi-step job is: done steps ticked, the current one in the
-/// accent, the rest quiet. Mono uppercase, as on the product site.
-pub fn steps(ui: &mut Ui, labels: &[&str], current: usize) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(space::SM, space::XS);
-        for (i, label) in labels.iter().enumerate() {
-            if i > 0 {
-                let (r, _) = ui.allocate_exact_size(Vec2::new(16.0, 16.0), Sense::hover());
-                ui.painter()
-                    .hline(r.x_range(), r.center().y, stroke(1.0, P.border));
-            }
-            let (ink, mark) = match i.cmp(&current) {
-                std::cmp::Ordering::Less => (P.text_secondary, Some(Icon::Check)),
-                std::cmp::Ordering::Equal => (P.accent, None),
-                std::cmp::Ordering::Greater => (P.text_tertiary, None),
-            };
-            if let Some(icon) = mark {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                paint_icon(ui.painter(), r.center(), icon, ink);
-            } else if i == current {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 3.5, ink);
-            }
-            ui.label(
-                RichText::new(label.to_uppercase())
-                    .font(theme::mono_medium(text::LABEL))
-                    .extra_letter_spacing(text::LABEL_TRACKING)
-                    .color(ink),
-            );
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
