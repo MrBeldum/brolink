@@ -312,6 +312,7 @@ pub fn disclosure<R>(
         Vec2::new(ui.available_width().max(galley.size().x + 24.0), h),
         Sense::click(),
     );
+    keep_in_view(&response);
     if response.clicked() {
         state.toggle(ui);
     }
@@ -872,6 +873,7 @@ fn labelled_button(
     let icon_w = if trailing.is_some() { 16.0 } else { 0.0 };
     let w = (galley.size().x + 2.0 * pad + icon_w).max(h);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    keep_in_view(&response);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), a11y));
     if ui.is_rect_visible(rect) {
         let l = look(
@@ -933,6 +935,7 @@ pub fn destructive_button(ui: &mut Ui, label: &str) -> Response {
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
     let s = ui.spacing().interact_size.y;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(s), Sense::click());
+    keep_in_view(&response);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     if ui.is_rect_visible(rect) {
         let l = look(
@@ -962,6 +965,7 @@ pub fn link(ui: &mut Ui, label: &str) -> Response {
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let size = Vec2::new(galley.size().x, galley.size().y.max(size::HIT_MIN));
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    keep_in_view(&response);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, ui.is_enabled(), label));
     if ui.is_rect_visible(rect) {
         let hot = response.hovered() || response.has_focus();
@@ -984,10 +988,121 @@ pub fn link(ui: &mut Ui, label: &str) -> Response {
 // Menus
 // ---------------------------------------------------------------------------
 
+/// Where a popup hung from a control goes, and how tall it may be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Drop {
+    /// The corner of the popup that touches the control's edge.
+    pub pos: Pos2,
+    pub pivot: Align2,
+    /// The popup's outer height may not exceed this; anything longer
+    /// scrolls inside it.
+    pub max_height: f32,
+    /// True when it opens upwards, over the control.
+    pub above: bool,
+}
+
+/// Place a popup of outer height `wanted` against `anchor` inside
+/// `screen`. It opens below when it fits there, and otherwise on whichever
+/// side has more room (a machine's menu near the bottom of a short window
+/// opens upwards). Its height is capped at that side's room, less a margin
+/// from the window's edge, so no part of it is ever off screen: what does
+/// not fit scrolls. `right` hangs it from the control's right edge, for
+/// controls on the right of the window.
+pub fn place_popup(screen: Rect, anchor: Rect, wanted: f32, right: bool) -> Drop {
+    let gap = space::XS;
+    let edge = space::SM;
+    let below = (screen.bottom() - edge - (anchor.bottom() + gap)).max(0.0);
+    let above = (anchor.top() - gap - (screen.top() + edge)).max(0.0);
+    let x = if right { anchor.right() } else { anchor.left() };
+    if wanted <= below || below >= above {
+        Drop {
+            pos: Pos2::new(x, anchor.bottom() + gap),
+            pivot: if right {
+                Align2::RIGHT_TOP
+            } else {
+                Align2::LEFT_TOP
+            },
+            max_height: below,
+            above: false,
+        }
+    } else {
+        Drop {
+            pos: Pos2::new(x, anchor.top() - gap),
+            pivot: if right {
+                Align2::RIGHT_BOTTOM
+            } else {
+                Align2::LEFT_BOTTOM
+            },
+            max_height: above,
+            above: true,
+        }
+    }
+}
+
+/// The height a scrolling region inside a panel may take so the panel
+/// ends a margin above the window's bottom edge: from the cursor down,
+/// less `below` for what the panel still has to lay out under it (its
+/// footer and bottom margin). Never less than one control, so a tiny
+/// window still shows something to scroll.
+pub fn room_below(ui: &Ui, below: f32) -> f32 {
+    let bottom = ui.ctx().screen_rect().bottom() - space::SM;
+    (bottom - ui.cursor().top() - below).max(size::CONTROL)
+}
+
+/// A vertical scroll area for content that may be cut off by the window:
+/// its scroll bar shows at rest, so a clipped list reads as one. Keyboard
+/// focus moving to a control inside scrolls it into view (see
+/// [`keep_in_view`]).
+pub fn clipped_scroll<R>(
+    ui: &mut Ui,
+    id: impl std::hash::Hash,
+    max_height: f32,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let saved = ui.spacing().scroll;
+    ui.spacing_mut().scroll = theme::clipped_scroll();
+    let out = egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(max_height)
+        // A popup or window lays out in the size it had last frame; without
+        // this the list could never grow past its first, smaller, height.
+        .min_scrolled_height(max_height)
+        .show(ui, |ui| {
+            ui.spacing_mut().scroll = saved;
+            add(ui)
+        });
+    ui.spacing_mut().scroll = saved;
+    out
+}
+
+/// When keyboard focus arrives at a control, scroll it into view: egui
+/// moves focus to a control clipped away in a scroll area without showing
+/// it, and a menu or panel cut short by a small window would otherwise take
+/// focus somewhere nobody can see.
+pub fn keep_in_view(response: &Response) {
+    if response.gained_focus() {
+        response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+    }
+}
+
+/// Where the menu open now sits on screen, or the visible part of an open
+/// [`select`]'s list, for layout checks.
+pub fn open_menu_rect(ctx: &egui::Context) -> Option<Rect> {
+    let (id, rect): (Id, Rect) = ctx.data(|d| d.get_temp(open_menu_key()))?;
+    ctx.memory(|m| m.is_popup_open(id)).then_some(rect)
+}
+
+fn open_menu_key() -> Id {
+    Id::new("brolink.open_menu")
+}
+
 /// Open a popup menu under `trigger` while it is toggled on. A real egui
 /// popup: `any_popup_open` is true while it shows, Escape and a click
 /// outside close it. It hangs from the trigger's nearer edge, so a menu at
-/// the right of the window opens leftwards instead of running off it.
+/// the right of the window opens leftwards instead of running off it, and
+/// it never runs past the window's top or bottom: it opens upwards when
+/// there is more room above, and scrolls when neither side has room for
+/// all of it (see [`place_popup`]).
 fn popup_menu<R>(ui: &mut Ui, trigger: &Response, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let id = trigger.id.with("menu");
     if trigger.clicked() {
@@ -996,35 +1111,49 @@ fn popup_menu<R>(ui: &mut Ui, trigger: &Response, add: impl FnOnce(&mut Ui) -> R
     if !ui.memory(|m| m.is_popup_open(id)) {
         return None;
     }
-    let screen = ui.ctx().screen_rect();
-    let (pos, pivot) = if trigger.rect.center().x > screen.center().x {
-        (trigger.rect.right_bottom(), Align2::RIGHT_TOP)
-    } else {
-        (trigger.rect.left_bottom(), Align2::LEFT_TOP)
-    };
+    let ctx = ui.ctx().clone();
+    let screen = ctx.screen_rect();
+    let right = trigger.rect.center().x > screen.center().x;
+    // The menu's full height, measured when it was last laid out.
+    let key = id.with("height");
+    let known: Option<f32> = ctx.data(|d| d.get_temp(key));
+    let drop = place_popup(screen, trigger.rect, known.unwrap_or(0.0), right);
+    let style = ui.style().clone();
+    let chrome = style.spacing.menu_margin.sum().y + 2.0 * style.visuals.window_stroke.width;
     let shown = egui::Area::new(id)
         .kind(egui::UiKind::Popup)
         .order(egui::Order::Foreground)
-        .fixed_pos(pos + Vec2::new(0.0, space::XS))
-        .pivot(pivot)
+        .fixed_pos(drop.pos)
+        .pivot(drop.pivot)
         .constrain(true)
-        .show(ui.ctx(), |ui| {
-            Frame::popup(ui.style())
+        .show(&ctx, |ui| {
+            Frame::popup(&style)
                 .show(ui, |ui| {
                     ui.set_min_width(200.0);
                     ui.set_max_width(320.0);
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.spacing_mut().interact_size.y = size::CONTROL_SM;
-                    ui.with_layout(Layout::top_down_justified(Align::Min), add)
-                        .inner
+                    let max = (drop.max_height - chrome).max(size::CONTROL_SM);
+                    clipped_scroll(ui, "brolink.menu", max, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.spacing_mut().interact_size.y = size::CONTROL_SM;
+                        ui.with_layout(Layout::top_down_justified(Align::Min), add)
+                            .inner
+                    })
                 })
                 .inner
         });
+    let full = shown.inner.content_size.y + chrome;
+    if known.is_none_or(|k| (k - full).abs() > 0.5) {
+        ctx.data_mut(|d| d.insert_temp(key, full));
+        if place_popup(screen, trigger.rect, full, right) != drop {
+            ctx.request_discard("menu moved to fit the window");
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(open_menu_key(), (id, shown.response.rect)));
     let outside = trigger.clicked_elsewhere() && shown.response.clicked_elsewhere();
     if outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.memory_mut(|m| m.close_popup());
     }
-    Some(shown.inner)
+    Some(shown.inner.inner)
 }
 
 /// A quiet button with a chevron that opens a menu.
@@ -1060,6 +1189,7 @@ fn menu_row(ui: &mut Ui, label: &str, checked: Option<bool>, enabled: bool) -> R
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(w, h), sense);
+    keep_in_view(&response);
     response.widget_info(|| match checked {
         Some(on) => WidgetInfo::selected(WidgetType::RadioButton, enabled, on, label),
         None => WidgetInfo::labeled(WidgetType::Button, enabled, label),
@@ -1252,6 +1382,7 @@ pub fn segmented<T: PartialEq + Copy>(
         let seg = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(widths[i], h));
         x += widths[i];
         let resp = ui.interact(seg, block.id.with(i), Sense::click());
+        keep_in_view(&resp);
         resp.widget_info(|| {
             WidgetInfo::selected(
                 WidgetType::RadioButton,
@@ -1302,6 +1433,7 @@ fn labelled_toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         Vec2::new(track.x, track.y.max(size::HIT_MIN)),
         Sense::click(),
     );
+    keep_in_view(&response);
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
@@ -1345,7 +1477,9 @@ fn labelled_toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
 }
 
 /// A dropdown in the house style, with a painted chevron. `add` fills the
-/// list with `ui.selectable_value` rows.
+/// list with [`select_option`] rows. The list is no taller than the room on
+/// the side of the control it opens towards, so it stays inside the window
+/// and scrolls, with its scroll bar showing, when it has to.
 pub fn select<R>(
     ui: &mut Ui,
     id: impl std::hash::Hash,
@@ -1353,10 +1487,22 @@ pub fn select<R>(
     width: f32,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    egui::ComboBox::from_id_salt(id)
+    // egui opens the list below the control when it fits there, and above
+    // it otherwise; cap it at the larger of the two rooms so either way it
+    // ends a margin inside the window.
+    let screen = ui.ctx().screen_rect();
+    let y = ui.next_widget_position().y;
+    let h = ui.spacing().interact_size.y;
+    let below = screen.bottom() - space::SM - (y + h);
+    let above = y - h / 2.0 - space::XS - (screen.top() + space::SM);
+    let chrome = ui.spacing().menu_margin.sum().y + 2.0 * ui.visuals().window_stroke.width;
+    let height = (below.max(above) - chrome).clamp(size::CONTROL, 320.0);
+    let mut list = None;
+    let out = egui::ComboBox::from_id_salt(id)
         .selected_text(selected)
         .width(width)
-        .height(320.0)
+        // egui's own scroll area never clips; the one inside does.
+        .height(f32::INFINITY)
         .icon(|ui, rect, visuals, _open, _| {
             paint_icon(
                 ui.painter(),
@@ -1366,11 +1512,35 @@ pub fn select<R>(
             );
         })
         .show_ui(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.spacing_mut().button_padding = Vec2::new(space::SM, 6.0);
-            add(ui)
-        })
-        .inner
+            let out = clipped_scroll(ui, "brolink.select", height, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.spacing_mut().button_padding = Vec2::new(space::SM, 6.0);
+                add(ui)
+            });
+            list = Some(out.inner_rect);
+            out.inner
+        });
+    keep_in_view(&out.response);
+    if let Some(rect) = list {
+        // How egui's ComboBox names its popup.
+        let popup = out.response.id.with("popup");
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(open_menu_key(), (popup, rect)));
+    }
+    out.inner
+}
+
+/// A row in a [`select`]'s list: chosen when clicked, marked while chosen,
+/// and scrolled into view when Tab reaches it.
+pub fn select_option<T: PartialEq>(
+    ui: &mut Ui,
+    current: &mut T,
+    value: T,
+    label: impl Into<WidgetText>,
+) -> Response {
+    let response = ui.selectable_value(current, value, label);
+    keep_in_view(&response);
+    response
 }
 
 /// A horizontal slider for a whole number, with its value in mono beside
@@ -1389,6 +1559,7 @@ pub fn slider(
         Vec2::new(width, size::HIT_MIN.max(ui.spacing().interact_size.y)),
         Sense::click_and_drag(),
     );
+    keep_in_view(&response);
     let rail = Rect::from_min_max(
         Pos2::new(rect.left() + knob, rect.center().y - 2.0),
         Pos2::new(rect.right() - knob, rect.center().y + 2.0),
@@ -1937,6 +2108,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_popup_never_leaves_the_window() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 420.0));
+        for y in [8.0, 40.0, 150.0, 260.0, 380.0] {
+            for wanted in [60.0, 170.0, 400.0, 900.0] {
+                let anchor = Rect::from_min_size(Pos2::new(560.0, y), Vec2::splat(32.0));
+                let d = place_popup(screen, anchor, wanted, true);
+                let (top, bottom) = if d.above {
+                    (d.pos.y - d.max_height, d.pos.y)
+                } else {
+                    (d.pos.y, d.pos.y + d.max_height)
+                };
+                assert!(top >= screen.top() + space::SM, "{y} {wanted}: {d:?}");
+                assert!(bottom <= screen.bottom() - space::SM, "{y} {wanted}: {d:?}");
+                assert!(d.max_height > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_popup_opens_upwards_only_when_it_needs_to_and_there_is_more_room() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 420.0));
+        let low = Rect::from_min_size(Pos2::new(560.0, 380.0), Vec2::splat(32.0));
+        assert!(place_popup(screen, low, 170.0, true).above);
+        let middle = Rect::from_min_size(Pos2::new(560.0, 200.0), Vec2::splat(32.0));
+        assert!(
+            !place_popup(screen, middle, 150.0, true).above,
+            "it fits below"
+        );
+        let high = Rect::from_min_size(Pos2::new(8.0, 8.0), Vec2::splat(28.0));
+        assert!(!place_popup(screen, high, 900.0, false).above);
     }
 
     #[test]

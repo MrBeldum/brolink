@@ -72,7 +72,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
                     Resolution::P1440,
                     Resolution::P2160,
                 ] {
-                    ui.selectable_value(&mut resolution, r, r.describe(native));
+                    ui::select_option(ui, &mut resolution, r, r.describe(native));
                 }
             });
             if resolution != s.resolution {
@@ -89,7 +89,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         |ui| {
             ui::select(ui, "stream-fps", format!("{} fps", s.fps), 120.0, |ui| {
                 for fps in [30, 60, 90, 120, 144, 165, 240] {
-                    ui.selectable_value(&mut s.fps, fps, format!("{fps} fps"));
+                    ui::select_option(ui, &mut s.fps, fps, format!("{fps} fps"));
                 }
             });
         },

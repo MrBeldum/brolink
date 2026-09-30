@@ -245,6 +245,27 @@ pub fn stroke(width: f32, color: Color32) -> Stroke {
     Stroke::new(width, color)
 }
 
+/// The scroll bar of a menu or panel whose content is cut off by the
+/// window: the window's usual floating bar, but with its handle showing at
+/// rest, so a clipped list says there is more below without a hover.
+pub fn clipped_scroll() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        floating: true,
+        bar_width: 6.0,
+        floating_width: 3.0,
+        floating_allocated_width: 0.0,
+        bar_inner_margin: space::XXS,
+        foreground_color: true,
+        dormant_background_opacity: 0.0,
+        dormant_handle_opacity: 0.45,
+        active_background_opacity: 0.0,
+        active_handle_opacity: 0.6,
+        interact_background_opacity: 0.2,
+        interact_handle_opacity: 0.8,
+        ..egui::style::ScrollStyle::floating()
+    }
+}
+
 /// Install the fonts and style on a context. Call once at startup.
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
@@ -385,7 +406,9 @@ fn visuals() -> Visuals {
     v.selection.stroke = stroke(1.0, p.accent);
     v.text_cursor.stroke = stroke(2.0, p.accent);
     v.interact_cursor = Some(egui::CursorIcon::PointingHand);
-    v.clip_rect_margin = 0.0;
+    // A focus ring is drawn two points outside its control; a window or a
+    // scroll area clipped tight to its content would cut it off at the edge.
+    v.clip_rect_margin = 4.0;
 
     let w = &mut v.widgets;
     let r = CornerRadius::same(radius::SM);

@@ -105,6 +105,7 @@ All pairs are asserted in `crates/ui/src/theme.rs` and `widgets.rs` tests.
 | X3 | Medium | No window shortcuts. | Fixed: Command/Ctrl-1, 2, comma; Escape. |
 | X4 | Low | Switch hit target 40×22 (< 24). | Fixed: 36×24. |
 | X5 | Low | Pills and other painted text were missing from the accessibility tree. | Fixed: status, tags, keycaps and the PIN report labels. |
+| X6 | High | At 640×420 the stream toolbar's More menu ran past the bottom of the window: "Command acts as Ctrl" and the PC items could not be reached, by pointer or keyboard. Stream performance ran off the bottom, and panels sat under the toolbar. Tab could move focus to a control scrolled out of sight. | Fixed: menus open where they fit (upwards when there is more room above) and scroll inside when neither side has room; dropdown lists, panels and questions do the same, below the toolbar; Tab scrolls the focused control into view; focus rings are no longer cut at a window's edge. Tested at 640×420 by rect, with snapshots. |
 
 ## Design system
 

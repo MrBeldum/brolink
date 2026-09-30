@@ -298,9 +298,13 @@ impl View {
             &mut actions,
         );
 
-        self.settings_panel(ctx, env, &mut actions);
+        // Panels keep clear of the toolbar while it shows.
+        let below_bar = bar_rect
+            .map(|b| Rect::from_min_max(Pos2::new(screen.left(), b.bottom()), screen.max))
+            .unwrap_or(screen);
+        self.settings_panel(ctx, below_bar, &mut actions);
         if self.stats {
-            self.diagnostics(ctx, env, &stats);
+            self.diagnostics(ctx, env, below_bar, &stats);
         }
         self.input(ctx, live, env.cfg, video, bar_rect);
         actions
@@ -349,16 +353,15 @@ impl View {
             });
     }
 
-    fn settings_panel(&mut self, ctx: &egui::Context, env: &Env<'_>, actions: &mut Vec<Action>) {
-        let _ = env;
+    fn settings_panel(&mut self, ctx: &egui::Context, region: Rect, actions: &mut Vec<Action>) {
         let Some(settings) = self.settings.as_mut() else {
             return;
         };
         let mut apply = false;
         let mut close = false;
-        let screen = ctx.screen_rect();
-        let w = overlay_width(520.0, screen.width()) - 2.0 * space::LG;
+        let w = overlay_width(520.0, region.width()) - 2.0 * space::LG;
         egui::Window::new("Stream settings")
+            .constrain_to(region)
             .title_bar(false)
             .frame(ui::panel_frame())
             .collapsible(false)
@@ -369,16 +372,19 @@ impl View {
             .show(ctx, |ui| {
                 ui.set_width(w);
                 close = ui::panel_header(ui, "Stream settings");
-                egui::ScrollArea::vertical()
-                    .max_height((screen.height() - 190.0).max(120.0))
-                    .show(ui, |ui| {
+                ui::clipped_scroll(
+                    ui,
+                    "stream-settings",
+                    (region.height() - 190.0).max(120.0),
+                    |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         crate::settings::stream_controls(
                             ui,
                             settings,
                             crate::app::ClientApp::native_pixels(ctx),
                         );
-                    });
+                    },
+                );
                 ui.add_space(space::MD);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = space::SM;
@@ -403,10 +409,17 @@ impl View {
         }
     }
 
-    fn diagnostics(&mut self, ctx: &egui::Context, env: &Env<'_>, stats: &brolink_stream::Stats) {
+    fn diagnostics(
+        &mut self,
+        ctx: &egui::Context,
+        env: &Env<'_>,
+        region: Rect,
+        stats: &brolink_stream::Stats,
+    ) {
         let live = env.live;
         let mut close = false;
         egui::Window::new("Stream performance")
+            .constrain_to(region)
             .title_bar(false)
             .frame(ui::panel_frame())
             .resizable(false)
@@ -417,50 +430,55 @@ impl View {
             .show(ctx, |ui| {
                 ui.set_width(340.0);
                 close = ui::panel_header(ui, "Stream performance");
-                let path = env.path.as_ref().unwrap_or(&live.path);
-                ui.horizontal_wrapped(|ui| {
-                    ui::tag(ui, Some(path.tone()), &path.label());
-                    ui::tag(ui, None, &profile_label(&live.settings));
-                });
-                ui.add_space(space::SM);
-                let rows = [
-                    Kv::new("Resolution", format!("{} × {}", stats.width, stats.height)),
-                    Kv::new(
-                        "Frame rate",
-                        format!("{:.1} of {} fps", stats.fps, live.requested.2),
-                    ),
-                    Kv::new(
-                        "Bitrate",
-                        format!(
-                            "{:.1} of {} Mbps",
-                            stats.mbps,
-                            live.settings.bitrate_kbps / 1000
+                // Everything under the title scrolls when the window is too
+                // short for it, so the panel always ends inside the window.
+                let room = ui::room_below(ui, space::LG + 1.0);
+                ui::clipped_scroll(ui, "stream-performance", room, |ui| {
+                    let path = env.path.as_ref().unwrap_or(&live.path);
+                    ui.horizontal_wrapped(|ui| {
+                        ui::tag(ui, Some(path.tone()), &path.label());
+                        ui::tag(ui, None, &profile_label(&live.settings));
+                    });
+                    ui.add_space(space::SM);
+                    let rows = [
+                        Kv::new("Resolution", format!("{} × {}", stats.width, stats.height)),
+                        Kv::new(
+                            "Frame rate",
+                            format!("{:.1} of {} fps", stats.fps, live.requested.2),
                         ),
-                    ),
-                    Kv::new(
-                        "Round trip",
-                        format!("{} ± {} ms", stats.rtt_ms, stats.rtt_var_ms),
-                    ),
-                    Kv::new("Packet loss", format!("{:.2}%", stats.loss_pct)),
-                    Kv::new("Encode on host", format!("{:.2} ms", stats.host_ms)),
-                    Kv::new("Frame assembly", format!("{:.2} ms", stats.assembly_ms)),
-                    Kv::new("Decoder queue", format!("{:.2} ms", stats.queue_ms)),
-                    Kv::new("Decode", format!("{:.2} ms", stats.decode_ms)),
-                    Kv::new("Decoder", stats.decoder.to_string()),
-                ]
-                .map(Kv::mono);
-                ui::kv_grid(ui, &rows);
-                ui.add_space(space::SM);
-                ui::small_print(ui, "The encoder aims at the bitrate while the picture changes; a still screen needs less. Received bitrate falling well short during motion, or swinging, means packets are being lost on the way.");
-                if !stats.audio.is_empty() {
-                    ui::small_print(ui, &stats.audio);
-                }
-                ui.add_space(space::XS);
-                if ui::secondary_button(ui, "Copy diagnostics").clicked() {
-                    ctx.copy_text(format!("BroLink {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",
-                        env!("CARGO_PKG_VERSION"), path.label(), live.requested.0, live.requested.1,
-                        live.requested.2, live.settings.bitrate_kbps / 1000));
-                }
+                        Kv::new(
+                            "Bitrate",
+                            format!(
+                                "{:.1} of {} Mbps",
+                                stats.mbps,
+                                live.settings.bitrate_kbps / 1000
+                            ),
+                        ),
+                        Kv::new(
+                            "Round trip",
+                            format!("{} ± {} ms", stats.rtt_ms, stats.rtt_var_ms),
+                        ),
+                        Kv::new("Packet loss", format!("{:.2}%", stats.loss_pct)),
+                        Kv::new("Encode on host", format!("{:.2} ms", stats.host_ms)),
+                        Kv::new("Frame assembly", format!("{:.2} ms", stats.assembly_ms)),
+                        Kv::new("Decoder queue", format!("{:.2} ms", stats.queue_ms)),
+                        Kv::new("Decode", format!("{:.2} ms", stats.decode_ms)),
+                        Kv::new("Decoder", stats.decoder.to_string()),
+                    ]
+                    .map(Kv::mono);
+                    ui::kv_grid(ui, &rows);
+                    ui.add_space(space::SM);
+                    ui::small_print(ui, "The encoder aims at the bitrate while the picture changes; a still screen needs less. Received bitrate falling well short during motion, or swinging, means packets are being lost on the way.");
+                    if !stats.audio.is_empty() {
+                        ui::small_print(ui, &stats.audio);
+                    }
+                    ui.add_space(space::XS);
+                    if ui::secondary_button(ui, "Copy diagnostics").clicked() {
+                        ctx.copy_text(format!("BroLink {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",
+                            env!("CARGO_PKG_VERSION"), path.label(), live.requested.0, live.requested.1,
+                            live.requested.2, live.settings.bitrate_kbps / 1000));
+                    }
+                });
             });
         if close {
             self.stats = false;
@@ -645,25 +663,20 @@ impl View {
     ) {
         let live = env.live;
         let cfg = env.cfg;
-        let max_h = (ctx.screen_rect().height() - self.bar_h - space::LG).max(120.0);
         ui::menu_button(ui, "More", |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(max_h)
-                .show(ui, |ui| {
-                    ui::menu_label(ui, "View");
-                    if ui::menu_choice(ui, "Full screen", env.fullscreen).clicked() {
-                        actions.push(Action::Fullscreen(!env.fullscreen));
-                    }
-                    if ui::menu_choice(ui, "Stream performance", self.stats).clicked() {
-                        self.stats = !self.stats;
-                    }
-                    ui::menu_label(ui, "Mouse");
-                    self.mouse_items(ui, ctx, live, cfg, actions);
-                    ui::menu_label(ui, "Send keys");
-                    self.key_items(ui, live, cfg, actions);
-                    ui::menu_label(ui, machine_noun(&env.os));
-                    self.power_items(ui, env, actions);
-                });
+            ui::menu_label(ui, "View");
+            if ui::menu_choice(ui, "Full screen", env.fullscreen).clicked() {
+                actions.push(Action::Fullscreen(!env.fullscreen));
+            }
+            if ui::menu_choice(ui, "Stream performance", self.stats).clicked() {
+                self.stats = !self.stats;
+            }
+            ui::menu_label(ui, "Mouse");
+            self.mouse_items(ui, ctx, live, cfg, actions);
+            ui::menu_label(ui, "Send keys");
+            self.key_items(ui, live, cfg, actions);
+            ui::menu_label(ui, machine_noun(&env.os));
+            self.power_items(ui, env, actions);
         });
     }
 
@@ -1300,8 +1313,14 @@ fn question(ctx: &egui::Context, id: &str, bar: Rect, w: f32, add: impl FnOnce(&
         .show(ctx, |ui| {
             ui::overlay_frame().show(ui, |ui| {
                 ui.set_width(w);
-                ui.spacing_mut().item_spacing.y = space::SM;
-                add(ui)
+                // A long question on a short window scrolls inside its
+                // frame instead of running off the bottom.
+                let room = ui::room_below(ui, OVERLAY_PAD + 1.0);
+                ui::clipped_scroll(ui, id, room, |ui| {
+                    ui.set_width(w);
+                    ui.spacing_mut().item_spacing.y = space::SM;
+                    add(ui)
+                });
             });
         });
 }
@@ -1690,10 +1709,298 @@ pub(crate) mod tests {
             fixture(view, Extra::default()),
         );
         assert!(h.query_by_label("Apply and reconnect").is_some());
-        crate::app::snapshots::assert_fits(&h, 640.0);
+        // The screen waiting for the first picture lies under the panel, on
+        // a lower layer, with a Cancel of its own; `assert_fits` sees every
+        // layer at once, so the panel is checked on its own.
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 420.0));
+        let panel = h
+            .ctx
+            .memory(|m| m.area_rect(Id::new("Stream settings")))
+            .expect("the panel is showing");
+        assert_inside("Stream settings", panel, below_bar(&h, screen));
+        for control in ["Apply and reconnect", "Close Stream settings"] {
+            assert_inside(control, node_rect(&h.get_by_label(control)), panel);
+        }
+        assert_cancel_inside(&h, panel);
         h.get_by_label("Close Stream settings").click();
         h.run_steps(2);
         assert!(h.state().view.settings.is_none());
+    }
+
+    fn node_rect(node: &egui_kittest::kittest::Node<'_>) -> Rect {
+        let b = node.raw_bounds().expect("node has bounds");
+        Rect::from_min_max(
+            Pos2::new(b.x0 as f32, b.y0 as f32),
+            Pos2::new(b.x1 as f32, b.y1 as f32),
+        )
+    }
+
+    /// Press Tab until the control called `label` has keyboard focus.
+    pub(crate) fn tab_to<S>(h: &mut egui_kittest::Harness<'_, S>, label: &str) {
+        for _ in 0..60 {
+            if h.query_by_label(label).is_some_and(|n| n.is_focused()) {
+                h.run_steps(2);
+                return;
+            }
+            h.press_key(egui::Key::Tab);
+            h.run_steps(1);
+        }
+        panic!("Tab never reached {label:?}");
+    }
+
+    /// `inner` lies inside `outer`, give or take half a point of rounding.
+    pub(crate) fn assert_inside(what: &str, inner: Rect, outer: Rect) {
+        assert!(
+            outer.expand(0.5).contains_rect(inner),
+            "{what} {inner:?} runs outside {outer:?}"
+        );
+    }
+
+    /// Open the menu behind `trigger` and check the whole menu is on
+    /// screen and that Tab brings its last item, `last`, into view.
+    pub(crate) fn assert_menu_fits<S>(
+        h: &mut egui_kittest::Harness<'_, S>,
+        size: Vec2,
+        trigger: &str,
+        last: &str,
+    ) {
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
+        h.get_by_label(trigger).simulate_click();
+        h.run_steps(3);
+        let menu = brolink_ui::open_menu_rect(&h.ctx).expect("the menu is open");
+        assert_inside(&format!("{trigger} menu at {size:?}"), menu, screen);
+        tab_to(h, last);
+        let menu = brolink_ui::open_menu_rect(&h.ctx).expect("Tab keeps the menu open");
+        assert_inside(&format!("{trigger} menu after Tab"), menu, screen);
+        let item = node_rect(&h.get_by_label(last));
+        assert_inside(&format!("{last:?} in the {trigger} menu"), item, menu);
+    }
+
+    fn windows_old_host() -> Extra {
+        Extra {
+            os: "windows".into(),
+            old_host: Some((Version::new(3, 0, 0), Some(Version::new(4, 0, 2)))),
+            ..Default::default()
+        }
+    }
+
+    /// The last item each toolbar menu can show: the power items end the
+    /// More menu, and with an old host the update item ends them.
+    const LAST_POWER_ITEM: &str = "Update BroLink Host… (runs 3.0.0)";
+
+    #[test]
+    fn every_toolbar_menu_fits_the_smallest_window_and_scrolls_to_its_end() {
+        let min = Vec2::new(640.0, 420.0);
+        let mut h = harness_with(
+            min,
+            1.0,
+            false,
+            fixture(view_with_bar(), windows_old_host()),
+        );
+        assert_menu_fits(&mut h, min, "More", LAST_POWER_ITEM);
+        // The separate menus exist from this width up; at the minimum
+        // height they must fit too.
+        let short = Vec2::new(OVERFLOW_BELOW, 420.0);
+        let last_key = if cfg!(target_os = "macos") {
+            "Command acts as Ctrl"
+        } else {
+            "Print Screen"
+        };
+        for (trigger, last) in [
+            ("Keys", last_key),
+            ("Mouse", "Free, for desktops (follows this cursor)"),
+            ("PC", LAST_POWER_ITEM),
+        ] {
+            let mut h = harness_with(
+                short,
+                1.0,
+                false,
+                fixture(view_with_bar(), windows_old_host()),
+            );
+            assert_menu_fits(&mut h, short, trigger, last);
+        }
+    }
+
+    #[test]
+    fn the_stream_panels_and_questions_fit_the_smallest_window() {
+        let min = Vec2::new(640.0, 420.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, min);
+        let area = |h: &egui_kittest::Harness<'_, Fixture>, id: &str| {
+            h.ctx
+                .memory(|m| m.area_rect(Id::new(id)))
+                .unwrap_or_else(|| panic!("{id} is showing"))
+        };
+
+        let mut view = view_with_bar();
+        view.stats = true;
+        let mut h = harness_with(min, 1.0, false, fixture(view, windows_old_host()));
+        tab_to(&mut h, "Copy diagnostics");
+        let below = below_bar(&h, screen);
+        assert_inside("Stream performance", area(&h, "Stream performance"), below);
+        let copy = node_rect(&h.get_by_label("Copy diagnostics"));
+        assert_inside("Copy diagnostics", copy, area(&h, "Stream performance"));
+
+        let mut view = view_with_bar();
+        view.settings = Some(ClientConfig::default().stream);
+        let mut h = harness_with(min, 1.0, false, fixture(view, windows_old_host()));
+        tab_to(&mut h, "H.264");
+        let panel = area(&h, "Stream settings");
+        assert_inside("Stream settings", panel, below_bar(&h, screen));
+        for control in ["H.264", "Apply and reconnect"] {
+            assert_inside(control, node_rect(&h.get_by_label(control)), panel);
+        }
+        assert_cancel_inside(&h, panel);
+
+        for (id, view, action) in [
+            (
+                "stream-confirm",
+                View {
+                    confirm: Some(PowerAction::Shutdown),
+                    ..view_with_bar()
+                },
+                PowerAction::Shutdown.label(),
+            ),
+            (
+                "stream-install",
+                View {
+                    confirm_install: true,
+                    ..view_with_bar()
+                },
+                "Install through the stream",
+            ),
+        ] {
+            let mut h = harness_with(min, 1.0, false, fixture(view, windows_old_host()));
+            tab_to(&mut h, action);
+            assert_inside(id, area(&h, id), below_bar(&h, screen));
+            assert_inside(action, node_rect(&h.get_by_label(action)), area(&h, id));
+            assert_cancel_inside(&h, area(&h, id));
+        }
+    }
+
+    /// The window below the toolbar: where panels and questions go.
+    fn below_bar(h: &egui_kittest::Harness<'_, Fixture>, screen: Rect) -> Rect {
+        Rect::from_min_max(Pos2::new(0.0, h.state().view.bar_h), screen.max)
+    }
+
+    /// The Cancel that ends a panel or question lies inside it. (The
+    /// screen waiting for the first picture has a Cancel of its own.)
+    fn assert_cancel_inside(h: &egui_kittest::Harness<'_, Fixture>, area: Rect) {
+        assert!(
+            h.query_all_by_label("Cancel")
+                .any(|n| area.expand(0.5).contains_rect(node_rect(&n))),
+            "no Cancel inside {area:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn snapshots_stream_menus_at_the_smallest_size() {
+        use crate::app::snapshots::{file_name, save};
+        let min = Vec2::new(640.0, 420.0);
+        let short = Vec2::new(OVERFLOW_BELOW, 420.0);
+        let last_key = if cfg!(target_os = "macos") {
+            "Command acts as Ctrl"
+        } else {
+            "Print Screen"
+        };
+        for ppp in [1.0, 2.0] {
+            for (name, size, trigger, last) in [
+                ("more-end", min, "More", LAST_POWER_ITEM),
+                ("keys-end", short, "Keys", last_key),
+                (
+                    "mouse-end",
+                    short,
+                    "Mouse",
+                    "Free, for desktops (follows this cursor)",
+                ),
+                ("power-end", short, "PC", LAST_POWER_ITEM),
+            ] {
+                let mut h = harness_with(
+                    size,
+                    ppp,
+                    true,
+                    fixture(view_with_bar(), windows_old_host()),
+                );
+                assert_menu_fits(&mut h, size, trigger, last);
+                save(h.render().unwrap(), &file_name("stream", name, size, ppp));
+            }
+            for (name, view, last) in [
+                (
+                    "stats-end",
+                    View {
+                        stats: true,
+                        ..view_with_bar()
+                    },
+                    "Copy diagnostics",
+                ),
+                (
+                    "settings-end",
+                    View {
+                        settings: Some(ClientConfig::default().stream),
+                        ..view_with_bar()
+                    },
+                    "H.264",
+                ),
+                (
+                    "confirm-shutdown",
+                    View {
+                        confirm: Some(PowerAction::Shutdown),
+                        ..view_with_bar()
+                    },
+                    PowerAction::Shutdown.label(),
+                ),
+                (
+                    "install-host",
+                    View {
+                        confirm_install: true,
+                        ..view_with_bar()
+                    },
+                    "Install through the stream",
+                ),
+            ] {
+                let mut h = harness_with(min, ppp, true, fixture(view, windows_old_host()));
+                tab_to(&mut h, last);
+                save(h.render().unwrap(), &file_name("stream", name, min, ppp));
+            }
+            // A dropdown in the settings panel opens where it has room.
+            let view = View {
+                settings: Some(ClientConfig::default().stream),
+                ..view_with_bar()
+            };
+            let mut h = harness_with(min, ppp, true, fixture(view, windows_old_host()));
+            // The frame rate select comes just before the bitrate slider.
+            use egui::accesskit::Role;
+            use egui_kittest::kittest::By;
+            let focused = |h: &egui_kittest::Harness<'_, Fixture>, role: Role| {
+                h.query_all(By::new().predicate(|n| n.is_focused()))
+                    .any(|n| n.role() == role)
+            };
+            for _ in 0..30 {
+                if focused(&h, Role::Slider) {
+                    break;
+                }
+                h.press_key(egui::Key::Tab);
+                h.run_steps(1);
+            }
+            h.press_key_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+            h.run_steps(2);
+            assert!(focused(&h, Role::ComboBox), "Shift-Tab reaches the select");
+            h.query_all(By::new().predicate(|n| n.is_focused()))
+                .next()
+                .unwrap()
+                .simulate_click();
+            h.run_steps(3);
+            let screen = Rect::from_min_size(Pos2::ZERO, min);
+            let list = brolink_ui::open_menu_rect(&h.ctx).expect("the list is open");
+            assert_inside("the frame rate list", list, screen);
+            tab_to(&mut h, "240 fps");
+            let list = brolink_ui::open_menu_rect(&h.ctx).expect("Tab keeps the list open");
+            assert_inside("240 fps", node_rect(&h.get_by_label("240 fps")), list);
+            save(
+                h.render().unwrap(),
+                &file_name("stream", "fps-open", min, ppp),
+            );
+        }
     }
 
     #[test]
