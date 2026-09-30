@@ -19,7 +19,7 @@ use brolink_core::HANDOVER_PORT;
 use brolink_stream::Input;
 use parking_lot::Mutex;
 use semver::Version;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -254,8 +254,8 @@ fn run(
         if fetched_at.is_some_and(|t| t.elapsed() > AFTER_FETCH) {
             return Ok(());
         }
-        match listener.accept() {
-            Ok((mut stream, peer)) => {
+        match accept(&listener) {
+            Ok(Some((mut stream, peer))) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(180)));
                 if peer.ip() != pc_ip {
@@ -296,11 +296,25 @@ fn run(
                     }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(150));
-            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(150)),
             Err(e) => return Err(anyhow!("accept: {e}")),
         }
+    }
+}
+
+/// The next connection, if one is waiting. The listener is non-blocking so
+/// the loop can notice a stop, and on macOS a socket accepted from it
+/// inherits that: the first read found nothing yet, and writing the 20 MB
+/// executable failed the moment the send buffer filled, so the PC got a
+/// truncated file. The connection itself blocks, within its timeouts.
+fn accept(listener: &TcpListener) -> std::io::Result<Option<(TcpStream, SocketAddr)>> {
+    match listener.accept() {
+        Ok((stream, peer)) => {
+            stream.set_nonblocking(false)?;
+            Ok(Some((stream, peer)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -324,6 +338,36 @@ mod tests {
         assert!(s.contains("--background"), "{s}");
         assert!(!s.contains("ghp_"), "no token in the script");
         assert!(!s.contains("{{"), "no leftover braces: {s}");
+    }
+
+    #[test]
+    fn a_large_reply_goes_out_whole_from_the_non_blocking_listener() {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(accept(&listener).unwrap().is_none(), "nothing waiting yet");
+        let addr = listener.local_addr().unwrap();
+        let body = vec![7u8; 16 * 1024 * 1024];
+        let reader = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            // Let the sender fill the socket buffer before anything is read.
+            std::thread::sleep(Duration::from_millis(200));
+            let mut got = Vec::new();
+            c.read_to_end(&mut got).unwrap();
+            got.len()
+        });
+        let (mut stream, _) = loop {
+            if let Some(conn) = accept(&listener).unwrap() {
+                break conn;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(&body).unwrap();
+        drop(stream);
+        assert_eq!(reader.join().unwrap(), body.len());
     }
 
     #[test]

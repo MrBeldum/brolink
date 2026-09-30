@@ -43,6 +43,10 @@ GitHub release notes, so each version gets a heading of the form
   would try to send other Windows PCs their update with a Mac-only unzip,
   failing every few minutes. Its settings now say that updates arrive
   from the Mac.
+- Installing BroLink Host through the stream (for a PC on 3.0) can finish
+  on a Mac. The Mac served the file from a socket that macOS left
+  non-blocking, so sending the executable stopped as soon as the network
+  buffer filled and the PC rejected the truncated download.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.
