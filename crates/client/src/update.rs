@@ -473,7 +473,7 @@ fn should_push(running: &Version, rel: &Release) -> bool {
 
 pub fn old_host_message(name: &str, version: &Version) -> String {
     format!(
-        "{name} runs BroLink Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update BroLink Host in the toolbar: this Mac installs the new version through the stream. After that, updates are automatic."
+        "{name} runs BroLink Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update BroLink Host in the toolbar: this machine installs the new version through the stream. After that, updates are automatic."
     )
 }
 

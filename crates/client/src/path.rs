@@ -137,13 +137,13 @@ pub fn explain(
                 }
                 if p.ipv6 && !m.ipv6 {
                     t.push_str(&format!(
-                        " {pc} has IPv6; a network with IPv6 on this Mac's side would also connect directly."
+                        " {pc} has IPv6; a network with IPv6 on this machine's side would also connect directly."
                     ));
                 }
                 t
             } else if mac_hard {
                 format!(
-                    "{pc}'s network is fine; this Mac's is a hard NAT with no UPnP. From another network, or with UPnP on this router, the connection is direct."
+                    "{pc}'s network is fine; this machine's is a hard NAT with no UPnP. From another network, or with UPnP on this router, the connection is direct."
                 )
             } else {
                 "Both networks look easy to traverse, so Tailscale should switch to a direct path within a minute of traffic. If it never does, the routers may be blocking UDP between them.".to_string()
@@ -164,7 +164,7 @@ pub fn explain(
                     "{pc}'s router is a hard NAT with no UPnP. Turn UPnP or NAT-PMP on in that router, or forward a UDP port to {pc}; Tailscale then connects directly."
                 )
             } else {
-                format!("{pc}'s network looks easy to traverse; this Mac's side has not been checked yet.")
+                format!("{pc}'s network looks easy to traverse; this machine's side has not been checked yet.")
             }
         }
         (None, None) => {
@@ -398,7 +398,7 @@ mod tests {
 
         let pc_easy = nat(true, Some(false), true, false);
         let t = explain("Gaming-PC", &relayed, Some(&pc_easy), Some(&mac_hard)).unwrap();
-        assert!(t.contains("this Mac's is a hard NAT"), "{t}");
+        assert!(t.contains("this machine's is a hard NAT"), "{t}");
 
         let t = explain("Gaming-PC", &relayed, Some(&pc_easy), Some(&mac_easy)).unwrap();
         assert!(t.contains("within a minute"), "{t}");

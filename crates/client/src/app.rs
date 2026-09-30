@@ -2494,7 +2494,7 @@ pub(crate) mod snapshots {
             ),
             (
                 "failed",
-                failed("Office", "Office did not wake up. A wake packet only reaches it from its own network, or through a router that forwards UDP 9 to it."),
+                failed("Office", "Office didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in BroLink shows whether Wake-on-LAN is ready."),
             ),
             (
                 "disconnected",

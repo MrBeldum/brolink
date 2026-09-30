@@ -573,7 +573,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     // 1. Wake it if nothing answers.
     if !t.online && !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1200)) {
         let mac = t.mac.ok_or_else(|| {
-            anyhow!("{} is not answering and this Mac does not know how to wake it yet. Turn the PC on once while BroLink Host is running so it can learn.", t.name)
+            anyhow!("{} isn't answering, and BroLink doesn't know how to wake it yet. Turn it on once while BroLink runs there, so this machine can learn how.", t.name)
         })?;
         let start = Instant::now();
         let mut last_wake = Instant::now() - Duration::from_secs(60);
@@ -597,7 +597,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             }
             if start.elapsed() > Duration::from_secs(120) {
                 bail!(
-                    "{} did not wake up. A wake packet only reaches it from its own network, or through a router that forwards UDP 9 to it. Check Wake-on-LAN in BroLink Host on the PC.",
+                    "{} didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in BroLink shows whether Wake-on-LAN is ready.",
                     t.name
                 );
             }
@@ -617,7 +617,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         );
         if start.elapsed() > Duration::from_secs(60) {
             bail!(
-                "{} is up but nothing is streaming from it. Open BroLink Host on the PC and run setup.",
+                "{} is on, but nothing is streaming from it. Open BroLink there and set up sharing on its Sharing tab.",
                 t.name
             );
         }
@@ -698,7 +698,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             }
             if stopped.elapsed() >= Duration::from_secs(10) {
                 bail!(
-                    "{} did not stop the previous stream. Check BroLink Host there.",
+                    "{} didn't stop its previous stream. Try again; if it keeps happening, restart that machine.",
                     t.name
                 );
             }
@@ -813,7 +813,7 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
             Err(e) => {
                 tracing::info!("BroLink Host did not take the PIN: {e}");
                 progress.lock().detail =
-                    "BroLink Host is not answering on the PC. Open BroLink Host there and run setup, then try again.".into();
+                    "BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.".into();
             }
         }
         std::thread::sleep(Duration::from_millis(800));
@@ -852,16 +852,19 @@ pub fn wake_test(pc: &Pc) -> Result<bool> {
     wake_only(pc)?;
     std::thread::sleep(Duration::from_millis(1500));
     let st = host_status(ip, Duration::from_secs(3))
-        .ok_or_else(|| anyhow!("BroLink Host on {} is not answering", pc.name))?;
+        .ok_or_else(|| anyhow!("BroLink on {} isn't answering", pc.name))?;
     Ok(st.wake_packet_age_secs.is_some_and(|s| s <= 5))
 }
 
 /// Send the wake packet once, without connecting.
 pub fn wake_only(pc: &Pc) -> Result<usize> {
     let t = Target::from_pc(pc).ok_or_else(|| anyhow!("no address for {}", pc.name))?;
-    let mac = t
-        .mac
-        .ok_or_else(|| anyhow!("this Mac does not know {}'s MAC address yet", pc.name))?;
+    let mac = t.mac.ok_or_else(|| {
+        anyhow!(
+            "BroLink doesn't know how to wake {} yet; turn it on once while BroLink runs there",
+            pc.name
+        )
+    })?;
     Ok(wake::send(mac, t.lan_ip, t.public_ip))
 }
 
