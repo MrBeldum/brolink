@@ -38,6 +38,11 @@ GitHub release notes, so each version gets a heading of the form
   the new app in place. It kept running the old version until the next
   login, so a Mac that shares its desktop served other machines from the
   previous release.
+- A Windows machine no longer runs the Mac's updater. Since 4.0 every
+  machine runs the same window, so a Windows PC also checked GitHub and
+  would try to send other Windows PCs their update with a Mac-only unzip,
+  failing every few minutes. Its settings now say that updates arrive
+  from the Mac.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.

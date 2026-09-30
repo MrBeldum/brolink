@@ -1,9 +1,9 @@
 //! Finding and fetching BroLink releases on GitHub, for both apps' updaters.
 //!
-//! The repository is private, so the calls need a token: the caller's
-//! setting, `BROLINK_GITHUB_TOKEN`, or on macOS whatever git has stored for
-//! github.com, which is the login the install script uses too. Without one
-//! the requests still go out, so a public repository works unchanged.
+//! A public repository needs no login. For a private one the calls carry a
+//! token: the caller's setting, `BROLINK_GITHUB_TOKEN`, or on macOS whatever
+//! git has stored for github.com, which is the login the install script
+//! uses too. Without one the requests still go out.
 //!
 //! Only the Mac talks to GitHub. It replaces its own bundle and sends each
 //! PC the new `brolink-host.exe` over the control API; see

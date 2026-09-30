@@ -1,7 +1,7 @@
 //! Keeping this app and every BroLink Host it can see on the newest release.
 //!
-//! The Mac is the one machine with a GitHub login (the repository is
-//! private), so it does the fetching for everyone. Every few hours it asks
+//! The Mac does the fetching for everyone (with a GitHub login if the
+//! repository is private; see `brolink_core::update`). Every few hours it asks
 //! GitHub for the latest release. A newer app is downloaded, verified against
 //! GitHub's digest and its own code signature, and swapped into place once no
 //! stream is running; the app then relaunches itself. A newer host is
@@ -64,6 +64,19 @@ pub fn spawn(
     progress: Arc<Mutex<Progress>>,
     ctx: egui::Context,
 ) {
+    if !cfg!(target_os = "macos") {
+        // Everything below assumes a Mac: it replaces an app bundle and
+        // unpacks the Windows zip with /usr/bin/unzip. A Windows PC gets
+        // its new host pushed from the Mac, and a Linux node is rebuilt, so
+        // there is nothing here for either to fetch or send.
+        let _ = (discovery, live, progress, ctx);
+        state.lock().message = if cfg!(windows) {
+            "New versions arrive from the Mac on your Tailscale account.".into()
+        } else {
+            "BroLink updates itself on a Mac; install new releases here by hand.".into()
+        };
+        return;
+    }
     std::thread::spawn(move || {
         let mut next = Instant::now() + FIRST_CHECK;
         let mut release: Option<Release> = None;
