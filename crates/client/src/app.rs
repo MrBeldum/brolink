@@ -502,7 +502,8 @@ impl eframe::App for ClientApp {
             return;
         }
 
-        ctx.request_repaint_after(Duration::from_millis(400));
+        // Workers repaint when something changes; this only ages notices.
+        ctx.request_repaint_after(Duration::from_secs(1));
         if self.tailscale_checked.elapsed() > Duration::from_secs(2) {
             self.tailscale_checked = Instant::now();
             self.tailscale_ok = tailscale::cli().is_some();
