@@ -20,7 +20,7 @@ use brolink_core::api::{
     CLIPBOARD_PATH, UPDATE_PATH,
 };
 use brolink_core::http::{self, Request, Response};
-use brolink_core::tailscale::{self, is_tailnet, is_tailnet_ip};
+use brolink_core::tailscale::{self, is_tailnet_ip};
 use brolink_core::CONTROL_PORT;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -911,8 +911,7 @@ fn control_host(host: &str) -> bool {
         return true;
     }
     host.parse::<SocketAddr>().is_ok_and(|addr| {
-        addr.port() == CONTROL_PORT
-            && (addr.ip().is_loopback() || matches!(addr.ip(), IpAddr::V4(ip) if is_tailnet(ip)))
+        addr.port() == CONTROL_PORT && (addr.ip().is_loopback() || is_tailnet_ip(addr.ip()))
     })
 }
 
@@ -1009,8 +1008,12 @@ mod tests {
             "localhost:47850",
             "100.64.0.10:47850",
             "[::1]:47850",
+            "[fd7a:115c:a1e0::1]:47850",
         ] {
             assert!(control_host(host), "{host}");
+        }
+        for host in ["8.8.8.8:47850", "[2001:db8::1]:47850", "100.64.0.10:80"] {
+            assert!(!control_host(host), "{host}");
         }
         let req = Request {
             headers: vec![("content-type".into(), "application/json-not-really".into())],
