@@ -38,6 +38,9 @@ const NETCHECK_TICKS: u64 = 120;
 
 pub struct Service {
     cfg: Mutex<HostConfig>,
+    /// This machine's name, re-read now and then: asking macOS or Linux
+    /// runs a program, which every status request used to do.
+    name: Mutex<String>,
     tailscale: Mutex<Result<tailscale::Status, String>>,
     wake: Mutex<WakeInfo>,
     /// When a magic packet for this PC last arrived.
@@ -60,6 +63,7 @@ impl Service {
     pub fn new() -> Self {
         Self {
             cfg: Mutex::new(HostConfig::load()),
+            name: Mutex::new(brolink_core::config::machine_name()),
             tailscale: Mutex::new(Err("not checked yet".into())),
             wake: Mutex::new(WakeInfo::default()),
             wake_seen: Mutex::new(None),
@@ -330,6 +334,7 @@ impl Service {
         }
 
         if tick.is_multiple_of(12) {
+            *self.name.lock() = brolink_core::config::machine_name();
             let w = wake::probe();
             let mut cur = self.wake.lock();
             if *cur != w {
@@ -430,7 +435,7 @@ impl Service {
         Status {
             app: "brolink".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            name: brolink_core::config::machine_name(),
+            name: self.name.lock().clone(),
             os: ts
                 .as_ref()
                 .ok()
