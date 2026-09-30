@@ -489,18 +489,21 @@ impl HostApp {
                     .trim_end_matches("Install it and sign in.")
                     .trim()
                     .trim_end_matches('.');
-                ui::dot_label(
-                    ui,
-                    Tone::Danger,
-                    &format!(
-                        "{}. Install Tailscale and sign in with the account your other machines use.",
-                        sentence_case(why)
-                    ),
-                );
-                if ui::link(ui, "Get Tailscale").clicked() {
-                    ui.ctx()
-                        .open_url(egui::OpenUrl::new_tab(self.os.tailscale_url()));
-                }
+                // The link belongs to the item: it starts where its text does.
+                ui::dot_item(ui, Tone::Danger, |ui| {
+                    ui.spacing_mut().item_spacing.y = space::XXS;
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(format!(
+                            "{}. Install Tailscale and sign in with the account your other machines use.",
+                            sentence_case(why)
+                        )).color(ui::PALETTE.text))
+                        .wrap(),
+                    );
+                    if ui::link(ui, "Get Tailscale").clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(self.os.tailscale_url()));
+                    }
+                });
             }
             for item in &admin_items {
                 ui::dot_label(ui, Tone::Warning, item);

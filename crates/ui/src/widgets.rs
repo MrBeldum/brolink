@@ -626,14 +626,53 @@ pub fn banner(
                 if let Some(b) = body {
                     muted(ui, b);
                 }
-                ui.add_space(space::XS);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = space::SM;
-                    actions(ui)
-                });
+                action_row(ui, space::XS, actions);
             });
         })
         .response
+}
+
+/// A row of actions under a block of text, lined up with the text: a
+/// filled or outlined button's edge starts the line, and a quiet button
+/// (text until hovered) is pulled back by its padding so its label does.
+/// Takes no room at all when `add` adds nothing; otherwise `gap` goes
+/// above it.
+pub fn action_row(ui: &mut Ui, gap: f32, add: impl FnOnce(&mut Ui)) {
+    let top = ui.available_rect_before_wrap();
+    // One control high, as `horizontal_wrapped` starts: its lines centre
+    // in that height and further lines go below.
+    let line = Rect::from_min_size(
+        top.min + Vec2::new(0.0, gap),
+        Vec2::new(top.width(), ui.spacing().interact_size.y),
+    );
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(line)
+            .layout(Layout::left_to_right(Align::Center).with_main_wrap(true)),
+    );
+    child.spacing_mut().item_spacing.x = space::SM;
+    let key = flush_key(child.id());
+    child.data_mut(|d| d.insert_temp(key, true));
+    add(&mut child);
+    child.data_mut(|d| d.remove::<bool>(key));
+    let used = child.min_rect();
+    if used.width() > 0.0 && used.height() > 0.0 {
+        ui.allocate_rect(
+            Rect::from_min_max(top.min, Pos2::new(top.right(), used.bottom())),
+            Sense::hover(),
+        );
+    }
+}
+
+fn flush_key(row: Id) -> Id {
+    Id::new("brolink.action_row").with(row)
+}
+
+/// Whether the next widget starts a line of an [`action_row`].
+fn starts_action_line(ui: &Ui) -> bool {
+    ui.data(|d| d.get_temp::<bool>(flush_key(ui.id())))
+        .unwrap_or(false)
+        && ui.cursor().min.x <= ui.max_rect().min.x + 0.5
 }
 
 // ---------------------------------------------------------------------------
@@ -872,6 +911,11 @@ fn labelled_button(
     let pad = space::MD;
     let icon_w = if trailing.is_some() { 16.0 } else { 0.0 };
     let w = (galley.size().x + 2.0 * pad + icon_w).max(h);
+    if matches!(kind, Kind::Quiet | Kind::Danger) && starts_action_line(ui) {
+        // No fill or outline marks a quiet button's box, so its label is
+        // what the eye lines up: pull it back by the padding.
+        ui.add_space(-pad);
+    }
     let (rect, response) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     keep_in_view(&response);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), a11y));
@@ -1961,6 +2005,13 @@ pub fn tag(ui: &mut Ui, tone: Option<Tone>, label: &str) -> Response {
         );
     }
     response
+}
+
+/// A status dot in the gutter and any content beside it, every line of it
+/// starting at the text column: a checklist item with a link under its
+/// text, say.
+pub fn dot_item<R>(ui: &mut Ui, tone: Tone, add: impl FnOnce(&mut Ui) -> R) -> R {
+    dotted(ui, tone, add)
 }
 
 /// A small coloured dot followed by wrapped text, for checklists.

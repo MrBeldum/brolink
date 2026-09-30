@@ -2646,6 +2646,31 @@ pub(crate) mod snapshots {
     }
 
     #[test]
+    fn a_notices_quiet_action_lines_up_with_its_text() {
+        for state in ["failed", "confirm-restart"] {
+            let setup = states().into_iter().find(|(n, _)| *n == state).unwrap().1;
+            let h = build(setup, TYPICAL, 1.0, false);
+            let (title, action) = match state {
+                "failed" => ("Couldn't connect to Office", "Dismiss"),
+                _ => ("Restart Gaming-PC?", "Restart"),
+            };
+            let text = h.get_by_label(title).raw_bounds().unwrap().x0;
+            let button = h.get_by_label(action).raw_bounds().unwrap().x0;
+            // A quiet button's label starts its padding in from its box;
+            // a filled one's edge is what lines up.
+            let label = if action == "Dismiss" {
+                button + f64::from(space::MD)
+            } else {
+                button
+            };
+            assert!(
+                (label - text).abs() <= 0.5,
+                "{state}: {action} starts at {label}, the text at {text}"
+            );
+        }
+    }
+
+    #[test]
     fn row_menus_stay_inside_the_smallest_window() {
         // Gaming-PC's menu is the longest; Den's row is the lowest, so its
         // menu has to open upwards.

@@ -49,6 +49,7 @@ writes `target/ui-snapshots/`. Names below refer to that folder
 | V9 | Low | The stream toolbar was a rectangle with a white hairline on all four sides. | Fixed: bottom hairline only. |
 | V10 | Low | Bitrate slider: large hollow knob, violet trail, a drag box beside it. | Fixed: a slim slider with a mono value, arrow-key steps. |
 | V11 | Low | The App field was 20 pt tall beside 30-pt controls. | Fixed. |
+| V12 | Low | A notice's quiet action ("Dismiss", "Cancel") sat 12 points right of the text above it: its label is inset by the button's padding, and no fill or outline shows the box. A notice with no actions kept an empty row's height; the setup card's "Get Tailscale" link started left of the item it belongs to. | Fixed: `action_row` pulls a leading quiet button back by its padding; an empty row takes no room; `dot_item` puts the link in the item's text column. |
 
 ### Contrast (WCAG 2.2 AA, computed)
 
