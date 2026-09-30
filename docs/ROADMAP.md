@@ -25,12 +25,27 @@ Moonlight and launched it; BroLink itself did wake, pairing and power.
 - [x] Both Sunshine PIN APIs (with and without pairing ids)
 - [x] GPL-3.0-or-later
 
+## v3.1 – v3.3
+
+- [x] Clipboard sync both ways while streaming (text, up to 32 KB)
+- [x] Automatic updates: the Mac fetches releases from GitHub and pushes
+      the new host to every PC over the control API
+- [x] Direct or relayed path shown per PC, with the reason for a relay
+- [x] A peer relay you run yourself (`deploy/relay/`)
+- [x] Match screen: the stream is the viewing machine's own resolution
+
+## v4.0
+
+- [x] One app on every OS: each machine lists the others and can share
+      its own desktop (Windows, macOS, Linux, a VPS)
+- [x] `deploy/node/` Docker kit and `deploy/native/` units for a VPS desktop
+- [x] The chosen bitrate is the one the PC's encoder targets
+
 ## Later
 
 - [ ] AV1 decode on M3 and newer (moonlight-common-c negotiates it; the
       VideoToolbox path is HEVC and H.264 today)
 - [ ] Gamepads on the Mac (GameController framework to Sunshine's virtual pad)
-- [ ] Clipboard sync between Mac and PC
 - [ ] Signed Windows and macOS binaries (Authenticode, Developer ID and
       notarization)
 - [ ] Menu-bar presence on the Mac, tray icon on Windows

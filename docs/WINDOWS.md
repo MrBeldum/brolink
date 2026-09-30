@@ -84,10 +84,13 @@ requests, all JSON:
 | `GET /v1/clipboard` | The clipboard as text, with Windows' clipboard sequence number |
 | `POST /v1/clipboard {"text"}` | Replaces the clipboard, so a ⌘V on the Mac pastes the Mac's text |
 | `POST /v1/update` | A new `brolink-host.exe`; see Updates |
+| `GET /v1/display` | Why a capture may be black: monitors, the desktop's sampled brightness, HDR state, the engine's capture settings |
+| `POST /v1/display {"advanced_color"}` | Turns the HDR (advanced colour) desktop off or on |
 
 A request is answered only if it comes from loopback or from a Tailscale
 address that `tailscale whois` attributes to the account this PC is signed
-in as. Anything else is refused with a 403 before any action.
+in as; a machine shared in from another tailnet is refused too. Anything
+else gets a 403 before any action.
 
 The service also listens on UDP 9. A magic packet for this PC's MAC that
 arrives while it is awake is logged and reported in the status, which is

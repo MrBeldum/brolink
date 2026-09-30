@@ -69,9 +69,9 @@ xcrun stapler staple dist/BroLink.app
 
 1. If Tailscale is missing or signed out, the top card says so and **Get
    Tailscale** opens the download page.
-2. **Your PCs** lists the Windows machines on your Tailscale account. Each
-   line says whether it is ready, asleep, or missing something on the PC
-   side.
+2. **Your machines** lists every other machine on your Tailscale account
+   (Windows, macOS and Linux alike). Each line says whether it is ready,
+   asleep, or missing something on its side.
 3. Click **Connect**. The first time with a PC, BroLink pairs with it: it
    picks a random PIN, sends it to BroLink Host over Tailscale, and the host
    enters it for you. You see the PIN but never need it. If there is no
