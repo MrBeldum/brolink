@@ -30,7 +30,7 @@ const NETCHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 const PEER_RELAY_EVERY: Duration = Duration::from_secs(30);
 
 /// A machine on the tailnet BroLink can open, as far as this node can tell.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pc {
     pub node_id: String,
     pub name: String,
@@ -66,7 +66,7 @@ impl Pc {
 }
 
 /// A tailnet node tagged `tag:relay`: a candidate peer relay, never a PC.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Relay {
     pub name: String,
     pub ip: Option<Ipv4Addr>,
@@ -86,7 +86,7 @@ pub enum PeerRelayServers {
     Known(Vec<String>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Discovery {
     /// Why nothing can be probed, when Tailscale is down. The list then
     /// holds what was remembered.
@@ -110,9 +110,9 @@ pub struct Discovery {
 /// be woken.
 pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
     let nat: Arc<Mutex<Option<NatReport>>> = Arc::default();
-    spawn_netcheck(nat.clone(), ctx.clone());
+    spawn_netcheck(nat.clone());
     let servers: Arc<Mutex<PeerRelayServers>> = Arc::default();
-    spawn_peer_relay_probe(servers.clone(), ctx.clone());
+    spawn_peer_relay_probe(servers.clone());
     std::thread::spawn(move || {
         // Round trips per PC, newest last; the smallest of the last few is
         // the path's real round trip (a first connect also pays for the
@@ -134,21 +134,33 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
             scan.self_nat = nat.lock().clone();
             scan.peer_relay_servers = servers.lock().clone();
             learn(&scan);
+            let changed = listing_changed(&shared.lock(), &scan);
             *shared.lock() = scan;
-            ctx.request_repaint();
+            if changed {
+                ctx.request_repaint();
+            }
             std::thread::sleep(Duration::from_secs(3));
         }
     });
 }
 
-/// `tailscale netcheck` now and then, for [`Discovery::self_nat`].
-fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, ctx: egui::Context) {
+/// Whether a new scan shows the window anything new. Every scan has a new
+/// time; that alone is no reason to draw the window again.
+fn listing_changed(old: &Discovery, new: &Discovery) -> bool {
+    old.refreshed.is_none() != new.refreshed.is_none()
+        || *old
+            != (Discovery {
+                refreshed: old.refreshed,
+                ..new.clone()
+            })
+}
+
+/// `tailscale netcheck` now and then, for [`Discovery::self_nat`]. The next
+/// scan carries it to the window.
+fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>) {
     std::thread::spawn(move || loop {
         match tailscale::netcheck() {
-            Ok(n) => {
-                *slot.lock() = Some(n.report());
-                ctx.request_repaint();
-            }
+            Ok(n) => *slot.lock() = Some(n.report()),
             Err(e) => tracing::info!("netcheck: {e}"),
         }
         std::thread::sleep(NETCHECK_EVERY);
@@ -158,15 +170,14 @@ fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, ctx: egui::Context) {
 /// `tailscale debug peer-relay-servers`, at most once every 30 s, on its own
 /// thread so the scan loop and UI never wait on it. The command itself is
 /// bounded (see `tailscale::PEER_RELAY_SERVERS_TIMEOUT`). Any failure leaves
-/// the result `Unknown`, never a denial.
-fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, ctx: egui::Context) {
+/// the result `Unknown`, never a denial. The next scan carries it to the
+/// window.
+fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>) {
     std::thread::spawn(move || loop {
-        let result = match tailscale::peer_relay_servers() {
+        *slot.lock() = match tailscale::peer_relay_servers() {
             Ok(servers) => PeerRelayServers::Known(servers),
             Err(_) => PeerRelayServers::Unknown,
         };
-        *slot.lock() = result;
-        ctx.request_repaint();
         std::thread::sleep(PEER_RELAY_EVERY);
     });
 }
@@ -451,20 +462,6 @@ pub struct Live {
     pub clipboard: clipboard::Sync,
 }
 
-impl Live {
-    /// "Auto · Smooth", "Custom · 1440p · 60 fps · 25 Mbps".
-    pub fn quality_label(&self) -> String {
-        let mode = match self.settings.quality {
-            crate::config::Quality::Auto => "Auto",
-            crate::config::Quality::Custom => "Custom",
-        };
-        match self.settings.preset() {
-            Some(p) => format!("{mode} · {}", p.label()),
-            None => format!("{mode} · {}", self.settings.describe()),
-        }
-    }
-}
-
 impl Drop for Live {
     fn drop(&mut self) {
         self.clipboard.stop();
@@ -573,7 +570,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     // 1. Wake it if nothing answers.
     if !t.online && !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1200)) {
         let mac = t.mac.ok_or_else(|| {
-            anyhow!("{} is not answering and this Mac does not know how to wake it yet. Turn the PC on once while BroLink Host is running so it can learn.", t.name)
+            anyhow!("{} isn't answering, and BroLink doesn't know how to wake it yet. Turn it on once while BroLink runs there, so this machine can learn how.", t.name)
         })?;
         let start = Instant::now();
         let mut last_wake = Instant::now() - Duration::from_secs(60);
@@ -597,7 +594,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             }
             if start.elapsed() > Duration::from_secs(120) {
                 bail!(
-                    "{} did not wake up. A wake packet only reaches it from its own network, or through a router that forwards UDP 9 to it. Check Wake-on-LAN in BroLink Host on the PC.",
+                    "{} didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in BroLink shows whether Wake-on-LAN is ready.",
                     t.name
                 );
             }
@@ -617,7 +614,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         );
         if start.elapsed() > Duration::from_secs(60) {
             bail!(
-                "{} is up but nothing is streaming from it. Open BroLink Host on the PC and run setup.",
+                "{} is on, but nothing is streaming from it. Open BroLink there and set up sharing on its Sharing tab.",
                 t.name
             );
         }
@@ -641,15 +638,15 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
                 tracing::warn!("could not forget the PC's old certificate: {save_error:#}");
             }
             client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
-            retry(8, || client.server_info())?
+            retry(8, &c.progress, generation, || client.server_info())?
         }
-        Err(_) => retry(8, || client.server_info())?,
+        Err(_) => retry(8, &c.progress, generation, || client.server_info())?,
     };
     if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
         let der = client.pair_cancellable(&pin, &brolink_core::config::machine_name(), || {
-            submit_pin(t.ip, &pin, &c.progress);
+            submit_pin(t.ip, &pin, &c.progress, &c.ctx);
             stale(&c.progress, generation)
         })?;
         remember_cert(&t.node_id, &t.name, &der);
@@ -666,7 +663,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     //    carry.
     report(Step::Launching, "Measuring the path…".into());
     let path = measure_path(&t.node_id, t.ip, &t.path);
-    let settings = path::effective(&c.settings, &path);
+    let settings = path::effective(&c.settings);
     tracing::info!(
         "path to {}: {} · {}",
         t.name,
@@ -698,7 +695,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             }
             if stopped.elapsed() >= Duration::from_secs(10) {
                 bail!(
-                    "{} did not stop the previous stream. Check BroLink Host there.",
+                    "{} didn't stop its previous stream. Try again; if it keeps happening, restart that machine.",
                     t.name
                 );
             }
@@ -727,7 +724,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         let _ = client.quit();
         bail!("cancelled");
     }
-    let hevc = settings.codec != Codec::H264 && info.codec_mode_support & 0x0F00 != 0;
+    let hevc = wants_hevc(settings.codec, info.codec_mode_support);
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = c.ctx.clone();
@@ -745,7 +742,6 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             fps,
             bitrate_kbps: settings.bitrate_kbps,
             hevc,
-            remote: false,
         },
         ri_key,
         ri_iv,
@@ -778,24 +774,54 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     Ok(())
 }
 
-fn retry<T>(times: u32, mut f: impl FnMut() -> Result<T>) -> Result<T> {
-    let mut last = None;
-    for _ in 0..times {
+/// HEVC when the settings allow it, the PC can encode it (Sunshine's
+/// `ServerCodecModeSupport` HEVC bits) and this machine can decode it.
+/// Windows and Linux decode H.264 only, whatever the PC offers.
+fn wants_hevc(codec: Codec, server_codecs: i32) -> bool {
+    const SCM_HEVC_MASK: i32 = 0x0F00;
+    codec != Codec::H264
+        && server_codecs & SCM_HEVC_MASK != 0
+        && brolink_stream::video::supported_formats() & brolink_stream::ffi::VIDEO_FORMAT_MASK_H265
+            != 0
+}
+
+/// `f` until it succeeds, `times` tries at most, giving up early once the
+/// attempt is cancelled.
+fn retry<T>(
+    times: u32,
+    progress: &Mutex<Progress>,
+    generation: u64,
+    mut f: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut last = anyhow!("not tried");
+    for attempt in 1..=times {
         match f() {
             Ok(v) => return Ok(v),
-            Err(e) => last = Some(e),
+            Err(e) => last = e,
+        }
+        if attempt == times || stale(progress, generation) {
+            break;
         }
         std::thread::sleep(Duration::from_millis(700));
     }
-    Err(last.unwrap())
+    Err(last)
 }
 
 /// Hand the PIN to BroLink Host on the PC, which types it into Sunshine. If
 /// there is no BroLink Host, the PIN stays on screen for someone at the PC.
-fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
+fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>, ctx: &egui::Context) {
     let req = PinRequest {
         pin: pin.into(),
         name: brolink_core::config::machine_name(),
+    };
+    // Pairing draws no spinner, so a new reason has to ask for its frame.
+    let show = |detail: String| {
+        let mut p = progress.lock();
+        if p.detail != detail {
+            p.detail = detail;
+            drop(p);
+            ctx.request_repaint();
+        }
     };
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(75) {
@@ -808,12 +834,11 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
             Ok(a) => {
                 let reason = a.error.unwrap_or_else(|| "PIN not accepted yet".into());
                 tracing::info!("PIN not accepted yet: {reason}");
-                progress.lock().detail = reason;
+                show(reason);
             }
             Err(e) => {
                 tracing::info!("BroLink Host did not take the PIN: {e}");
-                progress.lock().detail =
-                    "BroLink Host is not answering on the PC. Open BroLink Host there and run setup, then try again.".into();
+                show("BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.".into());
             }
         }
         std::thread::sleep(Duration::from_millis(800));
@@ -852,16 +877,19 @@ pub fn wake_test(pc: &Pc) -> Result<bool> {
     wake_only(pc)?;
     std::thread::sleep(Duration::from_millis(1500));
     let st = host_status(ip, Duration::from_secs(3))
-        .ok_or_else(|| anyhow!("BroLink Host on {} is not answering", pc.name))?;
+        .ok_or_else(|| anyhow!("BroLink on {} isn't answering", pc.name))?;
     Ok(st.wake_packet_age_secs.is_some_and(|s| s <= 5))
 }
 
 /// Send the wake packet once, without connecting.
 pub fn wake_only(pc: &Pc) -> Result<usize> {
     let t = Target::from_pc(pc).ok_or_else(|| anyhow!("no address for {}", pc.name))?;
-    let mac = t
-        .mac
-        .ok_or_else(|| anyhow!("this Mac does not know {}'s MAC address yet", pc.name))?;
+    let mac = t.mac.ok_or_else(|| {
+        anyhow!(
+            "BroLink doesn't know how to wake {} yet; turn it on once while BroLink runs there",
+            pc.name
+        )
+    })?;
     Ok(wake::send(mac, t.lan_ip, t.public_ip))
 }
 
@@ -869,8 +897,6 @@ pub fn wake_only(pc: &Pc) -> Result<usize> {
 mod tests {
     use super::*;
 
-    /// Against BroLink Host running on this machine: the packet goes out on
-    /// the LAN and the host reports it. `cargo test -p brolink-client wake_test_real -- --ignored`
     #[test]
     fn update_reservation_blocks_connect_in_every_idle_state() {
         for step in [Step::Idle, Step::Ended { error: None }] {
@@ -897,6 +923,8 @@ mod tests {
         }
     }
 
+    /// Against BroLink Host running on this machine: the packet goes out on
+    /// the LAN and the host reports it. `cargo test -p brolink-client wake_test_real -- --ignored`
     #[test]
     #[ignore = "needs BroLink Host running on this machine"]
     fn wake_test_real() {
@@ -979,6 +1007,72 @@ mod tests {
             );
         }
         assert!(d.error.is_some() || !d.login.is_empty());
+    }
+
+    #[test]
+    fn hevc_needs_the_setting_the_pc_and_this_decoder() {
+        let hevc_pc = 0x0101;
+        assert!(!wants_hevc(Codec::H264, hevc_pc));
+        assert!(!wants_hevc(Codec::Auto, 0x0001), "an H.264-only PC");
+        assert_eq!(
+            wants_hevc(Codec::Auto, hevc_pc),
+            cfg!(target_os = "macos"),
+            "only VideoToolbox decodes HEVC here"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_retry_stops_at_once() {
+        let progress = Mutex::new(Progress {
+            generation: 3,
+            ..Default::default()
+        });
+        let mut tries = 0;
+        let r: Result<()> = retry(8, &progress, 3, || {
+            tries += 1;
+            progress.lock().cancel = true;
+            bail!("the PC is not answering")
+        });
+        assert_eq!(tries, 1);
+        assert_eq!(r.unwrap_err().to_string(), "the PC is not answering");
+        progress.lock().cancel = false;
+        let mut tries = 0;
+        let r = retry(3, &progress, 3, || {
+            tries += 1;
+            if tries < 2 {
+                bail!("not yet")
+            }
+            Ok(tries)
+        });
+        assert_eq!(r.unwrap(), 2);
+    }
+
+    #[test]
+    fn only_a_scan_that_changes_something_redraws() {
+        let first = Discovery {
+            refreshed: Some(Instant::now()),
+            pcs: vec![Pc {
+                name: "Gaming-PC".into(),
+                online: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            listing_changed(&Discovery::default(), &first),
+            "the first scan"
+        );
+        let again = Discovery {
+            refreshed: Some(Instant::now() + Duration::from_secs(3)),
+            ..first.clone()
+        };
+        assert!(!listing_changed(&first, &again), "only the time moved");
+        let mut asleep = again.clone();
+        asleep.pcs[0].online = false;
+        assert!(listing_changed(&first, &asleep));
+        let mut relay = again;
+        relay.peer_relay_servers = PeerRelayServers::Known(vec!["100.64.0.40".into()]);
+        assert!(listing_changed(&first, &relay));
     }
 
     #[test]

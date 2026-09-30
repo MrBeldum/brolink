@@ -4,6 +4,139 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- The window is redesigned around one design system, in the product
+  site's black, white and hairlines, set in Geist and Geist Mono. Colour
+  now means something: green for ready, amber for needs attention, red
+  for broken, and the logo's violet only for keyboard focus and
+  progress. Every text colour meets WCAG AA on every surface it sits on;
+  the old footer and captions did not.
+- Tabs across the top: **Machines**, **Sharing** and **Settings**
+  (Command-1, 2 and Command-comma on a Mac; Ctrl elsewhere; Escape goes
+  back). The Sharing tab is new in the unified app: this machine's setup,
+  what it reports (Tailscale, streaming engine, network, Wake-on-LAN,
+  controllers), the devices paired with it, its options and its log.
+  Until now the unified window showed only a one-line summary and a
+  setup button; paired devices, the log and Stop service were
+  unreachable.
+- The machine list shows each machine's state as a dot and one line,
+  with **Connect** (or **Wake and connect**) and a menu for Wake, Test
+  wake, Sleep, Restart, Shut down and Copy Tailscale address. Buttons
+  stay put and dim while a connection is in progress instead of
+  disappearing. This machine leads the list and opens its Sharing tab.
+- Connecting says what is happening and what to expect; pairing shows
+  the PIN in boxes. A failure is titled "Couldn't connect to …" or
+  "… disconnected", with **Try again**, and a lighter profile is offered
+  only when the stream itself failed. The empty list, "looking",
+  Tailscale missing and Tailscale stopped each say what to do.
+- Settings is grouped (Stream, Window and input, Power, Updates, Relay,
+  About) and the quality profile is one control: Recommended, Smooth,
+  Balanced, Sharp or Custom. Mouse capture is now a setting as well as a
+  toolbar choice. "Command acts as Ctrl" shows only on a Mac, and "Keep
+  this PC awake" only on Windows, where it does something.
+- In a stream, the toolbar's menus look and behave the same, open
+  towards the window's middle, and fold into one **More** menu on narrow
+  windows. The host key is shown as keycaps (control option on a Mac,
+  Ctrl Alt elsewhere) when a stream starts and on the toolbar. The
+  connecting screen has a **Cancel** button, so leaving no longer needs
+  the host key. Stream settings and Stream performance are proper
+  panels with a close button; Escape closes Stream settings.
+- Every menu, dropdown and panel fits the window down to its smallest
+  size (640×420). A menu opens upwards when there is more room above,
+  and scrolls, with its scroll bar showing, when neither side has room
+  for all of it; at the smallest size the stream toolbar's More menu cut
+  off "Command acts as Ctrl" and the PC's power items. Stream settings
+  and Stream performance stay below the toolbar, and Tab scrolls the
+  control it reaches into view.
+- A notice's actions line up with its text: "Dismiss" sat 12 points to
+  the right of the words above it.
+- A relayed path is amber, not red: it works, and Connection details
+  says how to get a direct one.
+- The idle window no longer repaints on a timer (it redrew 2.5 times a
+  second forever), machine discovery redraws it only when the list
+  changes, and the Tailscale check that could start a process
+  every two seconds on the UI thread now runs on its own thread.
+  Unpairing and installing the controller driver no longer block the
+  window.
+- The app is about 470 KB smaller (11.7 MB for the macOS release
+  binary): Geist's five cuts replace Inter's three.
+- The control service again answers only machines signed in to the same
+  Tailscale account. Since 4.0.0 it answered any machine Tailscale could
+  name, so a machine shared in from someone else's tailnet could pair with
+  the PC, sleep or restart it, read and write its clipboard, and push it a
+  new `brolink-host.exe`. A tagged server such as the relay VPS belongs to
+  no account, so it answers the members of its own tailnet, which keeps a
+  Mac able to open the VPS desktop.
+- Text copied on a Mac or Linux machine you are streaming from now reaches
+  the machine you are watching on. Only Windows reported a clipboard
+  sequence number; everywhere else it was always 0, so the viewer took
+  every copy for the one it had already seen. On a Linux desktop, text
+  pasted in from the viewer also stays on the clipboard now instead of
+  vanishing when no clipboard manager picks it up.
+- A Windows PC whose pushed update crashes on start keeps the version it
+  had. The service used to exit as soon as the new executable had been
+  launched, so a replacement that died straight away left the PC with no
+  BroLink service until someone logged in again. It now waits two seconds,
+  and puts the previous executable back if the new one has already exited.
+  The PC's log says so, and the Mac warns once instead of sending the same
+  release again every three minutes.
+- Update downloads try each of a server's addresses in turn. Only the first
+  one the name resolved to was ever tried, so one unreachable address (an
+  IPv6 one on a network without IPv6, say) failed the whole update check.
+- `brolink-host.exe`'s version details (Explorer's Details tab) named the
+  wrong licence, MIT; they now say GPL-3.0-or-later, the licence BroLink
+  and moonlight-common-c are under.
+- Windows setup no longer breaks on a network adapter whose name holds a
+  `"` or a `$`. The name was written into a double-quoted PowerShell
+  string, where a `"` ends the string (a syntax error that stops the whole
+  setup) and a `$` expands. It is now only ever a single-quoted literal.
+- The macOS install scripts restart the background service after putting
+  the new app in place. It kept running the old version until the next
+  login, so a Mac that shares its desktop served other machines from the
+  previous release.
+- A Windows machine no longer runs the Mac's updater. Since 4.0 every
+  machine runs the same window, so a Windows PC also checked GitHub and
+  would try to send other Windows PCs their update with a Mac-only unzip,
+  failing every few minutes. Its settings now say that updates arrive
+  from the Mac.
+- Installing BroLink Host through the stream (for a PC on 3.0) can finish
+  on a Mac. The Mac served the file from a socket that macOS left
+  non-blocking, so sending the executable stopped as soon as the network
+  buffer filled and the PC rejected the truncated download.
+- **Share this machine** works on a Windows account whose folder has a
+  space in it ("C:\Users\Ada Lovelace"). The elevated setup was handed
+  that folder through PowerShell's Start-Process, which splits unquoted
+  arguments at spaces, so it received half a path and an unexpected
+  extra argument and failed.
+- The service log keeps what matters. Every machine that polled the
+  service was logged again each minute ("hermes (…) asked" was 2,707 of
+  the 2,810 lines in this Mac's `service.log`), and every change of the
+  nearest Tailscale relay region logged a network line. Each peer is now
+  logged when first seen, when its answer changes or after an hour away,
+  and the network line only when the NAT itself changes.
+- When the Mac's sound output changes mid-stream (AirPods connect, say),
+  the stream's stats name the device the sound moved to. macOS already
+  moved it; BroLink kept naming the old one and logged a warning.
+- A host update that lands is no longer reported as a failure. A PC can
+  take the new executable and restart before its reply reaches the Mac;
+  the Mac then retried, heard "this PC already runs BroLink Host 4.0.2",
+  and showed "Could not update" in red. It now asks the PC which version
+  it runs before calling a push failed.
+- Cancel stops a connection attempt straight away while the PC is not
+  answering. The pairing check retried eight times regardless, which could
+  hold the window on "Checking pairing…" for most of a minute after Cancel.
+- A Windows or Linux viewer no longer calls its stream HEVC: those decode
+  H.264 only, and the toolbar named the codec the PC could offer instead
+  of the one in use.
+- The check that notices a black picture costs the decoder 0.14 ms a frame
+  instead of 2.5 ms at 3024×1964 when the picture really is black (15% of
+  a core at 60 fps, on the path every frame takes to the screen).
+- A Mac or Linux machine that shares its desktop no longer runs a program
+  (`scutil` or `hostname`) for every status request it answers.
+- When the picture is black, the PC's explanation gets a minute to arrive
+  instead of 25 seconds, which its slower checks sometimes needed.
+
 ## 4.0.2 (2026-09-22)
 
 - `panel.log` and `service.log` no longer grow without end. Both were

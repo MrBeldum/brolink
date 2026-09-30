@@ -1,53 +1,97 @@
-//! The one BroLink window: a machine list to connect from, and sharing of
-//! this machine so others can connect in.
+//! The one BroLink window: the machine list to connect from, this
+//! machine's Sharing page, and settings. The viewer (`brolink-client`)
+//! draws the window; the Sharing page is drawn by [`HostApp`] through
+//! [`SharePage`], and a summary of it is handed over for the machine list.
 
-use crate::app::HostApp;
+use crate::app::{HostApp, Os, Shared};
 use brolink_client::app::ClientApp;
-use brolink_client::share::{LocalShare, Slot};
+use brolink_client::share::{LocalShare, SharePage, Slot};
 use eframe::egui;
 use parking_lot::Mutex;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct NodeApp {
     client: ClientApp,
-    host: HostApp,
+    host: Rc<RefCell<HostApp>>,
     local: Slot,
+    /// The host state last copied into `local`; copied again only when it
+    /// moves, so a stream does not pay for it every frame.
+    synced: Option<u64>,
+}
+
+/// The Sharing page, as the viewer's window hosts it.
+struct HostPage(Rc<RefCell<HostApp>>);
+
+impl SharePage for HostPage {
+    fn show(&mut self, ui: &mut egui::Ui) {
+        self.0.borrow_mut().page(ui);
+    }
 }
 
 impl NodeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let client = ClientApp::new(cc);
+        let host = HostApp::new(cc);
+        Self::assemble(client, host)
+    }
+
+    fn assemble(client: ClientApp, host: HostApp) -> Self {
+        let host = Rc::new(RefCell::new(host));
         let local: Slot = Arc::new(Mutex::new(LocalShare::default()));
-        let client = ClientApp::new(cc).with_local(local.clone());
+        let client = client.with_local(local.clone(), Box::new(HostPage(host.clone())));
         Self {
             client,
-            host: HostApp::new(cc),
+            host,
             local,
+            synced: None,
         }
+    }
+
+    /// The whole window with no threads, no settings read and no actions
+    /// that reach the system, for rendering in tests.
+    #[doc(hidden)]
+    pub fn headless(
+        cc: &eframe::CreationContext<'_>,
+        discovery: brolink_client::session::Discovery,
+        shared: Shared,
+        os: Os,
+    ) -> Self {
+        let client = ClientApp::headless(
+            cc,
+            discovery,
+            Default::default(),
+            brolink_client::config::ClientConfig::default(),
+        );
+        let host = HostApp::headless(Arc::new(Mutex::new(shared)), os);
+        Self::assemble(client, host)
+    }
+
+    pub fn client_mut(&mut self) -> &mut ClientApp {
+        &mut self.client
+    }
+
+    /// Copy what the machine list shows about this machine, when it has
+    /// changed since the last copy.
+    fn sync(&mut self) {
+        let host = self.host.borrow();
+        let shared = host.shared();
+        if self.synced == Some(shared.rev) {
+            return;
+        }
+        self.synced = Some(shared.rev);
+        let mut g = self.local.lock();
+        g.status = shared.status.clone();
+        g.setup_running = shared.setup_running;
+        g.setup_result = shared.setup_result.clone();
+        g.service_stopped = shared.stopped_by_user();
     }
 }
 
 impl eframe::App for NodeApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        {
-            let shared = self.host.shared();
-            let mut g = self.local.lock();
-            g.status = shared.status.clone();
-            g.setup_running = shared.setup_running;
-            g.setup_result = shared.setup_result.clone();
-            let want = g.want_setup;
-            g.want_setup = false;
-            let want_power = g.want_power.take();
-            let want_stay = g.want_stay_awake.take();
-            let want_auto = g.want_autostart.take();
-            drop(g);
-            drop(shared);
-            if want {
-                self.host.request_setup();
-            }
-            self.host
-                .apply_share_toggles(want_power, want_stay, want_auto);
-            self.host.publish_share(&self.local);
-        }
+        self.sync();
         self.client.update(ctx, frame);
     }
 }

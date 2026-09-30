@@ -14,7 +14,6 @@ anyhow.workspace = true
 tracing.workspace = true
 rand.workspace = true
 parking_lot.workspace = true
-serde.workspace = true
 # Pairing: the client identity is an RSA key and a self-signed certificate,
 # the PIN exchange is AES-128-ECB + SHA-256, and the paired HTTPS channel
 # presents that certificate to Sunshine.

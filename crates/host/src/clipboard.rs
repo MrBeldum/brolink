@@ -111,18 +111,54 @@ unsafe fn open() -> Result<()> {
     )
 }
 
+/// One clipboard handle for the life of the process. On X11 the text
+/// belongs to the `arboard::Clipboard` that set it: when the last one is
+/// dropped the text goes to a clipboard manager if one takes it within
+/// 100 ms, and is otherwise gone before anything on the desktop can paste
+/// it. A handle whose connection failed is replaced on the next call.
+#[cfg(not(windows))]
+fn with_clipboard<T>(
+    f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T> {
+    static CLIPBOARD: parking_lot::Mutex<Option<arboard::Clipboard>> =
+        parking_lot::Mutex::new(None);
+    let mut slot = CLIPBOARD.lock();
+    let clipboard = match slot.as_mut() {
+        Some(c) => c,
+        None => slot.insert(arboard::Clipboard::new()?),
+    };
+    let result = f(clipboard);
+    if result.is_err() {
+        *slot = None;
+    }
+    Ok(result?)
+}
+
 #[cfg(not(windows))]
 pub fn read() -> Result<Clipboard> {
-    let mut clip = arboard::Clipboard::new()?;
-    let text = clip.get_text().unwrap_or_default();
-    Ok(Clipboard::fit(&text, 0))
+    let text = with_clipboard(|c| match c.get_text() {
+        // No text on the clipboard (an image, or nothing) reads as empty.
+        Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+        other => other,
+    })?;
+    Ok(Clipboard::fit(&text, text_seq(&text)))
 }
 
 #[cfg(not(windows))]
 pub fn write(text: &str) -> Result<()> {
-    let mut clip = arboard::Clipboard::new()?;
-    clip.set_text(text.to_string())?;
-    Ok(())
+    with_clipboard(|c| c.set_text(text.to_string()))
+}
+
+/// macOS and X11 have no sequence number a program can read, so the text
+/// stands in for one: it changes whenever different text is copied, which
+/// is all a reader needs to tell a new copy from one it has seen. A fixed
+/// `seq` made every copy on a Mac or Linux desktop look like the last.
+#[cfg(any(not(windows), test))]
+fn text_seq(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]
@@ -136,5 +172,12 @@ mod tests {
         assert_eq!(from_windows("a\r\nb\r\n"), "a\nb\n");
         assert_eq!(from_windows(&to_windows("x\ny\n")), "x\ny\n");
         assert_eq!(to_windows(""), "");
+    }
+
+    #[test]
+    fn a_new_copy_gets_a_new_sequence_number() {
+        assert_eq!(text_seq("hello"), text_seq("hello"));
+        assert_ne!(text_seq("hello"), text_seq("hello!"));
+        assert_ne!(text_seq(""), text_seq(" "));
     }
 }

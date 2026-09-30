@@ -382,15 +382,19 @@ if ($needFiles -or -not $svcUp) {{
         "Step \"Wake-on-LAN: adapter unknown, skipped\"\n".to_string()
     } else {
         format!(
-            r#"Step "Enabling Wake-on-LAN on '{adapter}'"
+            r#"# The names are single-quoted literals held in variables. Spliced into
+# a double-quoted string, a '$' in a name would expand and a '"' end it.
+$wakeAdapter = '{adapter}'
+$wakeDevice = '{desc}'
+Step "Enabling Wake-on-LAN on '$wakeAdapter'"
 try {{
-    Set-NetAdapterPowerManagement -Name '{adapter}' -WakeOnMagicPacket Enabled -ErrorAction Stop
+    Set-NetAdapterPowerManagement -Name $wakeAdapter -WakeOnMagicPacket Enabled -ErrorAction Stop
 }} catch {{ Write-Output "  cmdlet failed ($_); the driver keywords below still apply" }}
 # The NDIS keywords are what the driver reads: magic packet from sleep, from
 # modern standby, and (Realtek's own keyword) from a full shutdown. ARP and
 # NS offload keep the card answering for the PC's address while it sleeps,
 # which is what lets a unicast wake packet reach it through a router.
-$g = (Get-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue).InterfaceGuid
+$g = (Get-NetAdapter -Name $wakeAdapter -ErrorAction SilentlyContinue).InterfaceGuid
 $k = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{{4d36e972-e325-11ce-bfc1-08002be10318}}' -ErrorAction SilentlyContinue | Where-Object {{ (Get-ItemProperty $_.PSPath -Name NetCfgInstanceId -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g }} | Select-Object -First 1
 if ($k) {{
     $changed = $false
@@ -400,9 +404,9 @@ if ($k) {{
             $changed = $true
         }}
     }}
-    if ($changed) {{ Restart-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue }}
+    if ($changed) {{ Restart-NetAdapter -Name $wakeAdapter -ErrorAction SilentlyContinue }}
 }} else {{ Write-Output "  no class key for the adapter; keywords unchanged" }}
-try {{ powercfg /deviceenablewake '{desc}' | Out-Null }} catch {{ Write-Output "  powercfg: $_" }}
+try {{ powercfg /deviceenablewake $wakeDevice | Out-Null }} catch {{ Write-Output "  powercfg: $_" }}
 "#,
             adapter = q(p.adapter),
             desc = q(p.adapter_description)
@@ -569,15 +573,12 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         // UAC may run the helper as another administrator, whose profile
         // holds no host.toml: pass this user's folder so the engine login
         // and setup.log stay with the account that shares the machine.
-        let args = std::env::var_os("LOCALAPPDATA")
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| {
-                format!(
-                    "'--setup-elevated', '--local-app-data', '{}'",
-                    q(&dir.to_string_lossy())
-                )
-            })
-            .unwrap_or_else(|| "'--setup-elevated'".into());
+        let args = elevated_args(
+            std::env::var_os("LOCALAPPDATA")
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .as_deref(),
+        );
         let launch = format!(
             "$p = Start-Process -FilePath '{exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @({args}); if ($null -eq $p) {{ exit 1 }}; exit $p.ExitCode"
         );
@@ -592,6 +593,40 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
             log.display()
         );
         Ok(())
+    }
+}
+
+/// Run a read-only PowerShell probe and return what it printed.
+#[cfg(windows)]
+pub(crate) fn powershell(script: &str) -> Result<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(0x0800_0000)
+        .output()
+        .context("run powershell")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "powershell exited with {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The `-ArgumentList` array for the elevated `--setup-elevated` run.
+/// Start-Process joins the elements with spaces and quotes none of them,
+/// so a folder with a space in it ("C:\Users\Ada Lovelace\...") has to
+/// carry its own double quotes or it arrives as two arguments. A trailing
+/// backslash would escape the closing quote, and a folder never needs one.
+#[cfg(any(windows, test))]
+fn elevated_args(local_app_data: Option<&str>) -> String {
+    match local_app_data {
+        Some(dir) => format!(
+            "'--setup-elevated', '--local-app-data', '\"{}\"'",
+            q(dir.trim_end_matches('\\'))
+        ),
+        None => "'--setup-elevated'".into(),
     }
 }
 
@@ -807,6 +842,20 @@ mod tests {
     }
 
     #[test]
+    fn the_elevated_run_gets_the_whole_folder_as_one_argument() {
+        assert_eq!(elevated_args(None), "'--setup-elevated'");
+        assert_eq!(
+            elevated_args(Some(r"C:\Users\Ada Lovelace\AppData\Local")),
+            r#"'--setup-elevated', '--local-app-data', '"C:\Users\Ada Lovelace\AppData\Local"'"#
+        );
+        assert_eq!(
+            elevated_args(Some(r"C:\Users\O'Brien\AppData\Local\")),
+            r#"'--setup-elevated', '--local-app-data', '"C:\Users\O''Brien\AppData\Local"'"#,
+            "quote escaped for PowerShell, no trailing backslash before the quote"
+        );
+    }
+
+    #[test]
     fn run_value_quotes_the_path_and_asks_for_background() {
         let p = PathBuf::from(r"C:\Users\Ada\AppData\Local\BroLink\brolink-host.exe");
         assert_eq!(
@@ -815,8 +864,6 @@ mod tests {
         );
     }
 
-    /// The script with its comments stripped: a "must not appear" check has
-    /// to be about what the script does, not about what it explains.
     /// Position of `needle` after the preamble's function definitions, so
     /// an ordering test reads the steps as they run, not the helpers.
     fn find_in_body(s: &str, needle: &str) -> Option<usize> {
@@ -824,6 +871,8 @@ mod tests {
         s[at..].find(needle).map(|i| i + at)
     }
 
+    /// The script with its comments stripped: a "must not appear" check has
+    /// to be about what the script does, not about what it explains.
     fn code(s: &str) -> String {
         s.lines()
             .filter(|l| !l.trim_start().starts_with('#'))
@@ -856,14 +905,29 @@ mod tests {
         });
         assert!(s.contains("--creds 'brolink' 'p''w'"), "{s}");
         assert!(!s.contains("Downloading the streaming engine"));
-        assert!(s.contains("Set-NetAdapterPowerManagement -Name 'Ethernet'"));
-        assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
+        assert!(s.contains("$wakeAdapter = 'Ethernet'"), "{s}");
+        assert!(s.contains("Set-NetAdapterPowerManagement -Name $wakeAdapter"));
+        assert!(s.contains("Restart-NetAdapter -Name $wakeAdapter"));
         assert!(s.contains("'S5WakeOnLan'"));
         assert!(s.contains("HiberbootEnabled -Value 0"));
         assert!(s.contains("powercfg /change standby-timeout-ac 0"));
         assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
         assert!(s.contains("protocol=UDP localport=9 program='C:\\x\\brolink-host.exe'"));
-        assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
+        assert!(s.contains("$wakeDevice = 'Realtek PCIe GbE'"));
+        assert!(s.contains("powercfg /deviceenablewake $wakeDevice"));
+        // A name only ever appears as a single-quoted literal: in a
+        // double-quoted string `$(...)` would run and a `"` end the string.
+        let named = script(&Plan {
+            adapter: r#"Eth "$(Stop-Computer)" 'x'"#,
+            adapter_description: "NIC $env:TEMP",
+            ..plan(&exe, false)
+        });
+        assert!(
+            named.contains(r#"$wakeAdapter = 'Eth "$(Stop-Computer)" ''x'''"#),
+            "{named}"
+        );
+        assert!(named.contains("$wakeDevice = 'NIC $env:TEMP'"), "{named}");
+        assert_eq!(named.matches("Stop-Computer").count(), 1, "{named}");
         assert!(
             s.contains("localport=47850 remoteip=100.64.0.0/10 program='C:\\x\\brolink-host.exe'")
         );
@@ -1022,10 +1086,6 @@ mod tests {
     fn the_virtual_display_learns_every_size_a_mac_can_ask_for() {
         let exe = PathBuf::from(r"C:\x\brolink-host.exe");
         let s = script(&plan(&exe, false));
-        // A copy to try on a real PC: BROLINK_DUMP_SETUP=/tmp/setup.ps1.
-        if let Ok(path) = std::env::var("BROLINK_DUMP_SETUP") {
-            std::fs::write(path, &s).expect("dump the script");
-        }
         let body = code(&s);
         let step = find_in_body(&body, "Listing the sizes a Mac can ask for").expect("step");
         let fast = find_in_body(&body, "Turning Fast Startup off").expect("fast startup");
@@ -1409,8 +1469,11 @@ system_tray = enabled
         assert!(wet.contains("Brand-Engine $dir"), "{wet}");
     }
 
-    /// The seam the PowerShell syntax gate runs through: the generated script
-    /// is the real artefact, so it has to be obtainable off Windows.
+    /// The seam CI's PowerShell syntax check runs through (see
+    /// `.github/workflows/ci.yml`): the generated script is the real
+    /// artefact, so it has to be obtainable without running setup.
+    /// `BROLINK_DUMP_SETUP_SCRIPT=/tmp/setup.ps1` writes one; the other
+    /// `BROLINK_DUMP_*` variables pick the plan.
     #[test]
     fn the_generated_script_can_be_dumped_for_a_syntax_check() {
         let Ok(out) = std::env::var("BROLINK_DUMP_SETUP_SCRIPT") else {

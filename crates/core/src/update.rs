@@ -1,9 +1,9 @@
 //! Finding and fetching BroLink releases on GitHub, for both apps' updaters.
 //!
-//! The repository is private, so the calls need a token: the caller's
-//! setting, `BROLINK_GITHUB_TOKEN`, or on macOS whatever git has stored for
-//! github.com, which is the login the install script uses too. Without one
-//! the requests still go out, so a public repository works unchanged.
+//! A public repository needs no login. For a private one the calls carry a
+//! token: the caller's setting, `BROLINK_GITHUB_TOKEN`, or on macOS whatever
+//! git has stored for github.com, which is the login the install script
+//! uses too. Without one the requests still go out.
 //!
 //! Only the Mac talks to GitHub. It replaces its own bundle and sends each
 //! PC the new `brolink-host.exe` over the control API; see
@@ -14,7 +14,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -370,13 +370,7 @@ fn split_url(url: &str) -> Result<(String, String)> {
 }
 
 fn connect(host: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
-    let addr = (host, 443u16)
-        .to_socket_addrs()
-        .with_context(|| format!("resolve {host}"))?
-        .next()
-        .ok_or_else(|| anyhow!("{host} has no address"))?;
-    let tcp = TcpStream::connect_timeout(&addr, TIMEOUT)
-        .map_err(crate::http::io_err)
+    let tcp = crate::http::connect((host, 443u16), TIMEOUT)
         .with_context(|| format!("connect to {host}"))?;
     tcp.set_read_timeout(Some(TIMEOUT))
         .map_err(crate::http::io_err)?;

@@ -1,7 +1,7 @@
 //! Keeping this app and every BroLink Host it can see on the newest release.
 //!
-//! The Mac is the one machine with a GitHub login (the repository is
-//! private), so it does the fetching for everyone. Every few hours it asks
+//! The Mac does the fetching for everyone (with a GitHub login if the
+//! repository is private; see `brolink_core::update`). Every few hours it asks
 //! GitHub for the latest release. A newer app is downloaded, verified against
 //! GitHub's digest and its own code signature, and swapped into place once no
 //! stream is running; the app then relaunches itself. A newer host is
@@ -16,14 +16,14 @@
 use crate::config::ClientConfig;
 use crate::session::{Discovery, Live, Progress};
 use anyhow::{anyhow, bail, Context, Result};
-use brolink_core::api::{Ack, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
+use brolink_core::api::{Ack, Status, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
 use brolink_core::update::{self, Release, HOST_EXE, MAC_ASSET, WINDOWS_ASSET};
 use brolink_core::{http, CONTROL_PORT};
 use brolink_ui::Tone;
 use parking_lot::Mutex;
 use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,6 +53,12 @@ pub struct State {
     pub notice: Option<(Tone, String)>,
     /// Hosts sent an update recently: node id to (version, when).
     pub pushed: BTreeMap<String, (Version, Instant)>,
+    /// Hosts that took the file for this version: node id to version.
+    pub delivered: BTreeMap<String, Version>,
+    /// Hosts that took a version and came back on the old one, which means
+    /// the new executable died on start and the host put the old one back.
+    /// Sending the same file again would only repeat that.
+    pub rolled_back: BTreeMap<String, Version>,
     /// Hosts too old to receive `/v1/update`; told the user once.
     pub told_old: BTreeSet<String>,
 }
@@ -64,6 +70,19 @@ pub fn spawn(
     progress: Arc<Mutex<Progress>>,
     ctx: egui::Context,
 ) {
+    if !cfg!(target_os = "macos") {
+        // Everything below assumes a Mac: it replaces an app bundle and
+        // unpacks the Windows zip with /usr/bin/unzip. A Windows PC gets
+        // its new host pushed from the Mac, and a Linux node is rebuilt, so
+        // there is nothing here for either to fetch or send.
+        let _ = (discovery, live, progress, ctx);
+        state.lock().message = if cfg!(windows) {
+            "New versions arrive from the Mac on your Tailscale account.".into()
+        } else {
+            "BroLink updates itself on a Mac; install new releases here by hand.".into()
+        };
+        return;
+    }
     std::thread::spawn(move || {
         let mut next = Instant::now() + FIRST_CHECK;
         let mut release: Option<Release> = None;
@@ -74,7 +93,9 @@ pub fn spawn(
             if !cfg.auto_update {
                 let mut st = state.lock();
                 st.message = "Off. This app and the PCs stay on their current versions.".into();
-                st.notice = None;
+                if st.notice.take().is_some() {
+                    ctx.request_repaint();
+                }
                 continue;
             }
             let due = state.lock().check_now || Instant::now() >= next;
@@ -149,6 +170,7 @@ pub fn spawn(
                     let mut p = progress.lock();
                     if live.is_none() && !p.active() {
                         p.updating = true;
+                        ctx.request_repaint();
                         true
                     } else {
                         false
@@ -194,16 +216,43 @@ pub fn spawn(
                     }
                     continue;
                 }
+                if !rel.is_newer_than(&v) {
+                    // Updated after all (through the stream, say): the
+                    // rollback warning is no longer true.
+                    let mut st = state.lock();
+                    if st.rolled_back.remove(&pc.node_id).is_some()
+                        && matches!(st.notice, Some((Tone::Warning, _)))
+                    {
+                        st.notice = None;
+                        ctx.request_repaint();
+                    }
+                }
                 if !should_push(&v, rel) || streaming_to == Some(ip) {
                     continue;
                 }
-                let recently = state
-                    .lock()
-                    .pushed
-                    .get(&pc.node_id)
-                    .is_some_and(|(pv, at)| *pv == rel.version && at.elapsed() < PUSH_GRACE);
-                if recently {
-                    continue;
+                {
+                    let mut st = state.lock();
+                    let recently = st
+                        .pushed
+                        .get(&pc.node_id)
+                        .is_some_and(|(pv, at)| *pv == rel.version && at.elapsed() < PUSH_GRACE);
+                    if recently || st.rolled_back.get(&pc.node_id) == Some(&rel.version) {
+                        continue;
+                    }
+                    if st.delivered.get(&pc.node_id) == Some(&rel.version) {
+                        // It took the file, the grace is over, and it still
+                        // runs the old version.
+                        st.rolled_back
+                            .insert(pc.node_id.clone(), rel.version.clone());
+                        st.message = format!(
+                            "BroLink Host {} did not start on {}, so it kept {v}. It is not sent again until BroLink restarts; its log says why.",
+                            rel.version, pc.name
+                        );
+                        st.notice = Some((Tone::Warning, st.message.clone()));
+                        tracing::warn!("{} rolled back host {}", pc.name, rel.version);
+                        ctx.request_repaint();
+                        continue;
+                    }
                 }
                 let outcome = push_host(rel, token.as_deref(), ip);
                 let mut st = state.lock();
@@ -211,6 +260,7 @@ pub fn spawn(
                     .insert(pc.node_id.clone(), (rel.version.clone(), Instant::now()));
                 match outcome {
                     Ok(()) => {
+                        st.delivered.insert(pc.node_id.clone(), rel.version.clone());
                         st.message = format!(
                             "Sent BroLink Host {} to {}; it restarts by itself.",
                             rel.version, pc.name
@@ -226,10 +276,16 @@ pub fn spawn(
                 }
                 ctx.request_repaint();
             }
-            // Notices about hosts fade once the grace period has passed.
+            // Notices about hosts fade once the grace period has passed,
+            // except a rollback, which stays until someone reads it.
             let mut st = state.lock();
-            if st.ready.is_none() && st.pushed.values().all(|(_, at)| at.elapsed() > PUSH_GRACE) {
+            let fades = !matches!(st.notice, None | Some((Tone::Warning, _)));
+            if fades
+                && st.ready.is_none()
+                && st.pushed.values().all(|(_, at)| at.elapsed() > PUSH_GRACE)
+            {
                 st.notice = None;
+                ctx.request_repaint();
             }
         }
     });
@@ -473,7 +529,7 @@ fn should_push(running: &Version, rel: &Release) -> bool {
 
 pub fn old_host_message(name: &str, version: &Version) -> String {
     format!(
-        "{name} runs BroLink Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update BroLink Host in the toolbar: this Mac installs the new version through the stream. After that, updates are automatic."
+        "{name} runs BroLink Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update BroLink Host in the toolbar: this machine installs the new version through the stream. After that, updates are automatic."
     )
 }
 
@@ -493,19 +549,49 @@ fn push_host(rel: &Release, token: Option<&str>, ip: Ipv4Addr) -> Result<()> {
     let exe = host_exe(rel, token)?;
     let sha = update::sha256_hex(&exe);
     let version = rel.version.to_string();
+    let host = SocketAddr::from((ip, CONTROL_PORT));
     let mut last = None;
     for attempt in 1..=3 {
         match send_host(ip, &version, &sha, &exe) {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < 3 && is_transient(&e) => {
+            Err(e) => {
+                // A host can take the file and restart before its reply
+                // gets out, so the Mac sees a dropped connection and the
+                // retry hears "already runs". Ask the host what it runs
+                // before calling either a failure.
+                if (attempt > 1 || is_transient(&e))
+                    && runs_at_least(host, &rel.version, Duration::from_secs(15))
+                {
+                    return Ok(());
+                }
+                if attempt == 3 || !is_transient(&e) {
+                    return Err(e);
+                }
                 tracing::warn!("host update attempt {attempt}/3: {e:#}");
                 std::thread::sleep(Duration::from_secs(2 * attempt as u64));
                 last = Some(e);
             }
-            Err(e) => return Err(e),
         }
     }
     Err(last.unwrap_or_else(|| anyhow!("update failed")))
+}
+
+/// Whether the host at `addr` reports `want` or newer within `within`: it
+/// may still be handing over to the new executable when first asked.
+fn runs_at_least(addr: SocketAddr, want: &Version, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        let running = http::get_json::<Status>(addr, "/v1/status", Duration::from_secs(2))
+            .ok()
+            .and_then(|s| Version::parse(&s.version).ok());
+        if running.is_some_and(|v| v >= *want) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn send_host(ip: Ipv4Addr, version: &str, sha: &str, exe: &[u8]) -> Result<()> {
@@ -648,6 +734,43 @@ mod tests {
         assert!(msg.contains("Update BroLink Host"), "{msg}");
         assert!(!msg.contains("Broken pipe"), "{msg}");
         assert!(!msg.contains("os error"), "{msg}");
+    }
+
+    /// A one-reply HTTP server saying the host runs `version`.
+    fn status_server(version: &'static str) -> SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = format!(r#"{{"app":"brolink","version":"{version}"}}"#);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_host_already_on_the_release_counts_as_updated() {
+        let want = Version::new(4, 0, 3);
+        assert!(runs_at_least(status_server("4.0.3"), &want, Duration::ZERO));
+        assert!(runs_at_least(status_server("4.1.0"), &want, Duration::ZERO));
+        assert!(!runs_at_least(
+            status_server("4.0.2"),
+            &want,
+            Duration::ZERO
+        ));
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert!(!runs_at_least(closed, &want, Duration::ZERO));
     }
 
     #[test]

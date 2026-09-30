@@ -1,6 +1,7 @@
-//! This machine's sharing side, filled by the unified app from the local
-//! control service. The lobby shows it so every BroLink install is both a
-//! viewer and a host.
+//! This machine's sharing side, as the unified window sees it. The host
+//! crate fills [`LocalShare`] from the local control service and draws the
+//! Sharing page through [`SharePage`]; the viewer only shows a summary row
+//! in the machine list and hosts the page in its window.
 
 use brolink_core::api::Status;
 use parking_lot::Mutex;
@@ -11,15 +12,14 @@ pub struct LocalShare {
     pub status: Option<Status>,
     pub setup_running: bool,
     pub setup_result: Option<Result<(), String>>,
-    /// The window asked to run setup; the unified app clears this after it
-    /// starts the platform setup.
-    pub want_setup: bool,
-    pub power_allowed: bool,
-    pub stay_awake: bool,
-    pub autostart: bool,
-    pub want_power: Option<bool>,
-    pub want_stay_awake: Option<bool>,
-    pub want_autostart: Option<bool>,
+    /// Someone stopped the background service from the Sharing page.
+    pub service_stopped: bool,
 }
 
 pub type Slot = Arc<Mutex<LocalShare>>;
+
+/// The Sharing page: setup, what this machine reports, paired devices,
+/// options and diagnostics. Drawn by whoever shares this machine.
+pub trait SharePage {
+    fn show(&mut self, ui: &mut egui::Ui);
+}

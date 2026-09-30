@@ -82,5 +82,12 @@ if [[ -d "$DEST" ]]; then
 else
   mv "$STAGE" "$DEST"
 fi
+# The background service keeps running the old binary until it restarts:
+# replacing the bundle does not stop it, and launchd restarts it only after
+# a failure. Restart it through launchd so it runs the new one now.
+AGENT="gui/$(id -u)/dev.brolink.node"
+if launchctl print "$AGENT" >/dev/null 2>&1; then
+  launchctl kickstart -k "$AGENT" && echo "restarted the BroLink background service"
+fi
 echo "installed $DEST"
 open "$DEST"

@@ -1,81 +1,161 @@
-//! Shared controls for the lobby and the live session.
-use crate::config::{Codec, Preset, Quality, Resolution, StreamSettings};
-use brolink_ui::{self as ui, Tone};
+//! The stream controls, shared by Settings and the in-stream panel so the
+//! two cannot drift apart. Rows only: the caller supplies the group.
 
+use crate::config::{Codec, Preset, Quality, Resolution, StreamSettings};
+use brolink_ui::{self as ui, space};
+
+/// The one-line choice at the top: a named profile, or the values as set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Recommended,
+    Preset(Preset),
+    Custom,
+}
+
+impl Profile {
+    fn of(s: &StreamSettings) -> Self {
+        match (s.quality, s.preset()) {
+            (Quality::Auto, _) => Profile::Recommended,
+            (Quality::Custom, Some(p)) => Profile::Preset(p),
+            (Quality::Custom, None) => Profile::Custom,
+        }
+    }
+}
+
+/// Edit `s` in place; true when anything changed.
 pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, u32)) -> bool {
     let before = s.clone();
-    ui::caption(ui, "QUICK PROFILES");
-    ui.horizontal_wrapped(|ui| {
-        for preset in Preset::ALL {
-            if ui::ghost_button(ui, preset.label())
-                .on_hover_text(preset.describe())
-                .clicked()
-            {
-                s.apply_preset(preset);
+    let mut profile = Profile::of(s);
+    let options = [
+        (Profile::Recommended, "Recommended"),
+        (Profile::Preset(Preset::Smooth), Preset::Smooth.label()),
+        (Profile::Preset(Preset::Balanced), Preset::Balanced.label()),
+        (Profile::Preset(Preset::Sharp), Preset::Sharp.label()),
+        (Profile::Custom, "Custom"),
+    ];
+    let hint = match profile {
+        Profile::Recommended => "This display's own size at 50 Mbps. A relay or a long round trip never lowers the frame rate or the bitrate.".to_string(),
+        Profile::Preset(p) => format!("{}.", p.describe()),
+        Profile::Custom => "Your own resolution, frame rate and bitrate.".to_string(),
+    };
+    ui::setting_block(ui, "Quality", Some(&hint), |ui| {
+        if ui::segmented(ui, &options, &mut profile) {
+            match profile {
+                Profile::Recommended => {
+                    s.quality = Quality::Auto;
+                    s.resolution = Resolution::Native;
+                }
+                Profile::Preset(p) => s.apply_preset(p),
+                Profile::Custom => {
+                    // Start from what Recommended was asking for, so
+                    // nothing jumps.
+                    if s.quality == Quality::Auto {
+                        s.resolution = Resolution::Native;
+                        s.bitrate_kbps = 50_000;
+                    }
+                    s.quality = Quality::Custom;
+                }
             }
         }
-        if ui::ghost_button(ui, "Reset").clicked() {
-            *s = StreamSettings {
-                app: s.app.clone(),
-                fullscreen: s.fullscreen,
-                ..Default::default()
-            };
-        }
-    });
-    ui::row_separator(ui);
-    ui::setting_row(ui, "Picture quality", Some("Recommended starts at 50 Mbps. A relay or a long round trip never lowers your frame rate or caps your bitrate."), |ui| {
-        if ui::segmented(ui, &[(Quality::Auto, "Recommended"), (Quality::Custom, "Manual")], &mut s.quality) && s.quality == Quality::Auto { s.resolution = Resolution::Native; }
-    });
-    ui::row_separator(ui);
-    ui::setting_row(ui, "Resolution", Some("Match screen is this display’s own pixel size, so the picture fills it exactly. 1080p, 1440p and 4K are the standard 16:9 sizes; on a display of another shape they leave a bar above and below."), |ui| {
-        let mut resolution = s.resolution;
-        egui::ComboBox::from_id_salt("stream-resolution").selected_text(resolution.describe(native)).show_ui(ui, |ui| {
-            for r in [Resolution::Native, Resolution::P1080, Resolution::P1440, Resolution::P2160] { ui.selectable_value(&mut resolution, r, r.describe(native)); }
-        });
-        if resolution != s.resolution { s.resolution = resolution; s.quality = Quality::Custom; }
-    });
-    ui::row_separator(ui);
-    ui::setting_row(ui, "Frame rate", Some("60 fps is a good starting point. Higher rates need a matching host display and more bandwidth."), |ui| {
-        egui::ComboBox::from_id_salt("stream-fps").selected_text(format!("{} fps", s.fps)).show_ui(ui, |ui| {
-            for fps in [30, 60, 90, 120, 144, 165, 240] { ui.selectable_value(&mut s.fps, fps, format!("{fps} fps")); }
-        });
     });
     ui::row_separator(ui);
     ui::setting_row(
         ui,
-        "Bitrate target",
-        Some("The PC's encoder aims at exactly this rate (CBR) while the picture is changing; a still screen uses less."),
+        "Resolution",
+        Some("Match screen fills this display exactly. The 16:9 sizes leave bars on a display of another shape."),
+        |ui| {
+            let mut resolution = s.resolution;
+            ui::select(ui, "stream-resolution", resolution.describe(native), 200.0, |ui| {
+                for r in [
+                    Resolution::Native,
+                    Resolution::P1080,
+                    Resolution::P1440,
+                    Resolution::P2160,
+                ] {
+                    ui::select_option(ui, &mut resolution, r, r.describe(native));
+                }
+            });
+            if resolution != s.resolution {
+                s.resolution = resolution;
+                s.quality = Quality::Custom;
+            }
+        },
+    );
+    ui::row_separator(ui);
+    ui::setting_row(
+        ui,
+        "Frame rate",
+        Some("Above 60 needs a display there that runs that fast."),
+        |ui| {
+            ui::select(ui, "stream-fps", format!("{} fps", s.fps), 120.0, |ui| {
+                for fps in [30, 60, 90, 120, 144, 165, 240] {
+                    ui::select_option(ui, &mut s.fps, fps, format!("{fps} fps"));
+                }
+            });
+        },
+    );
+    ui::row_separator(ui);
+    ui::setting_row(
+        ui,
+        "Bitrate",
+        Some("The encoder aims at this while the picture moves; a still screen uses less."),
         |ui| {
             let mut mbps = if s.quality == Quality::Auto {
                 50
             } else {
                 s.bitrate_kbps / 1000
             };
-            ui.spacing_mut().slider_width = ui.available_width().min(200.0);
-            if ui
-                .add(egui::Slider::new(&mut mbps, 2..=150).suffix(" Mbps"))
-                .changed()
-            {
+            if ui::slider(ui, &mut mbps, 2..=150, 180.0, "Bitrate").changed() {
                 s.quality = Quality::Custom;
                 s.bitrate_kbps = mbps * 1000;
             }
+            ui::slider_value(ui, &format!("{mbps} Mbps"));
         },
     );
     ui::row_separator(ui);
-    ui::setting_row(ui, "Video format", Some("HEVC gives sharper detail per megabit. Auto uses HEVC when supported; H.264 improves compatibility."), |ui| {
-        ui::segmented(ui, &[(Codec::Auto, "Auto"), (Codec::Hevc, "HEVC"), (Codec::H264, "H.264")], &mut s.codec);
-    });
-    let effective = crate::path::effective(s, &crate::path::Path::default());
-    let (w, h) = effective.resolution.pixels(native);
-    ui.add_space(12.0);
-    ui::status_pill(
+    ui::setting_row(
         ui,
-        &format!(
-            "{w} × {h}  ·  {} fps  ·  {} Mbps target",
-            effective.fps,
-            effective.bitrate_kbps / 1000
-        ),
-        Tone::Info,
+        "Codec",
+        Some("HEVC is sharper for the same bitrate. Auto uses it when both ends can."),
+        |ui| {
+            ui::segmented(
+                ui,
+                &[
+                    (Codec::Auto, "Auto"),
+                    (Codec::Hevc, "HEVC"),
+                    (Codec::H264, "H.264"),
+                ],
+                &mut s.codec,
+            );
+        },
     );
+    ui::row_separator(ui);
+    let effective = crate::path::effective(s);
+    let (w, h) = effective.resolution.pixels(native);
+    ui.add_space(space::MD);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = space::SM;
+        ui::section_label(ui, "Next stream");
+        ui.add_space(space::XS);
+        ui::tag(ui, None, &format!("{w} × {h}"));
+        ui::tag(ui, None, &format!("{} fps", effective.fps));
+        ui::tag(ui, None, &format!("{} Mbps", effective.bitrate_kbps / 1000));
+    });
+    ui.add_space(space::MD);
     *s != before
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_profile_follows_the_values() {
+        let mut s = StreamSettings::default();
+        assert_eq!(Profile::of(&s), Profile::Recommended);
+        s.apply_preset(Preset::Smooth);
+        assert_eq!(Profile::of(&s), Profile::Preset(Preset::Smooth));
+        s.fps = 144;
+        assert_eq!(Profile::of(&s), Profile::Custom);
+    }
 }

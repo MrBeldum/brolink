@@ -7,41 +7,49 @@
 mod win {
     use anyhow::{bail, Context, Result};
     use std::os::windows::process::CommandExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const TASK: &str = "BroLinkEngineUser";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    fn helper_dir() -> Result<PathBuf> {
-        let dir = brolink_core::config::data_dir()?;
-        std::fs::create_dir_all(&dir).with_context(|| dir.display().to_string())?;
-        Ok(dir)
-    }
-
+    /// The helper scripts, written into the data directory when they are
+    /// not there as this build has them, and the logon task that runs
+    /// them, registered once per process. The service calls this every 30
+    /// seconds while the engine has no sound, and it used to rewrite all
+    /// three files and re-register the task each time.
     pub fn install_helpers() -> Result<PathBuf> {
-        let dir = helper_dir()?;
-        std::fs::write(
-            dir.join("take-over-engine.ps1"),
-            include_str!("../windows/take-over-engine.ps1"),
-        )?;
+        static TASK_REGISTERED: AtomicBool = AtomicBool::new(false);
+        let dir = brolink_core::config::data_dir()?;
+        let script = dir.join("take-over-engine.ps1");
+        write_if_changed(&script, include_str!("../windows/take-over-engine.ps1"))?;
         let launcher = dir.join("take-over-engine.vbs");
-        std::fs::write(&launcher, include_str!("../windows/take-over-engine.vbs"))?;
+        write_if_changed(&launcher, include_str!("../windows/take-over-engine.vbs"))?;
         // Earlier versions pointed the task at a .cmd, which kept a terminal
         // on the desktop for as long as the helper ran. A task an
         // administrator registered cannot be re-pointed from here, so the
         // .cmd stays, reduced to handing off to the windowless launcher.
-        std::fs::write(
-            dir.join("take-over-engine.cmd"),
+        write_if_changed(
+            &dir.join("take-over-engine.cmd"),
             include_str!("../windows/take-over-engine.cmd"),
         )?;
-        let script = dir.join("take-over-engine.ps1");
-        let tr = format!("wscript.exe //B //Nologo \"{}\"", launcher.display());
-        let ok = create_logon_task(&tr);
-        if !ok {
-            tracing::info!("could not register {TASK}; the host will start the engine itself");
+        if !TASK_REGISTERED.load(Ordering::Relaxed) {
+            let tr = format!("wscript.exe //B //Nologo \"{}\"", launcher.display());
+            if create_logon_task(&tr) {
+                TASK_REGISTERED.store(true, Ordering::Relaxed);
+            } else {
+                tracing::info!("could not register {TASK}; the host will start the engine itself");
+            }
         }
         Ok(script)
+    }
+
+    fn write_if_changed(path: &Path, text: &str) -> Result<()> {
+        if std::fs::read(path).is_ok_and(|have| have == text.as_bytes()) {
+            return Ok(());
+        }
+        std::fs::write(path, text).with_context(|| path.display().to_string())
     }
 
     fn create_logon_task(tr: &str) -> bool {

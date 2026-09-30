@@ -1,4 +1,7 @@
-//! The host control panel: a status window with one setup button.
+//! The Sharing page: setup for sharing this machine, what it reports, the
+//! devices paired with it, its options and diagnostics. The unified window
+//! shows it as a tab (see `product.rs`); background threads keep
+//! [`Shared`] current and the page reads it once per frame.
 
 use crate::config::{self, HostConfig};
 use crate::setup;
@@ -6,7 +9,7 @@ use crate::streamer::Api;
 use brolink_core::api::Status;
 use brolink_core::http;
 use brolink_core::CONTROL_PORT;
-use brolink_ui::{self as ui, Tone, PALETTE as P};
+use brolink_ui::{self as ui, space, Kv, Tone};
 use eframe::egui;
 use parking_lot::Mutex;
 use semver::Version;
@@ -14,7 +17,8 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const COLUMN_WIDTH: f32 = 680.0;
+/// How long the result of an action (an unpair, a driver install) stays.
+const NOTE_FOR: Duration = Duration::from_secs(10);
 
 /// What the background threads know, read by the UI every frame.
 #[derive(Default)]
@@ -26,6 +30,53 @@ pub struct Shared {
     pub setup_running: bool,
     pub setup_result: Option<Result<(), String>>,
     pub setup_log: Vec<String>,
+    /// Moves whenever anything above changes, so a reader can skip copying
+    /// what it already has.
+    pub rev: u64,
+}
+
+impl Shared {
+    fn touch(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
+    }
+}
+
+/// A one-line result from a worker thread.
+type Note = Arc<Mutex<Option<(Tone, String)>>>;
+
+/// Which OS the page describes. Compiled in for the running app; set by
+/// tests to render the other platforms' pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Windows,
+    Mac,
+    Linux,
+}
+
+impl Os {
+    pub const HERE: Os = if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::Mac
+    } else {
+        Os::Linux
+    };
+
+    fn noun(self) -> &'static str {
+        match self {
+            Os::Windows => "PC",
+            Os::Mac => "Mac",
+            Os::Linux => "machine",
+        }
+    }
+
+    fn tailscale_url(self) -> &'static str {
+        match self {
+            Os::Windows => "https://tailscale.com/download/windows",
+            Os::Mac => "https://tailscale.com/download/mac",
+            Os::Linux => "https://tailscale.com/download/linux",
+        }
+    }
 }
 
 pub struct HostApp {
@@ -33,108 +84,126 @@ pub struct HostApp {
     cfg: HostConfig,
     autostart: bool,
     dirty: bool,
-    brand: ui::Brand,
     confirm_unpair: Option<String>,
-    notices_open: bool,
-    settings_open: bool,
     busy_since: Option<Instant>,
     /// The engine archive sits beside the exe, so setup needs no download.
     bundled_engine: bool,
+    /// Actions reach the system: setup runs, devices unpair, the service
+    /// stops. Off when the page is only rendered, in tests.
+    live: bool,
+    os: Os,
+    note: Option<(Tone, String, Instant)>,
+    pending: Option<Note>,
 }
 
 impl HostApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
         spawn_poller(shared.clone(), cc.egui_ctx.clone());
-        Self::with_shared(cc, shared)
-    }
-
-    fn with_shared(cc: &eframe::CreationContext<'_>, shared: Arc<Mutex<Shared>>) -> Self {
-        ui::apply(&cc.egui_ctx);
         Self {
-            shared,
             cfg: HostConfig::load(),
             autostart: setup::starts_with_windows(),
-            dirty: false,
-            brand: ui::Brand::new(&cc.egui_ctx),
-            confirm_unpair: None,
-            notices_open: false,
-            settings_open: false,
-            busy_since: None,
             bundled_engine: std::env::current_exe().is_ok_and(|e| setup::bundled_engine(&e)),
+            live: true,
+            ..Self::headless(shared, Os::HERE)
+        }
+    }
+
+    /// A page that only draws: default settings, no threads, and buttons
+    /// that change what it shows but never touch the system.
+    #[doc(hidden)]
+    pub fn headless(shared: Arc<Mutex<Shared>>, os: Os) -> Self {
+        Self {
+            shared,
+            cfg: HostConfig::default(),
+            autostart: true,
+            dirty: false,
+            confirm_unpair: None,
+            busy_since: None,
+            bundled_engine: os == Os::Windows,
+            live: false,
+            os,
+            note: None,
+            pending: None,
         }
     }
 
     fn commit(&mut self) {
         if self.dirty {
             self.dirty = false;
+            if !self.live {
+                return;
+            }
             if let Err(e) = self.cfg.save() {
                 tracing::warn!("could not save host config: {e:#}");
+                self.note = Some((
+                    Tone::Danger,
+                    format!("Couldn't save this setting: {e}."),
+                    Instant::now(),
+                ));
             }
         }
-    }
-
-    fn api(&self) -> Option<Api<'_>> {
-        self.cfg.has_creds().then_some(Api {
-            user: &self.cfg.sunshine_user,
-            pass: &self.cfg.sunshine_pass,
-        })
     }
 
     pub(crate) fn shared(&self) -> parking_lot::MutexGuard<'_, Shared> {
         self.shared.lock()
     }
 
-    pub(crate) fn request_setup(&mut self) {
-        let status = self.shared.lock().status.clone();
-        if let Some(s) = status {
-            self.start_setup(&s);
-        } else {
-            crate::service::ensure_service_running();
-            self.shared.lock().setup_result = Some(Err(
-                "The sharing service is starting. Wait for its status, then try setup again."
-                    .into(),
-            ));
-        }
+    /// Run `job` off the UI thread and show what it returns under the
+    /// page's header.
+    fn later(
+        &mut self,
+        ctx: &egui::Context,
+        job: impl FnOnce() -> (Tone, String) + Send + 'static,
+    ) {
+        let note: Note = Arc::default();
+        let out = note.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            *out.lock() = Some(job());
+            ctx.request_repaint();
+        });
+        self.pending = Some(note);
     }
 
-    pub(crate) fn apply_share_toggles(
-        &mut self,
-        power: Option<bool>,
-        stay_awake: Option<bool>,
-        autostart: Option<bool>,
-    ) {
-        if let Some(v) = power {
-            self.cfg.power_allowed = v;
-            self.dirty = true;
+    fn poll_note(&mut self, ctx: &egui::Context) {
+        if let Some(done) = self.pending.as_ref().and_then(|n| n.lock().take()) {
+            self.note = Some((done.0, done.1, Instant::now()));
+            self.pending = None;
         }
-        if let Some(v) = stay_awake {
-            self.cfg.stay_awake = v;
-            self.dirty = true;
-        }
-        if let Some(v) = autostart {
-            if let Ok(exe) = std::env::current_exe() {
-                if crate::setup::set_start_with_windows(v, &exe).is_ok() {
-                    self.autostart = v;
-                    self.cfg.start_with_windows = v;
-                    self.dirty = true;
-                }
+        if let Some((_, _, at)) = &self.note {
+            match NOTE_FOR.checked_sub(at.elapsed()) {
+                Some(left) => ctx.request_repaint_after(left),
+                None => self.note = None,
             }
         }
-        self.commit();
     }
 
-    pub(crate) fn publish_share(&self, local: &brolink_client::share::Slot) {
-        let mut g = local.lock();
-        g.power_allowed = self.cfg.power_allowed;
-        g.stay_awake = self.cfg.stay_awake;
-        g.autostart = self.autostart;
+    /// The engine's login, for a worker thread.
+    fn creds(&self) -> Option<(String, String)> {
+        self.cfg.has_creds().then(|| {
+            (
+                self.cfg.sunshine_user.clone(),
+                self.cfg.sunshine_pass.clone(),
+            )
+        })
     }
 
     /// Generate a Sunshine login if there is none, save it, and run the
-    /// elevated script on a thread.
-    fn start_setup(&mut self, status: &Status) {
+    /// setup on a thread.
+    fn start_setup(&mut self, ctx: &egui::Context, status: &Status) {
         let migrate = crate::migrate::uses_old_engine(&status.streamer.kind);
+        let shared = self.shared.clone();
+        {
+            let mut s = shared.lock();
+            s.setup_running = true;
+            s.setup_result = None;
+            s.setup_log.clear();
+            s.touch();
+        }
+        if !self.live {
+            return;
+        }
         if !self.cfg.has_creds() && !migrate {
             self.cfg.sunshine_user = "brolink".into();
             self.cfg.sunshine_pass = config::random_password();
@@ -142,14 +211,8 @@ impl HostApp {
                 tracing::warn!("could not save engine login: {e:#}");
             }
         }
-        let shared = self.shared.clone();
-        {
-            let mut s = shared.lock();
-            s.setup_running = true;
-            s.setup_result = None;
-            s.setup_log.clear();
-        }
         let cfg = self.cfg.clone();
+        let ctx = ctx.clone();
         let install_engine = !status.streamer.installed || migrate || !status.streamer.running;
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
@@ -168,8 +231,8 @@ impl HostApp {
                         adapter_description: &desc,
                     })
                     .map_err(|e| e.to_string())?;
-                    // The service is what the Mac needs at logon; turn it on
-                    // once setup has succeeded rather than asking.
+                    // The service is what other machines need at logon; turn
+                    // it on once setup has succeeded rather than asking.
                     let _ = setup::set_start_with_windows(true, &exe);
                     Ok(())
                 });
@@ -177,13 +240,105 @@ impl HostApp {
             s.setup_running = false;
             s.setup_log = read_setup_log();
             s.setup_result = Some(result);
+            s.touch();
+            drop(s);
+            // The Machines page shows setup too, and it has no timer.
+            ctx.request_repaint();
         });
+    }
+
+    fn set_autostart(&mut self, on: bool) {
+        if !self.live {
+            self.autostart = on;
+            return;
+        }
+        let result = std::env::current_exe()
+            .map_err(anyhow::Error::from)
+            .and_then(|exe| setup::set_start_with_windows(on, &exe));
+        match result {
+            Ok(()) => {
+                self.autostart = on;
+                self.cfg.start_with_windows = on;
+                self.dirty = true;
+            }
+            Err(e) => {
+                tracing::warn!("autostart: {e:#}");
+                self.note = Some((
+                    Tone::Danger,
+                    format!("Couldn't change whether BroLink starts at login: {e}."),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+
+    fn stop_service(&mut self) {
+        if self.live {
+            // Off the UI thread: the service may take a moment to answer.
+            std::thread::spawn(|| {
+                let _ = http::request(
+                    ("127.0.0.1", CONTROL_PORT),
+                    "POST",
+                    "/v1/quit",
+                    None,
+                    Duration::from_secs(2),
+                );
+            });
+        }
+        let mut s = self.shared.lock();
+        s.status = None;
+        s.service_error = Some(STOPPED.into());
+        s.touch();
+    }
+
+    fn start_service(&mut self) {
+        {
+            let mut s = self.shared.lock();
+            s.service_error = None;
+            s.touch();
+        }
+        if self.live {
+            std::thread::spawn(crate::service::ensure_service_running);
+        }
+    }
+
+    fn open_log_folder(&mut self) {
+        if !self.live {
+            return;
+        }
+        let Ok(dir) = brolink_core::config::data_dir() else {
+            return;
+        };
+        let opener = match self.os {
+            Os::Windows => "explorer",
+            Os::Mac => "open",
+            Os::Linux => "xdg-open",
+        };
+        if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+            self.note = Some((
+                Tone::Danger,
+                format!("Couldn't open {}: {e}.", dir.display()),
+                Instant::now(),
+            ));
+        }
     }
 }
 
-impl eframe::App for HostApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(500));
+/// What the service error says after the user stopped it from here.
+const STOPPED: &str = "Stopped from this window.";
+
+impl Shared {
+    /// The service is down because someone pressed Stop, not by accident.
+    pub(crate) fn stopped_by_user(&self) -> bool {
+        self.service_error.as_deref() == Some(STOPPED)
+    }
+}
+
+impl HostApp {
+    /// Draw the page into `ui`, a column the window has already laid out.
+    pub fn page(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.poll_note(&ctx);
         let shared = self.shared.lock();
         let status = shared.status.clone();
         let service_error = shared.service_error.clone();
@@ -195,101 +350,90 @@ impl eframe::App for HostApp {
         drop(shared);
         if setup_running {
             self.busy_since.get_or_insert_with(Instant::now);
+            // The seconds counter under the spinner.
+            ctx.request_repaint_after(Duration::from_secs(1));
         } else {
             self.busy_since = None;
         }
 
-        ui::top_bar(ctx, "top", |ui| {
-            let (label, tone) = pill(status.as_ref(), service_error.as_deref());
-            self.brand.header(ui, "BroLink Host", |ui| {
-                if ui::ghost_button(
-                    ui,
-                    if self.settings_open {
-                        "Overview"
-                    } else {
-                        "Settings"
-                    },
-                )
-                .clicked()
-                {
-                    self.settings_open = !self.settings_open;
-                }
-                ui::status_pill(ui, label, tone);
-            });
+        let Some(s) = status else {
+            self.no_service(ui, service_error.as_deref());
+            return;
+        };
+        let (label, tone) = pill(Some(&s), None);
+        ui::page_header(ui, &s.name, Some(&self.summary(&s)), |ui| {
+            ui::status_text(ui, tone, label);
         });
-
-        ui::bottom_bar(ctx, "bottom", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
-                ui.label("·");
-                ui.label(format!("control port TCP {CONTROL_PORT}"));
-                if let Some(s) = &status {
-                    if s.version != env!("CARGO_PKG_VERSION") {
-                        ui.label("·");
-                        ui.colored_label(
-                            P.accent,
-                            format!("service is v{}, restarting it", s.version),
-                        );
-                    }
-                }
-            });
-        });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(P.bg))
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(20.0);
-                    ui::content_column(ui, COLUMN_WIDTH, |ui| {
-                        ui.spacing_mut().item_spacing.y = 14.0;
-                        match &status {
-                            Some(s) => {
-                                self.setup_card(
-                                    ui,
-                                    s,
-                                    setup_running,
-                                    setup_result.as_ref(),
-                                    &setup_log,
-                                );
-                                if self.settings_open {
-                                    self.settings_card(ui);
-                                    ui::titled_card(ui, "Repair streaming", Some("Reapply display matching and remove stale bitrate limits. Setup preserves paired Macs."), |ui| {
-                                        if ui.add_enabled(!setup_running, egui::Button::new("Repair setup")).clicked() { self.start_setup(s); }
-                                    });
-                                } else {
-                                    ui.label(egui::RichText::new(&s.name).font(ui::theme::semibold(28.0)).color(P.text));
-                                    ui::caption(ui, "Your desktop is available to every BroLink on this Tailscale account.");
-                                    self.pc_card(ui, s, gamepad);
-                                    self.paired_card(ui, &clients);
-                                }
-                                ui::collapsible(ui, "host-diagnostics", "Diagnostics", false, |ui| {
-                                    ui::log_view(ui, "host_log", &s.log, 200.0);
-                                    if ui::ghost_button(ui, "Copy log").clicked() { ui.ctx().copy_text(s.log.join("\n")); }
-                                });
-                            }
-                            None => {
-                                ui::toned_card(ui, Tone::Neutral, |ui| {
-                                    ui::heading(ui, "Starting the background service", None);
-                                    ui::empty_state(
-                                        ui,
-                                        service_error
-                                            .as_deref()
-                                            .unwrap_or("This takes a second or two."),
-                                        true,
-                                    );
-                                });
-                            }
-                        }
-                        ui.add_space(10.0);
-                    });
-                });
-            });
-
+        if let Some((tone, text, _)) = self.note.clone() {
+            ui::notice(ui, tone, &text);
+        }
+        if s.version != env!("CARGO_PKG_VERSION") {
+            ui::notice(
+                ui,
+                Tone::Neutral,
+                &format!(
+                    "The background service runs BroLink {} and this window {}; BroLink is restarting the older one.",
+                    s.version,
+                    env!("CARGO_PKG_VERSION")
+                ),
+            );
+        }
+        self.setup_card(ui, &s, setup_running, setup_result.as_ref(), &setup_log);
+        self.overview(ui, &s, gamepad);
+        self.paired(ui, &clients);
+        self.options(ui);
+        self.diagnostics(ui, &s, setup_running);
         self.commit();
     }
-}
 
-impl HostApp {
+    /// One sentence under the machine's name: can others connect?
+    fn summary(&self, s: &Status) -> String {
+        let noun = self.os.noun();
+        match pill(Some(s), None).0 {
+            "Tailscale off" => format!(
+                "Tailscale isn't running on this {noun}, so no other machine can reach it."
+            ),
+            "Needs setup" => format!(
+                "Other machines can see this {noun} but can't connect until setup finishes."
+            ),
+            _ => format!(
+                "Shared. Any machine signed in to your Tailscale account can connect to this {noun}."
+            ),
+        }
+    }
+
+    fn no_service(&mut self, ui: &mut egui::Ui, error: Option<&str>) {
+        ui::page_header(ui, "Sharing", None, |_| {});
+        if error == Some(STOPPED) {
+            ui::banner(
+                ui,
+                Tone::Neutral,
+                "The background service is stopped",
+                Some(&format!(
+                    "Other machines can't connect to this {} until it runs again. It also starts the next time this window opens.",
+                    self.os.noun()
+                )),
+                |ui| {
+                    if ui::primary_button(ui, "Start it now").clicked() {
+                        self.start_service();
+                    }
+                },
+            );
+        } else {
+            ui::card(ui, |ui| {
+                ui::heading(ui, "Starting the background service", None);
+                ui::empty_state(
+                    ui,
+                    "It shares this machine and answers the others. This takes a second or two.",
+                    true,
+                );
+                if let Some(e) = error {
+                    ui::small_print(ui, format!("Last attempt: {e}"));
+                }
+            });
+        }
+    }
+
     fn setup_card(
         &mut self,
         ui: &mut egui::Ui,
@@ -305,307 +449,493 @@ impl HostApp {
             .filter(|l| !l.starts_with("Tailscale"))
             .collect();
         let tailscale_item = s.setup.iter().find(|l| l.starts_with("Tailscale"));
-        if admin_items.is_empty() && tailscale_item.is_none() && result.is_none() && !running {
+        let done = admin_items.is_empty() && tailscale_item.is_none();
+        if done && !running && !matches!(result, Some(Err(_))) {
+            if result.is_some() {
+                ui::notice(
+                    ui,
+                    Tone::Success,
+                    &format!(
+                        "Setup finished. Other machines can connect to this {} now.",
+                        self.os.noun()
+                    ),
+                );
+            }
             return;
         }
-        let tone = if admin_items.is_empty() && tailscale_item.is_none() {
+        let migrate = crate::migrate::uses_old_engine(&s.streamer.kind);
+        let tone = if done && !matches!(result, Some(Err(_))) {
             Tone::Success
+        } else if matches!(result, Some(Err(_))) {
+            Tone::Danger
         } else {
-            Tone::Accent
+            Tone::Warning
         };
+        let (title, how) = match self.os {
+            Os::Windows => (
+                if migrate {
+                    "Update the streaming engine"
+                } else {
+                    "Share this PC"
+                },
+                "One administrator prompt does everything listed here. Nothing else needs configuring.",
+            ),
+            Os::Mac => (
+                "Share this Mac",
+                "BroLink installs the streaming engine for you. macOS then asks once to let it record the screen.",
+            ),
+            Os::Linux => (
+                "Share this machine",
+                "BroLink installs the streaming engine for this user and keeps it running.",
+            ),
+        };
+        let title = if done { "Sharing is set up" } else { title };
         ui::toned_card(ui, tone, |ui| {
-            ui::heading(
-                ui,
-                "Set up this PC",
-                Some("One administrator prompt does everything below. Nothing else needs configuring."),
-            );
+            ui.spacing_mut().item_spacing.y = space::SM;
+            ui::heading(ui, title, (!done).then_some(how));
             if let Some(t) = tailscale_item {
-                ui::notice(ui, Tone::Danger, t);
-                ui.horizontal(|ui| {
-                    if ui::ghost_button(ui, "Get Tailscale").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(
-                            "https://tailscale.com/download/windows",
-                        ));
+                let why = t
+                    .trim_start_matches("Tailscale:")
+                    .trim()
+                    .trim_end_matches("Install it and sign in.")
+                    .trim()
+                    .trim_end_matches('.');
+                // The link belongs to the item: it starts where its text does.
+                ui::dot_item(ui, Tone::Danger, |ui| {
+                    ui.spacing_mut().item_spacing.y = space::XXS;
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(format!(
+                            "{}. Install Tailscale and sign in with the account your other machines use.",
+                            sentence_case(why)
+                        )).color(ui::PALETTE.text))
+                        .wrap(),
+                    );
+                    if ui::link(ui, "Get Tailscale").clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(self.os.tailscale_url()));
                     }
-                    ui::caption(ui, "Sign in with the same account as your Mac.");
                 });
             }
             for item in &admin_items {
-                ui::dot_label(ui, Tone::Accent, item);
+                ui::dot_label(ui, Tone::Warning, item);
             }
-            if admin_items.is_empty() && tailscale_item.is_none() {
-                ui::dot_label(ui, Tone::Success, "Everything is in place.");
-            }
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if running {
-                    ui::empty_state(
-                        ui,
-                        &format!(
-                            "Waiting for the administrator prompt and the setup steps… {}s",
-                            self.busy_since.map(|t| t.elapsed().as_secs()).unwrap_or(0)
-                        ),
-                        true,
-                    );
-                } else {
-                    let migrate = crate::migrate::uses_old_engine(&s.streamer.kind);
+            ui.add_space(space::XS);
+            if running {
+                let secs = self.busy_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                let what = match self.os {
+                    Os::Windows => "Waiting for the administrator prompt and the setup steps",
+                    _ => "Installing and starting the streaming engine",
+                };
+                ui::empty_state(ui, &format!("{what}… {secs} s"), true);
+            } else if !done || result.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = space::MD;
                     let label = if migrate {
-                        "Update this PC"
+                        "Update the engine"
                     } else if admin_items.is_empty() {
                         "Run setup again"
+                    } else if self.os == Os::Windows {
+                        "Set up as administrator"
                     } else {
-                        "Set up this PC (administrator)"
+                        "Set up sharing"
                     };
-                    if ui::primary_button(ui, label).clicked() {
-                        self.start_setup(s);
+                    let primary = !admin_items.is_empty() || migrate;
+                    let clicked = if primary {
+                        ui::primary_button(ui, label).clicked()
+                    } else {
+                        ui::secondary_button(ui, label).clicked()
+                    };
+                    if clicked {
+                        self.start_setup(ui.ctx(), s);
                     }
-                    if migrate {
-                        ui::caption(
-                            ui,
-                            "One administrator prompt. Keeps this PC's pairing and web login.",
-                        );
+                    let note = if migrate {
+                        Some("Keeps this PC's pairings and web login.")
                     } else if !s.streamer.installed {
-                        ui::caption(
-                            ui,
-                            if self.bundled_engine {
-                                "Installs the streaming engine that ships with BroLink."
-                            } else {
-                                "Downloads the streaming engine and installs it."
-                            },
-                        );
+                        Some(match (self.os, self.bundled_engine) {
+                            (Os::Windows, true) => "Installs the engine that ships with BroLink.",
+                            _ => "Downloads the streaming engine and installs it.",
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(n) = note {
+                        ui::small_print(ui, n);
                     }
-                }
-            });
+                });
+            }
             match result {
                 Some(Ok(())) => {
                     ui::notice(
                         ui,
                         Tone::Success,
-                        "Setup finished. The service re-checks everything within a few seconds.",
+                        "Setup finished. The service is re-checking; the items above clear within a few seconds.",
                     );
                 }
                 Some(Err(e)) => {
-                    ui::notice(ui, Tone::Danger, e);
+                    let friendly = setup_error(e, self.os);
+                    ui::banner(
+                        ui,
+                        Tone::Danger,
+                        "Setup didn't finish",
+                        Some(&friendly),
+                        |ui| {
+                            if !friendly.contains(e.trim_end_matches('.')) {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(e)
+                                            .font(ui::theme::mono(ui::theme::text::MONO - 1.0))
+                                            .color(ui::PALETTE.text_tertiary),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                        },
+                    );
                 }
                 None => {}
             }
             if !log.is_empty() {
-                ui::collapsible(
+                ui::disclosure(
                     ui,
                     "setup_log",
                     "Setup log",
-                    result.as_ref().is_some_and(|r| r.is_err()),
+                    matches!(result, Some(Err(_))),
                     |ui| {
-                        ui::log_view(ui, "setup_log_view", log, 160.0);
+                        ui::log_view(ui, "setup_log_view", log, 180.0);
                     },
                 );
             }
         });
     }
 
-    fn pc_card(&mut self, ui: &mut egui::Ui, s: &Status, gamepad: Option<bool>) {
-        ui::titled_card(ui, "This PC", None, |ui| {
-            let tailscale = match (&s.tailscale_ip, &s.tailscale_login) {
-                (Some(ip), Some(login)) => format!("{ip} · signed in as {login}"),
-                (Some(ip), None) => ip.clone(),
-                _ => "not running".into(),
+    fn overview(&mut self, ui: &mut egui::Ui, s: &Status, gamepad: Option<bool>) {
+        let noun = self.os.noun();
+        let (ts_tone, tailscale) = match (&s.tailscale_ip, &s.tailscale_login) {
+            (Some(ip), Some(login)) => (Tone::Success, format!("{ip} · {login}")),
+            (Some(ip), None) => (Tone::Success, ip.clone()),
+            _ => (Tone::Danger, "Not running".into()),
+        };
+        let (engine_tone, engine) = if !s.streamer.installed {
+            (Tone::Warning, "Not installed".to_string())
+        } else if !s.streamer.running {
+            (Tone::Warning, "Installed, not running".to_string())
+        } else if !s.streamer.api_ok {
+            (
+                Tone::Warning,
+                "Running, but BroLink can't sign in to it".to_string(),
+            )
+        } else {
+            let encoder = match s.streamer.encoder.as_str() {
+                "" => String::new(),
+                "software" => {
+                    " · Software encoding: no GPU encoder worked, so streams use the CPU".into()
+                }
+                "nvenc" => " · NVIDIA encoder".into(),
+                "amdvce" => " · AMD encoder".into(),
+                "quicksync" => " · Intel encoder".into(),
+                "videotoolbox" => " · Apple encoder".into(),
+                e => format!(" · {e} encoder"),
             };
-            let streamer = if !s.streamer.installed {
-                "not installed".to_string()
+            let tone = if s.streamer.encoder == "software" {
+                Tone::Warning
             } else {
-                format!(
-                    "{} · {}{}{}{}",
-                    s.streamer.kind,
-                    if s.streamer.running {
-                        "running"
-                    } else {
-                        "not running"
-                    },
-                    if s.streamer.api_ok {
-                        " · BroLink logged in"
-                    } else {
-                        ""
-                    },
-                    match s.streamer.encoder.as_str() {
-                        "" => String::new(),
-                        "software" =>
-                            " · software encoder (no GPU encoder worked: streams will be slow)"
-                                .into(),
-                        e => format!(" · {e} encoder"),
-                    },
-                    if s.streamer.audio_problem.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · no sound: {}", s.streamer.audio_problem)
-                    }
+                Tone::Success
+            };
+            (tone, format!("Running{encoder}"))
+        };
+        let network = match &s.nat {
+            Some(n) => network_sentence(n, noun),
+            None => "Checking…".into(),
+        };
+        let mut rows = vec![
+            Kv::new("Tailscale", tailscale).tone(ts_tone),
+            Kv::new("Streaming engine", engine).tone(engine_tone),
+        ];
+        if !s.streamer.audio_problem.is_empty() {
+            rows.push(
+                Kv::new(
+                    "Sound",
+                    format!(
+                        "None to send: “{}”. Give this {noun} an audio output, even a virtual one.",
+                        s.streamer.audio_problem
+                    ),
                 )
-            };
-            let network = match &s.nat {
-                Some(n) => crate::service::describe_nat(n)
-                    .trim_start_matches("network: ")
-                    .to_string(),
-                None => "checking…".into(),
-            };
-            let mut wake = match (&s.mac, s.wake_ready) {
-                (Some(mac), Some(true)) => format!("ready · {} · {mac}", s.wake_adapter),
-                (Some(mac), Some(false)) => format!("off · {} · {mac}", s.wake_adapter),
-                (Some(mac), None) => format!("unknown · {} · {mac}", s.wake_adapter),
-                (None, _) => "no wired adapter found".into(),
+                .tone(Tone::Warning),
+            );
+        }
+        rows.push(Kv::new("Network", network));
+        if self.os == Os::Windows {
+            let (tone, mut wake) = match (&s.mac, s.wake_ready) {
+                (Some(mac), Some(true)) => {
+                    (Tone::Success, format!("Ready · {} · {mac}", s.wake_adapter))
+                }
+                (Some(mac), Some(false)) => {
+                    (Tone::Warning, format!("Off · {} · {mac}", s.wake_adapter))
+                }
+                (Some(mac), None) => (
+                    Tone::Neutral,
+                    format!("Unknown · {} · {mac}", s.wake_adapter),
+                ),
+                (None, _) => (Tone::Neutral, "No wired adapter found".into()),
             };
             if s.fast_startup == Some(true) {
-                wake.push_str(" · Fast Startup on");
+                wake.push_str(" · Fast Startup is on");
             }
             if let Some(age) = s.wake_packet_age_secs {
-                wake.push_str(&format!(" · packet received {age}s ago"));
+                // The poller ignores this clock (only_aged), so it is kept
+                // current here, and only while it is on screen.
+                let (text, next) = match age {
+                    0..60 => (format!("{age} s"), 1),
+                    60..3600 => (format!("{} min", age / 60), 60 - age % 60),
+                    _ => (format!("{} h", age / 3600), 3600 - age % 3600),
+                };
+                wake.push_str(&format!(" · Last wake packet {text} ago"));
+                ui.ctx().request_repaint_after(Duration::from_secs(next));
             }
-            let gamepad_text = match gamepad {
-                Some(true) => "virtual controller driver installed",
-                Some(false) => "virtual controller driver missing",
-                None => "unknown until the streaming engine is running",
+            rows.push(Kv::new("Wake-on-LAN", wake).tone(tone));
+        }
+        rows.push(Kv::new(
+            "LAN address",
+            s.lan_ip.clone().unwrap_or_else(|| "None".into()),
+        ));
+        if self.os == Os::Windows {
+            let (tone, text) = match gamepad {
+                Some(true) => (Tone::Success, "Virtual controller driver installed"),
+                Some(false) => (Tone::Warning, "Virtual controller driver missing"),
+                None => (Tone::Neutral, "Known once the streaming engine runs"),
             };
-            ui::kv_grid(
-                ui,
-                &[
-                    ("Name", s.name.clone()),
-                    ("Tailscale", tailscale),
-                    ("Network", network),
-                    ("Streaming", streamer),
-                    ("Wake-on-LAN", wake),
-                    (
-                        "LAN address",
-                        s.lan_ip.clone().unwrap_or_else(|| "—".into()),
-                    ),
-                    ("Gamepads", gamepad_text.into()),
-                ],
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if gamepad == Some(false)
-                    && ui::ghost_button(ui, "Install controller driver").clicked()
-                {
-                    if let Some(api) = self.api() {
-                        if let Err(e) = api.install_gamepad_driver() {
-                            tracing::warn!("ViGEmBus install: {e:#}");
-                        }
-                    }
+            rows.push(Kv::new("Game controllers", text).tone(tone));
+        }
+        let heading = format!("This {noun}");
+        ui::section(ui, &heading, |ui| {
+            ui.add_space(space::MD);
+            ui::kv_grid(ui, &rows);
+            if self.os == Os::Windows && gamepad == Some(false) {
+                ui.add_space(space::SM);
+                if ui::secondary_button(ui, "Install controller driver").clicked() {
+                    self.install_gamepad_driver(ui.ctx());
                 }
-            });
+            }
+            ui.add_space(space::MD);
         });
     }
 
-    fn paired_card(&mut self, ui: &mut egui::Ui, clients: &[(String, String)]) {
-        ui::titled_card(
-            ui,
-            "Paired Macs",
-            Some("A Mac pairs itself the first time it connects; nothing to type here."),
-            |ui| {
-                if clients.is_empty() {
-                    ui::empty_state(ui, "No Mac has paired yet.", false);
+    fn install_gamepad_driver(&mut self, ctx: &egui::Context) {
+        let Some((user, pass)) = self.creds().filter(|_| self.live) else {
+            return;
+        };
+        self.later(ctx, move || {
+            let api = Api {
+                user: &user,
+                pass: &pass,
+            };
+            match api.install_gamepad_driver() {
+                Ok(()) => (
+                    Tone::Success,
+                    "The controller driver is installing. Windows may ask to confirm.".into(),
+                ),
+                Err(e) => {
+                    tracing::warn!("ViGEmBus install: {e:#}");
+                    (
+                        Tone::Danger,
+                        format!("Couldn't install the controller driver: {e}."),
+                    )
                 }
-                for (i, (name, uuid)) in clients.iter().enumerate() {
-                    if i > 0 {
-                        ui::row_separator(ui);
-                    }
-                    ui::list_row(ui, name, &uuid[..uuid.len().min(8)], |ui| {
-                        if self.confirm_unpair.as_deref() == Some(uuid) {
-                            if ui::toned_button(ui, "Unpair", Tone::Danger).clicked() {
-                                if let Some(api) = self.api() {
-                                    if let Err(e) = api.unpair(uuid) {
-                                        tracing::warn!("unpair: {e:#}");
-                                    }
-                                }
-                                self.confirm_unpair = None;
-                            }
-                            if ui::ghost_button(ui, "Keep").clicked() {
-                                self.confirm_unpair = None;
-                            }
-                        } else if ui::danger_button(ui, "Unpair…").clicked() {
-                            self.confirm_unpair = Some(uuid.clone());
-                        }
-                    });
-                }
-            },
-        );
+            }
+        });
     }
 
-    fn settings_card(&mut self, ui: &mut egui::Ui) {
-        ui::titled_card(ui, "Settings", None, |ui| {
+    fn paired(&mut self, ui: &mut egui::Ui, clients: &[(String, String)]) {
+        ui::section(ui, "Paired devices", |ui| {
+            if clients.is_empty() {
+                ui.add_space(space::MD);
+                ui::muted(ui, "None yet. A machine pairs itself the first time it connects; nothing needs typing here.");
+                ui.add_space(space::MD);
+                return;
+            }
+            for (i, (name, uuid)) in clients.iter().enumerate() {
+                if i > 0 {
+                    ui::row_separator(ui);
+                }
+                let id = format!("ID {}", &uuid[..uuid.len().min(8)]);
+                ui::list_row(ui, None, name, &id, |ui| {
+                    if self.confirm_unpair.as_deref() == Some(uuid) {
+                        if ui::ghost_button(ui, "Keep").clicked() {
+                            self.confirm_unpair = None;
+                        }
+                        if ui::destructive_button(ui, "Unpair").clicked() {
+                            self.unpair(ui.ctx(), name, uuid);
+                            self.confirm_unpair = None;
+                        }
+                    } else if ui::danger_button(ui, "Unpair…")
+                        .on_hover_text("It pairs again by itself the next time it connects.")
+                        .clicked()
+                    {
+                        self.confirm_unpair = Some(uuid.clone());
+                    }
+                });
+            }
+        });
+    }
+
+    fn unpair(&mut self, ctx: &egui::Context, name: &str, uuid: &str) {
+        let Some((user, pass)) = self.creds().filter(|_| self.live) else {
+            return;
+        };
+        let (name, uuid) = (name.to_string(), uuid.to_string());
+        self.later(ctx, move || {
+            let api = Api {
+                user: &user,
+                pass: &pass,
+            };
+            match api.unpair(&uuid) {
+                Ok(()) => (
+                    Tone::Success,
+                    format!("Unpaired {name}. It pairs again the next time it connects."),
+                ),
+                Err(e) => {
+                    tracing::warn!("unpair: {e:#}");
+                    (Tone::Danger, format!("Couldn't unpair {name}: {e}."))
+                }
+            }
+        });
+    }
+
+    fn options(&mut self, ui: &mut egui::Ui) {
+        let noun = self.os.noun();
+        ui::section(ui, "Options", |ui| {
             if ui::toggle_row(
                 ui,
                 &mut self.cfg.power_allowed,
-                "Let a paired Mac sleep, restart, or shut down this PC",
-                Some("Devices allowed by your Tailscale access rules can ask. Waking a sleeping PC requires access to its local network."),
+                &format!("Let other machines sleep, restart or shut down this {noun}"),
+                Some(&if self.os == Os::Windows {
+                    format!("Any machine your Tailscale access rules allow can ask. Waking this {noun} works only from its own network.")
+                } else {
+                    "Any machine your Tailscale access rules allow can ask.".to_string()
+                }),
             ) {
                 self.dirty = true;
+            }
+            if self.os == Os::Windows {
+                ui::row_separator(ui);
+                if ui::toggle_row(
+                    ui,
+                    &mut self.cfg.stay_awake,
+                    "Keep this PC awake while plugged in",
+                    Some("Asleep, Tailscale is off too, so machines on other networks can't wake it. Sleep from the Start menu or another machine still works."),
+                ) {
+                    self.dirty = true;
+                }
             }
             ui::row_separator(ui);
             let mut auto = self.autostart;
             if ui::toggle_row(
                 ui,
-                &mut self.cfg.stay_awake,
-                "Keep this PC awake while plugged in",
-                Some("Tailscale only works while the PC is on. Asleep, a Mac on another network cannot wake it. Sleep from the Mac or the Start menu still works."),
-            ) {
-                self.dirty = true;
-            }
-            ui::row_separator(ui);
-            if ui::toggle_row(
-                ui,
                 &mut auto,
-                "Start the background service with Windows",
-                Some("On by default, so the Mac can reach this PC after every restart without anyone at the keyboard."),
+                "Start BroLink when you log in",
+                Some(&format!(
+                    "So others can connect after this {noun} restarts, with nobody at the keyboard."
+                )),
             ) {
-                if let Ok(exe) = std::env::current_exe() {
-                    match setup::set_start_with_windows(auto, &exe) {
-                        Ok(()) => {
-                            self.autostart = auto;
-                            self.cfg.start_with_windows = auto;
-                            self.dirty = true;
-                        }
-                        Err(e) => tracing::warn!("autostart: {e:#}"),
-                    }
-                }
+                self.set_autostart(auto);
             }
+        });
+    }
+
+    fn diagnostics(&mut self, ui: &mut egui::Ui, s: &Status, setup_running: bool) {
+        ui::section(ui, "Diagnostics", |ui| {
+            ui.add_space(space::XS);
+            ui::disclosure(ui, "host-diagnostics", "Service log", false, |ui| {
+                ui::log_view(ui, "host_log", &s.log, 220.0);
+                ui.add_space(space::XS);
+                if ui::secondary_button(ui, "Copy log").clicked() {
+                    ui.ctx().copy_text(s.log.join("\n"));
+                }
+            });
             ui::row_separator(ui);
             ui::setting_row(
                 ui,
-                "Updates",
-                Some("New versions of BroLink Host arrive from your Mac over Tailscale and install by themselves; nothing to do here."),
+                "Repair sharing",
+                Some("Runs setup again: reapplies display matching and clears stale bitrate limits. Paired devices stay paired."),
                 |ui| {
-                    ui::muted(ui, format!("v{}", env!("CARGO_PKG_VERSION")));
+                    let clicked = ui
+                        .add_enabled_ui(!setup_running, |ui| {
+                            ui::secondary_button(ui, "Run setup again")
+                        })
+                        .inner
+                        .clicked();
+                    if clicked {
+                        self.start_setup(ui.ctx(), s);
+                    }
                 },
             );
             ui::row_separator(ui);
-            ui::open_source_row(ui, &mut self.notices_open);
-            ui::row_separator(ui);
-            ui.horizontal(|ui| {
-                if ui::danger_button(ui, "Stop the background service").clicked() {
-                    // Off the UI thread: the service may take a moment to
-                    // answer, and the window must not freeze meanwhile.
-                    std::thread::spawn(|| {
-                        let _ = http::request(
-                            ("127.0.0.1", CONTROL_PORT),
-                            "POST",
-                            "/v1/quit",
-                            None,
-                            Duration::from_secs(2),
-                        );
-                    });
-                    let mut s = self.shared.lock();
-                    s.status = None;
-                    s.service_error =
-                        Some("Stopped. It starts again next time this window opens.".into());
-                }
-                if ui::ghost_button(ui, "Open log folder").clicked() {
-                    if let Ok(dir) = brolink_core::config::data_dir() {
-                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+            ui::setting_row(
+                ui,
+                "Log files",
+                Some(&format!(
+                    "Control port TCP {CONTROL_PORT}. The service and window logs roll over at 4 MB."
+                )),
+                |ui| {
+                    if ui::secondary_button(ui, "Open folder").clicked() {
+                        self.open_log_folder();
                     }
-                }
-            });
+                },
+            );
+            ui::row_separator(ui);
+            ui::setting_row(
+                ui,
+                "Background service",
+                Some("Stopping it stops sharing until this window opens again."),
+                |ui| {
+                    if ui::danger_button(ui, "Stop service").clicked() {
+                        self.stop_service();
+                    }
+                },
+            );
         });
     }
 }
 
+/// What this machine's NAT means for the others, in a sentence that names
+/// the right kind of machine (the service log's version says "a Mac").
+fn network_sentence(n: &brolink_core::api::NatReport, noun: &str) -> String {
+    let city = brolink_core::tailscale::derp_city(&n.derp);
+    if !n.udp {
+        format!("UDP is blocked here, so other machines reach this {noun} only through a Tailscale relay.")
+    } else if n.hard == Some(true) && !n.portmap {
+        format!("Hard NAT without UPnP: machines on other networks reach this {noun} through the {city} relay, unless the router gets UPnP or a forwarded UDP port.")
+    } else if n.hard == Some(true) {
+        "Hard NAT, but the router maps ports, so direct connections should work.".into()
+    } else if n.hard == Some(false) {
+        format!("Easy NAT: direct connections should work. Nearest relay: {city}.")
+    } else {
+        format!("NAT type unknown. Nearest relay: {city}.")
+    }
+}
+
+/// A setup failure in words: what happened, then what to do.
+fn setup_error(e: &str, os: Os) -> String {
+    let lower = e.to_lowercase();
+    if os == Os::Windows && lower.contains("declined") {
+        return "The administrator prompt was declined, or setup stopped part way. Try again and choose Yes; the setup log below shows the last step reached.".into();
+    }
+    format!(
+        "{}. The setup log below shows the last step reached; run setup again once it is fixed.",
+        sentence_case(e.trim_end_matches('.'))
+    )
+}
+
+/// Capitalise the first letter.
+fn sentence_case(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The page's status in two words, and its tone.
 fn pill(status: Option<&Status>, err: Option<&str>) -> (&'static str, Tone) {
     match status {
         None if err.is_some() => ("Service stopped", Tone::Neutral),
@@ -613,8 +943,8 @@ fn pill(status: Option<&Status>, err: Option<&str>) -> (&'static str, Tone) {
         Some(s) if s.setup.iter().any(|l| l.starts_with("Tailscale")) => {
             ("Tailscale off", Tone::Danger)
         }
-        Some(s) if !s.setup.is_empty() => ("Needs setup", Tone::Accent),
-        Some(_) => ("Ready", Tone::Success),
+        Some(s) if !s.setup.is_empty() => ("Needs setup", Tone::Warning),
+        Some(_) => ("Shared", Tone::Success),
     }
 }
 
@@ -685,13 +1015,29 @@ fn relaunch_this_exe() -> bool {
 }
 
 /// Poll the service every second; refresh Sunshine's client list now and
-/// then; restart the service after an update.
+/// then; restart the service after an update. The window repaints only
+/// when an answer differs from the last.
+/// Whether `new` is `old` a little later: the wake packet's age only counts
+/// up, and the Sharing page redraws that clock itself while it is shown.
+fn only_aged(old: &Status, new: &Status) -> bool {
+    let aged = match (old.wake_packet_age_secs, new.wake_packet_age_secs) {
+        (Some(a), Some(b)) => b >= a,
+        (a, b) => a == b,
+    };
+    let mut old = old.clone();
+    old.wake_packet_age_secs = new.wake_packet_age_secs;
+    aged && old == *new
+}
+
 fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut failures = 0u32;
         let mut tick = 0u64;
         let mut restarted_service = false;
         loop {
+            // Repaint only when something the page shows has changed: an
+            // idle window draws nothing.
+            let mut changed = false;
             let r: Result<Status, _> = http::get_json(
                 ("127.0.0.1", CONTROL_PORT),
                 "/v1/status",
@@ -731,28 +1077,28 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                         let clients = api.clients();
                         let gamepad = api.gamepad_driver();
                         let mut s = shared.lock();
+                        changed |= s.clients != clients || s.gamepad_driver != gamepad;
                         s.clients = clients;
                         s.gamepad_driver = gamepad;
                     }
                     let mut s = shared.lock();
+                    changed |= !s.status.as_ref().is_some_and(|old| only_aged(old, &st));
                     s.status = Some(st);
-                    if s.service_error
-                        .as_deref()
-                        .is_some_and(|e| !e.starts_with("Stopped"))
-                    {
+                    if s.service_error.as_deref().is_some_and(|e| e != STOPPED) {
                         s.service_error = None;
+                        changed = true;
                     }
                 }
                 Err(e) => {
                     failures += 1;
                     let mut s = shared.lock();
-                    let stopped_by_user = s
-                        .service_error
-                        .as_deref()
-                        .is_some_and(|e| e.starts_with("Stopped"));
+                    let stopped_by_user = s.service_error.as_deref() == Some(STOPPED);
+                    changed |= s.status.is_some();
                     s.status = None;
                     if !stopped_by_user {
-                        s.service_error = Some(format!("{e}"));
+                        let e = format!("{e}");
+                        changed |= s.service_error.as_deref() != Some(e.as_str());
+                        s.service_error = Some(e);
                     }
                     drop(s);
                     if failures % 4 == 2 && !stopped_by_user {
@@ -760,7 +1106,10 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                     }
                 }
             }
-            ctx.request_repaint();
+            if changed {
+                shared.lock().touch();
+                ctx.request_repaint();
+            }
             tick += 1;
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -803,24 +1152,47 @@ mod tests {
     fn pill_reflects_setup_state() {
         assert_eq!(pill(None, None).0, "Starting");
         let mut s = Status::default();
-        assert_eq!(pill(Some(&s), None).0, "Ready");
+        assert_eq!(pill(Some(&s), None), ("Shared", Tone::Success));
         s.setup
             .push("The streaming engine is not installed.".into());
-        assert_eq!(pill(Some(&s), None).0, "Needs setup");
+        assert_eq!(pill(Some(&s), None), ("Needs setup", Tone::Warning));
         s.setup.push("Tailscale: not running".into());
-        assert_eq!(pill(Some(&s), None).0, "Tailscale off");
+        assert_eq!(pill(Some(&s), None), ("Tailscale off", Tone::Danger));
+    }
+
+    #[test]
+    fn a_declined_prompt_says_what_to_do() {
+        let e = setup_error(
+            "the administrator prompt was declined or setup failed",
+            Os::Windows,
+        );
+        assert!(e.contains("choose Yes"), "{e}");
+        assert!(!e.contains("setup failed"), "no echo of the raw error: {e}");
+        let e = setup_error("curl: (6) Could not resolve host", Os::Mac);
+        assert!(e.starts_with("Curl"), "{e}");
+        assert!(e.contains("run setup again"), "{e}");
     }
 }
 
-/// Render the panel to PNGs for review without a PC:
+/// The Sharing page inside the unified window, rendered without a PC:
 ///
 /// ```text
 /// cargo test -p brolink-host snapshots -- --ignored
 /// ```
+///
+/// Nothing here reads or writes real settings or reaches the service: the
+/// window and the page are both built headless.
 #[cfg(test)]
 mod snapshots {
     use super::*;
+    use crate::product::NodeApp;
+    use brolink_client::app::Page;
     use brolink_core::api::Streamer;
+    use egui_kittest::kittest::Queryable;
+
+    const MIN: egui::Vec2 = egui::vec2(640.0, 420.0);
+    const TYPICAL: egui::Vec2 = egui::vec2(1280.0, 800.0);
+    const LARGE: egui::Vec2 = egui::vec2(1920.0, 1200.0);
 
     fn out_dir() -> std::path::PathBuf {
         let dir =
@@ -835,12 +1207,16 @@ mod snapshots {
         eprintln!("wrote {}", path.display());
     }
 
-    fn ready_status() -> Status {
+    fn ready_status(os: &str) -> Status {
         Status {
             app: "brolink".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            name: "GAMING-PC".into(),
-            os: "windows".into(),
+            name: if os == "windows" {
+                "GAMING-PC".into()
+            } else {
+                "MacBook-Pro".into()
+            },
+            os: os.into(),
             tailscale_ip: Some("100.64.0.10".into()),
             tailscale_login: Some("user@example.com".into()),
             lan_ip: Some("192.168.1.10".into()),
@@ -855,7 +1231,11 @@ mod snapshots {
                 installed: true,
                 running: true,
                 api_ok: true,
-                encoder: "nvenc".into(),
+                encoder: if os == "windows" {
+                    "nvenc".into()
+                } else {
+                    "videotoolbox".into()
+                },
                 audio_problem: String::new(),
             },
             power_allowed: true,
@@ -869,42 +1249,30 @@ mod snapshots {
             }),
             setup: vec![],
             log: vec![
-                "BroLink Host 3.0.1 listening on TCP 47850".into(),
+                "BroLink 4.0.2 listening on TCP 47850".into(),
                 "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
-                "BroLink is running and BroLink is logged in".into(),
+                "the streaming engine is running and BroLink is signed in".into(),
                 "Wake-on-LAN ready on Ethernet (02:00:00:00:00:01)".into(),
-                "example-mac (user@example.com) asked".into(),
-                "paired \"Example Mac\"".into(),
+                "paired \"MacBook-Pro\"".into(),
             ],
         }
     }
 
-    fn build(shared: Shared) -> egui_kittest::Harness<'static, HostApp> {
-        build_sized(shared, egui::vec2(720.0, 1500.0), 2.0, true)
-    }
-
-    fn build_sized(
-        shared: Shared,
-        size: egui::Vec2,
-        ppp: f32,
-        gpu: bool,
-    ) -> egui_kittest::Harness<'static, HostApp> {
-        let shared = Arc::new(Mutex::new(shared));
-        let mut builder = egui_kittest::Harness::builder()
-            .with_size(size)
-            .with_pixels_per_point(ppp)
-            .with_max_steps(8);
-        if gpu {
-            builder = builder.wgpu();
+    fn ready() -> Shared {
+        Shared {
+            status: Some(ready_status("windows")),
+            clients: vec![
+                ("MacBook-Pro".into(), "0000000000000001".into()),
+                ("Studio".into(), "0000000000000002".into()),
+            ],
+            gamepad_driver: Some(false),
+            ..Default::default()
         }
-        let mut harness = builder.build_eframe(move |cc| HostApp::with_shared(cc, shared));
-        harness.run_steps(3);
-        harness
     }
 
-    fn needs_setup_shared() -> Shared {
-        let mut st = ready_status();
+    fn needs_setup() -> Shared {
+        let mut st = ready_status("windows");
         st.streamer = Streamer::default();
         st.wake_ready = Some(false);
         st.fast_startup = Some(true);
@@ -920,10 +1288,108 @@ mod snapshots {
         }
     }
 
+    fn failed() -> Shared {
+        let mut st = ready_status("windows");
+        st.tailscale_ip = None;
+        st.tailscale_login = None;
+        st.streamer = Streamer::default();
+        st.setup = vec![
+            "Tailscale: Tailscale is not installed. Install it and sign in.".into(),
+            "The streaming engine is not installed.".into(),
+        ];
+        Shared {
+            status: Some(st),
+            setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\BroLink\\setup.log)".into())),
+            setup_log: vec![
+                "[14:02:11] BroLink setup started".into(),
+                "[14:02:11] Downloading the streaming engine".into(),
+                "  engine: curl: (6) Could not resolve host: api.github.com".into(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn states() -> Vec<(&'static str, Os, Shared)> {
+        vec![
+            ("ready", Os::Windows, ready()),
+            ("setup", Os::Windows, needs_setup()),
+            (
+                "setup-running",
+                Os::Windows,
+                Shared {
+                    setup_running: true,
+                    ..needs_setup()
+                },
+            ),
+            ("setup-failed", Os::Windows, failed()),
+            (
+                "setup-done",
+                Os::Windows,
+                Shared {
+                    setup_result: Some(Ok(())),
+                    ..ready()
+                },
+            ),
+            (
+                "mac-ready",
+                Os::Mac,
+                Shared {
+                    status: Some(ready_status("macOS")),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mac-setup",
+                Os::Mac,
+                Shared {
+                    status: Some({
+                        let mut s = ready_status("macOS");
+                        s.streamer = Streamer::default();
+                        s.setup = vec!["The streaming engine is not installed.".into()];
+                        s
+                    }),
+                    ..Default::default()
+                },
+            ),
+            ("starting", Os::Windows, Shared::default()),
+            (
+                "stopped",
+                Os::Windows,
+                Shared {
+                    service_error: Some(STOPPED.into()),
+                    ..Default::default()
+                },
+            ),
+        ]
+    }
+
+    fn build(
+        shared: Shared,
+        os: Os,
+        size: egui::Vec2,
+        ppp: f32,
+        gpu: bool,
+    ) -> egui_kittest::Harness<'static, NodeApp> {
+        let mut builder = egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(ppp)
+            .with_max_steps(8);
+        if gpu {
+            builder = builder.wgpu();
+        }
+        let mut harness = builder.build_eframe(move |cc| {
+            let mut app = NodeApp::headless(cc, Default::default(), shared, os);
+            app.client_mut().open_page(Page::Sharing);
+            app
+        });
+        harness.run_steps(3);
+        harness
+    }
+
     /// Every widget sits inside the window, and no two controls overlap.
-    fn assert_fits(h: &egui_kittest::Harness<'_, HostApp>, width: f32) {
+    fn assert_fits(h: &egui_kittest::Harness<'_, NodeApp>, width: f32) {
         use egui::accesskit::Role;
-        use egui_kittest::kittest::{By, Queryable};
+        use egui_kittest::kittest::By;
         let mut controls = Vec::new();
         for node in h.query_all(By::new().predicate(|_| true)) {
             let Some(b) = node.raw_bounds() else { continue };
@@ -935,7 +1401,7 @@ mod snapshots {
             );
             if matches!(
                 node.role(),
-                Role::Button | Role::CheckBox | Role::RadioButton | Role::ComboBox
+                Role::Button | Role::CheckBox | Role::RadioButton | Role::ComboBox | Role::Link
             ) {
                 controls.push((
                     text,
@@ -958,73 +1424,120 @@ mod snapshots {
         }
     }
 
-    fn ready_shared() -> Shared {
-        Shared {
-            status: Some(ready_status()),
-            clients: vec![
-                ("Example Mac".into(), "0000000000000001".into()),
-                ("Second Example Mac".into(), "0000000000000002".into()),
-            ],
-            gamepad_driver: Some(false),
-            ..Default::default()
+    #[test]
+    fn every_sharing_state_fits_the_minimum_and_a_large_window() {
+        for (name, os, shared) in states() {
+            eprintln!("checking {name}");
+            let h = build(shared, os, MIN, 1.0, false);
+            assert_fits(&h, MIN.x);
+        }
+        for (name, os, shared) in states() {
+            eprintln!("checking {name}");
+            let h = build(shared, os, LARGE, 1.0, false);
+            assert_fits(&h, LARGE.x);
         }
     }
 
     #[test]
-    fn ready_panel_fits_the_minimum_window() {
-        let h = build_sized(ready_shared(), egui::vec2(560.0, 600.0), 1.0, false);
-        assert_fits(&h, 560.0);
+    fn the_page_is_a_tab_of_the_window_and_the_machine_leads_the_list() {
+        let mut h = build(ready(), Os::Windows, MIN, 1.0, false);
+        assert!(h.query_by_label("GAMING-PC").is_some());
+        h.get_by_label("Machines").click();
+        h.run_steps(3);
+        assert!(
+            h.query_by_label("GAMING-PC").is_some(),
+            "this PC leads the list"
+        );
+        assert!(h.query_by_label("Manage").is_some());
     }
 
     #[test]
-    fn setup_panel_fits_the_minimum_window() {
-        let h = build_sized(needs_setup_shared(), egui::vec2(560.0, 600.0), 1.0, false);
-        assert_fits(&h, 560.0);
+    fn windows_only_rows_stay_off_a_mac() {
+        let tall = egui::vec2(1280.0, 2400.0);
+        let h = build(ready(), Os::Windows, tall, 1.0, false);
+        assert!(h.query_by_label("Wake-on-LAN").is_some());
+        assert!(h
+            .query_all_by_label("Keep this PC awake while plugged in")
+            .next()
+            .is_some());
+        let h = build(
+            Shared {
+                status: Some(ready_status("macOS")),
+                ..Default::default()
+            },
+            Os::Mac,
+            tall,
+            1.0,
+            false,
+        );
+        assert!(h.query_by_label("Wake-on-LAN").is_none());
+        assert!(h.query_by_label("Game controllers").is_none());
+        assert!(
+            h.query_by_label_contains("Keep this").is_none(),
+            "keeping awake is Windows-only; the switch would do nothing on a Mac"
+        );
+    }
+
+    #[test]
+    fn unpair_asks_first_and_a_headless_page_touches_nothing() {
+        let tall = egui::vec2(1280.0, 2400.0);
+        let mut h = build(ready(), Os::Windows, tall, 1.0, false);
+        h.get_all_by_label("Unpair…").next().unwrap().click();
+        h.run_steps(3);
+        assert!(
+            h.query_by_label("Unpair").is_some(),
+            "the confirming button"
+        );
+        assert!(h.query_by_label("Keep").is_some());
+        h.get_by_label("Run setup again").click();
+        h.run_steps(3);
+        assert!(
+            h.query_by_label_contains("Waiting for the administrator prompt")
+                .is_some(),
+            "setup shows progress; headless, nothing ran"
+        );
     }
 
     #[test]
     #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn ready() {
-        let mut h = build(Shared {
-            status: Some(ready_status()),
-            clients: vec![
-                ("Example Mac".into(), "0000000000000001".into()),
-                ("Second Example Mac".into(), "0000000000000002".into()),
-            ],
-            gamepad_driver: Some(true),
-            ..Default::default()
-        });
-        save(h.render().unwrap(), "host-ready.png");
-        let mut h = build_sized(ready_shared(), egui::vec2(560.0, 600.0), 2.0, true);
-        save(h.render().unwrap(), "host-ready-560.png");
-    }
-
-    #[test]
-    #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn needs_setup() {
-        let mut h = build(needs_setup_shared());
-        save(h.render().unwrap(), "host-setup.png");
-        let mut h = build_sized(needs_setup_shared(), egui::vec2(560.0, 600.0), 2.0, true);
-        save(h.render().unwrap(), "host-setup-560.png");
-    }
-
-    #[test]
-    #[ignore = "renders with a GPU; run on demand to review the UI"]
-    fn setup_failed_no_tailscale() {
-        let mut st = ready_status();
-        st.tailscale_ip = None;
-        st.tailscale_login = None;
-        st.setup = vec!["Tailscale: Tailscale is not installed. Install it and sign in.".into()];
-        let mut h = build(Shared {
-            status: Some(st),
-            setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\BroLink\\setup.log)".into())),
-            setup_log: vec![
-                "[14:02:11] BroLink setup started".into(),
-                "[14:02:11] Downloading the streaming engine".into(),
-                "  engine: curl: (6) Could not resolve host: api.github.com".into(),
-            ],
-            ..Default::default()
-        });
-        save(h.render().unwrap(), "host-setup-failed.png");
+    fn snapshots_sharing() {
+        let key = ["ready", "setup", "setup-failed"];
+        for (name, os, _) in states() {
+            let sizes: Vec<(egui::Vec2, f32)> = if key.contains(&name) {
+                vec![
+                    (MIN, 1.0),
+                    (MIN, 2.0),
+                    (TYPICAL, 1.0),
+                    (TYPICAL, 2.0),
+                    (LARGE, 1.0),
+                    (LARGE, 2.0),
+                ]
+            } else {
+                vec![(MIN, 2.0), (TYPICAL, 2.0)]
+            };
+            for (size, ppp) in sizes {
+                let shared = states().into_iter().find(|(n, ..)| *n == name).unwrap().2;
+                let mut h = build(shared, os, size, ppp, true);
+                save(
+                    h.render().unwrap(),
+                    &format!(
+                        "sharing-{name}-{}x{}@{}x.png",
+                        size.x as u32, size.y as u32, ppp as u32
+                    ),
+                );
+            }
+        }
+        for (name, os, shared) in states() {
+            let mut h = build(shared, os, egui::vec2(1280.0, 1800.0), 1.0, true);
+            save(h.render().unwrap(), &format!("sharing-{name}-full.png"));
+        }
+        let mut h = build(ready(), Os::Windows, egui::vec2(1280.0, 1800.0), 1.0, true);
+        h.get_by_label("Service log").click();
+        h.run_steps(3);
+        save(h.render().unwrap(), "sharing-log-open-full.png");
+        let mut h = build(ready(), Os::Windows, TYPICAL, 2.0, true);
+        h.get_by_label("Machines").click();
+        h.run_steps(3);
+        save(h.render().unwrap(), "sharing-lobby-row-1280x800@2x.png");
     }
 }

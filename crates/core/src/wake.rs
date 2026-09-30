@@ -84,7 +84,9 @@ pub fn plan(
         .unwrap_or_default()
         .into_iter()
         .filter_map(|i| match i.addr {
-            if_addrs::IfAddr::V4(a) if !a.ip.is_loopback() && !is_tailnet(a.ip) => {
+            if_addrs::IfAddr::V4(a)
+                if !a.ip.is_loopback() && !crate::tailscale::is_tailnet(a.ip) =>
+            {
                 Some((a.ip, a.broadcast))
             }
             _ => None,
@@ -109,11 +111,6 @@ pub fn plan(
         out.push((Ipv4Addr::UNSPECIFIED, vec![p]));
     }
     out
-}
-
-fn is_tailnet(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    o[0] == 100 && (64..128).contains(&o[1])
 }
 
 /// Fire the packet everywhere in [`plan`]. Returns how many sends the OS
