@@ -87,7 +87,7 @@ impl Path {
 
 /// Recommended starting quality. RTT measures delay, not throughput: neither
 /// a VPS relay nor a distant direct connection implies a bandwidth cap.
-pub fn effective(settings: &StreamSettings, _path: &Path) -> StreamSettings {
+pub fn effective(settings: &StreamSettings) -> StreamSettings {
     let mut s = settings.clone();
     if s.quality == Quality::Auto {
         s.resolution = Resolution::Native;
@@ -278,35 +278,25 @@ mod tests {
         );
     }
 
+    /// The path is not an input at all: latency and relays never lower
+    /// what Auto asks for.
     #[test]
-    fn latency_and_relay_type_never_throttle_quality() {
-        for direct in [None, Some(true), Some(false)] {
-            for rtt_ms in [None, Some(2), Some(80), Some(200), Some(400)] {
-                for peer_relay in ["", "100.64.0.40:40000:vni:17"] {
-                    let path = Path {
-                        direct,
-                        rtt_ms,
-                        peer_relay: peer_relay.into(),
-                        ..Default::default()
-                    };
-                    let auto = StreamSettings {
-                        fps: 120,
-                        ..Default::default()
-                    };
-                    let s = effective(&auto, &path);
-                    assert_eq!(
-                        (s.resolution, s.fps, s.bitrate_kbps),
-                        (Resolution::Native, 120, 50_000)
-                    );
-                    let custom = StreamSettings {
-                        quality: Quality::Custom,
-                        bitrate_kbps: 150_000,
-                        ..auto
-                    };
-                    assert_eq!(effective(&custom, &path), custom);
-                }
-            }
-        }
+    fn auto_is_the_recommended_quality_and_custom_is_left_alone() {
+        let auto = StreamSettings {
+            fps: 120,
+            ..Default::default()
+        };
+        let s = effective(&auto);
+        assert_eq!(
+            (s.resolution, s.fps, s.bitrate_kbps),
+            (Resolution::Native, 120, 50_000)
+        );
+        let custom = StreamSettings {
+            quality: Quality::Custom,
+            bitrate_kbps: 150_000,
+            ..auto
+        };
+        assert_eq!(effective(&custom), custom);
     }
 
     #[test]

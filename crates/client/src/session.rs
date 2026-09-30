@@ -666,7 +666,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     //    carry.
     report(Step::Launching, "Measuring the path…".into());
     let path = measure_path(&t.node_id, t.ip, &t.path);
-    let settings = path::effective(&c.settings, &path);
+    let settings = path::effective(&c.settings);
     tracing::info!(
         "path to {}: {} · {}",
         t.name,
