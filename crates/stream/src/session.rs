@@ -1056,15 +1056,20 @@ mod real {
             std::thread::sleep(Duration::from_millis(5));
         }
         let stats = session.stats();
-        eprintln!("stats: {stats:?}, frames published: {}", frames.seq());
-        assert!(connected, "never connected");
-        assert!(frames.seq() > 60, "too few frames: {}", frames.seq());
+        let published = frames.seq();
+        eprintln!("stats: {stats:?}, frames published: {published}");
         session.stop();
         let t = Instant::now();
         while !session.finished() && t.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(session.finished(), "session did not finish");
         eprintln!("stopped in {:?}", t.elapsed());
+        // Leave the PC as it was found: end the app this test started.
+        if !resume {
+            let _ = client.quit();
+        }
+        assert!(connected, "never connected");
+        assert!(published > 60, "too few frames: {published}");
+        assert!(session.finished(), "session did not finish");
     }
 }

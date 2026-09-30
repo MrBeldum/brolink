@@ -72,6 +72,15 @@ GitHub release notes, so each version gets a heading of the form
 - A Windows or Linux viewer no longer calls its stream HEVC: those decode
   H.264 only, and the toolbar named the codec the PC could offer instead
   of the one in use.
+- The check that notices a black picture costs the decoder 0.14 ms a frame
+  instead of 2.5 ms at 3024×1964 when the picture really is black (15% of
+  a core at 60 fps, on the path every frame takes to the screen).
+- An idle window redraws about once a second instead of two or three
+  times, about a third less CPU while the lobby sits open.
+- A Mac or Linux machine that shares its desktop no longer runs a program
+  (`scutil` or `hostname`) for every status request it answers.
+- When the picture is black, the PC's explanation gets a minute to arrive
+  instead of 25 seconds, which its slower checks sometimes needed.
 
 ## 4.0.2 (2026-09-22)
 
