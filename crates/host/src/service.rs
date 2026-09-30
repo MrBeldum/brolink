@@ -20,7 +20,8 @@ use brolink_core::api::{
     CLIPBOARD_PATH, UPDATE_PATH,
 };
 use brolink_core::http::{self, Request, Response};
-use brolink_core::{tailscale, CONTROL_PORT};
+use brolink_core::tailscale::{self, is_tailnet, is_tailnet_ip};
+use brolink_core::CONTROL_PORT;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -915,36 +916,9 @@ fn control_host(host: &str) -> bool {
     })
 }
 
-/// Tailscale hands out addresses from 100.64.0.0/10.
-fn is_tailnet(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    o[0] == 100 && (64..128).contains(&o[1])
-}
-
-/// IPv4 CGNAT overlay, or IPv6 unique-local (Tailscale uses fd7a:115c:a1e0::/48).
-fn is_tailnet_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_tailnet(v4),
-        IpAddr::V6(v6) => v6.octets()[0] & 0xfe == 0xfc,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tailnet_range_is_recognised() {
-        assert!(is_tailnet("100.64.0.1".parse().unwrap()));
-        assert!(is_tailnet("100.127.255.254".parse().unwrap()));
-        assert!(is_tailnet("100.64.0.10".parse().unwrap()));
-        assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
-        assert!(!is_tailnet("192.168.1.2".parse().unwrap()));
-        assert!(is_tailnet_ip("100.111.100.57".parse().unwrap()));
-        assert!(is_tailnet_ip("fd7a:115c:a1e0::9e2a:381c".parse().unwrap()));
-        assert!(!is_tailnet_ip("8.8.8.8".parse().unwrap()));
-        assert!(!is_tailnet_ip("2001:4860:4860::8888".parse().unwrap()));
-    }
 
     fn whois(id: u64, login: &str) -> tailscale::WhoIs {
         tailscale::WhoIs {

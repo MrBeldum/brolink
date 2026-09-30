@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -326,6 +326,20 @@ pub fn netcheck() -> Result<NetCheck> {
     let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
     let out = run(Command::new(cli).args(["netcheck", "--format=json"]))?;
     parse_netcheck(&out)
+}
+
+/// An address Tailscale hands out: IPv4 from 100.64.0.0/10.
+pub fn is_tailnet(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (64..128).contains(&o[1])
+}
+
+/// [`is_tailnet`], or IPv6 unique-local (Tailscale uses fd7a:115c:a1e0::/48).
+pub fn is_tailnet_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_tailnet(v4),
+        IpAddr::V6(v6) => v6.octets()[0] & 0xfe == 0xfc,
+    }
 }
 
 /// The three-letter code of a DERP region, as `tailscale status` prints it.
@@ -702,6 +716,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.len(), 1048576);
+    }
+
+    #[test]
+    fn tailnet_range_is_recognised() {
+        assert!(is_tailnet("100.64.0.1".parse().unwrap()));
+        assert!(is_tailnet("100.127.255.254".parse().unwrap()));
+        assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
+        assert!(!is_tailnet("192.168.1.2".parse().unwrap()));
+        assert!(is_tailnet_ip("100.111.100.57".parse().unwrap()));
+        assert!(is_tailnet_ip("fd7a:115c:a1e0::9e2a:381c".parse().unwrap()));
+        assert!(!is_tailnet_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_tailnet_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[test]

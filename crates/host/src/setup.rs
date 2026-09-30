@@ -599,6 +599,24 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
     }
 }
 
+/// Run a read-only PowerShell probe and return what it printed.
+#[cfg(windows)]
+pub(crate) fn powershell(script: &str) -> Result<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(0x0800_0000)
+        .output()
+        .context("run powershell")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "powershell exited with {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 // Only the Windows setup path is compiled in a release build; tests use it everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 /// A PowerShell single-quoted literal: only `'` needs escaping, nothing is

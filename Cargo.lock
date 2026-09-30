@@ -740,8 +740,6 @@ dependencies = [
  "brolink-ui",
  "clap",
  "eframe",
- "egui",
- "egui-wgpu",
  "egui_kittest",
  "image",
  "parking_lot",

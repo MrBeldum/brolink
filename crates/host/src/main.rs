@@ -79,33 +79,9 @@ fn main() -> Result<()> {
         });
     }
     service::ensure_service_running();
-    let icon = if cfg!(target_os = "macos") {
-        eframe::egui::IconData::default()
-    } else {
-        eframe::egui::IconData {
-            rgba: brolink_core::icon::render(64),
-            width: 64,
-            height: 64,
-        }
-    };
-    let native = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([640.0, 420.0])
-            .with_title("BroLink")
-            .with_icon(icon),
-        renderer: eframe::Renderer::Wgpu,
-        vsync: false,
-        wgpu_options: egui_wgpu::WgpuConfiguration {
-            present_mode: egui_wgpu::wgpu::PresentMode::AutoNoVsync,
-            desired_maximum_frame_latency: Some(1),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     eframe::run_native(
         "BroLink",
-        native,
+        brolink_client::native_options(),
         Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))

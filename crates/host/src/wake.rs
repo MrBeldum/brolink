@@ -57,7 +57,7 @@ pub fn probe() -> WakeInfo {
              $armed = @(powercfg /devicequery wake_armed) -contains $n.InterfaceDescription; \
              $fs = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' -ErrorAction SilentlyContinue).HiberbootEnabled; \
              Write-Output \"$($n.MacAddress)|$($n.Name)|$($n.InterfaceDescription)|$ip|$wol|$armed|$fs\"";
-        match powershell(SCRIPT) {
+        match crate::setup::powershell(SCRIPT) {
             Ok(o) => parse_probe(&o),
             Err(e) => {
                 tracing::debug!("wake probe: {e:#}");
@@ -101,23 +101,6 @@ fn parse_probe(line: &str) -> WakeInfo {
         magic_packet,
         fast_startup,
     }
-}
-
-#[cfg(windows)]
-fn powershell(script: &str) -> Result<String> {
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(0x0800_0000)
-        .output()
-        .context("run powershell")?;
-    anyhow::ensure!(
-        out.status.success(),
-        "powershell exited with {}: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
