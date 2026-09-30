@@ -19,6 +19,11 @@ GitHub release notes, so each version gets a heading of the form
   every copy for the one it had already seen. On a Linux desktop, text
   pasted in from the viewer also stays on the clipboard now instead of
   vanishing when no clipboard manager picks it up.
+- A Windows PC whose pushed update crashes on start keeps the version it
+  had. The service used to exit as soon as the new executable had been
+  launched, so a replacement that died straight away left the PC with no
+  BroLink service until someone logged in again. It now waits two seconds,
+  and puts the previous executable back if the new one has already exited.
 
 ## 4.0.2 (2026-09-22)
 
