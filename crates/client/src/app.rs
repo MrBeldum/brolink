@@ -2493,7 +2493,7 @@ pub(crate) mod snapshots {
                 Setup::new(pcs()).step(
                     "Gaming-PC",
                     Step::Pairing { pin: "4821".into() },
-                    "BroLink on Gaming-PC isn't answering. Open BroLink there and choose Share this machine, then try again.",
+                    "BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.",
                 ),
             ),
             (

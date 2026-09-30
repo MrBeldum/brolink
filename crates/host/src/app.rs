@@ -461,7 +461,7 @@ impl HostApp {
             ),
             Os::Mac => (
                 "Share this Mac",
-                "BroLink installs the streaming engine for you. The first time someone connects, macOS asks once for Screen Recording.",
+                "BroLink installs the streaming engine for you. macOS then asks once to let it record the screen.",
             ),
             Os::Linux => (
                 "Share this machine",

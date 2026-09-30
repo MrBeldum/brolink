@@ -45,7 +45,18 @@ keep their meaning.
 cargo test -p brolink-client -p brolink-host snapshots -- --ignored
 ```
 
-renders every screen to `target/ui-snapshots/*.png`.
+renders every screen to `target/ui-snapshots/*.png`: each state of the
+machine list, Settings, the Sharing page and the stream overlay at the
+minimum window (640×420), a typical one (1280×800) and a large one
+(1920×1200), at 1× and 2× (`client-lobby-1280x800@2x.png`); `*-full.png`
+show whole scrolling pages. The window is built headless with default
+settings, so nothing reads or writes your real configuration. The same
+states run unignored, checking that nothing runs past the window and no
+two controls overlap, at the minimum and the large size.
+
+Every colour, size and distance comes from `crates/ui/src/theme.rs`, and
+every control from `crates/ui/src/widgets.rs`; a screen that needs
+something new adds it there, with accesskit info and a focus ring.
 
 ## Tests against a real Sunshine
 
