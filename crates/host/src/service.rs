@@ -841,10 +841,13 @@ impl Owner {
         if user == 0 {
             return false;
         }
-        if user == self.user {
-            return true;
+        if !self.tagged {
+            return user == self.user;
         }
-        if !self.tagged || self.tailnet.is_empty() {
+        // Every tagged machine is the "tagged-devices" user, and nothing
+        // says that user's ID differs between tailnets, so a matching ID
+        // proves nothing here: only a person's login does.
+        if self.tailnet.is_empty() {
             return false;
         }
         let login = peer.user_profile.login_name.as_str();
@@ -992,8 +995,8 @@ mod tests {
         assert!(vps.tagged);
         assert!(vps.admits(&mac), "a tagged VPS serves its tailnet's owner");
         assert!(
-            vps.admits(&relay),
-            "and machines tagged in the same tailnet"
+            !vps.admits(&relay),
+            "a tagged ID is no account: it may be a tagged machine anywhere"
         );
         assert!(!vps.admits(&friend));
 
@@ -1004,12 +1007,13 @@ mod tests {
         };
         assert!(org.admits(&whois(5, "ada@EXAMPLE.com")));
         assert!(!org.admits(&whois(6, "eve@example.com.evil")));
-        // Without a tailnet name a tagged machine takes nobody but its kind.
+        // Without a tailnet name a tagged machine takes nobody.
         let unnamed = Owner {
             tailnet: String::new(),
             ..vps
         };
         assert!(!unnamed.admits(&mac));
+        assert!(!unnamed.admits(&relay));
     }
 
     #[test]

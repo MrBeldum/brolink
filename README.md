@@ -159,7 +159,8 @@ Ethernet is strongly preferred; most Wi-Fi adapters cannot wake a PC.
 - The host's control service listens on TCP 47850 and answers only
   loopback and Tailscale addresses that `tailscale whois` attributes to the
   account the PC is signed in as. A tagged server (the relay VPS) belongs
-  to no account and answers the members of its own tailnet. Everyone else,
+  to no account and answers the people of its own tailnet, not other
+  tagged machines. Everyone else,
   including machines shared in from other tailnets, gets a 403. The
   firewall rule setup adds is scoped to `100.64.0.0/10`.
 - The stream is the GameStream protocol (moonlight-common-c on the viewer,
