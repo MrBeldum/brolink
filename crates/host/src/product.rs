@@ -85,6 +85,7 @@ impl NodeApp {
         g.status = shared.status.clone();
         g.setup_running = shared.setup_running;
         g.setup_result = shared.setup_result.clone();
+        g.service_stopped = shared.stopped_by_user();
     }
 }
 

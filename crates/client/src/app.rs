@@ -759,7 +759,10 @@ impl ClientApp {
         if let Some((tone, text)) = self.updates.lock().notice.clone() {
             ui::notice(ui, tone, &text);
         }
-        for text in key_expiry_warnings(disc).iter().filter(|t| urgent(t)) {
+        for (_, text) in key_expiry_warnings(disc)
+            .iter()
+            .filter(|(urgent, _)| *urgent)
+        {
             ui::notice(ui, Tone::Danger, text);
         }
         if prog.active() {
@@ -907,6 +910,7 @@ impl ClientApp {
     fn this_machine_row(&mut self, ui: &mut egui::Ui, slot: &share::Slot) {
         let g = slot.lock();
         let running = g.setup_running;
+        let stopped = g.service_stopped;
         let status = g.status.clone();
         drop(g);
         let noun = this_noun(status.as_ref().map(|s| s.os.as_str()).unwrap_or_default());
@@ -919,6 +923,10 @@ impl ClientApp {
             .as_ref()
             .is_some_and(|s| s.streamer.running && s.streamer.api_ok);
         let (tone, detail) = match &status {
+            None if stopped => (
+                Tone::Neutral,
+                "Not shared · the background service is stopped".to_string(),
+            ),
             None => (
                 Tone::Neutral,
                 "Starting BroLink's background service…".to_string(),
@@ -1041,8 +1049,8 @@ impl ClientApp {
         items.extend(
             key_expiry_warnings(disc)
                 .into_iter()
-                .filter(|t| !urgent(t))
-                .map(|t| (Tone::Neutral, t)),
+                .filter(|(urgent, _)| !urgent)
+                .map(|(_, t)| (Tone::Neutral, t)),
         );
         if items.is_empty() {
             return;
@@ -1352,6 +1360,13 @@ impl ClientApp {
 
     fn updates_section(&mut self, ui: &mut egui::Ui) {
         ui::section(ui, "Updates", |ui| {
+            if !cfg!(target_os = "macos") {
+                // Only a Mac runs the updater (see update::spawn); here it
+                // has left a line saying where new versions come from.
+                let message = self.updates.lock().message.clone();
+                ui::setting_row(ui, "New versions", Some(&message), |_| {});
+                return;
+            }
             if ui::toggle_row(
                 ui,
                 &mut self.cfg.auto_update,
@@ -1584,47 +1599,42 @@ fn relay_state(disc: &Discovery) -> RelayState {
 }
 
 /// One line per machine whose Tailscale key expires, this one included.
-fn key_expiry_warnings(disc: &Discovery) -> Vec<String> {
+/// A line for each Tailscale key that expires, and whether it needs doing
+/// now: expired, or within 30 days.
+fn key_expiry_warnings(disc: &Discovery) -> Vec<(bool, String)> {
+    let urgent = |d: i64| d <= 30;
     let mut out = Vec::new();
     for pc in &disc.pcs {
         if let Some(d) = pc.key_expiry_days {
-            out.push(if d <= 0 {
-                format!(
-                    "{}'s Tailscale key has expired. It is off the tailnet until someone signs in to Tailscale on it.",
-                    pc.name
-                )
-            } else {
-                format!(
-                    "{}'s Tailscale key expires in {d} days. Turn off key expiry for it in the Tailscale admin console (login.tailscale.com/admin/machines), or it will need a sign-in on that machine.",
-                    pc.name
-                )
-            });
+            out.push((
+                urgent(d),
+                if d <= 0 {
+                    format!(
+                        "{}'s Tailscale key has expired. It is off the tailnet until someone signs in to Tailscale on it.",
+                        pc.name
+                    )
+                } else {
+                    format!(
+                        "{}'s Tailscale key expires in {d} days. Turn off key expiry for it in the Tailscale admin console (login.tailscale.com/admin/machines), or it will need a sign-in on that machine.",
+                        pc.name
+                    )
+                },
+            ));
         }
     }
     if let Some(d) = disc.self_key_days {
-        out.push(if d <= 0 {
-            "This machine's Tailscale key has expired. Sign in to Tailscale again.".to_string()
-        } else {
-            format!(
-                "This machine's Tailscale key expires in {d} days. Turn off key expiry for it in the admin console too."
-            )
-        });
+        out.push((
+            urgent(d),
+            if d <= 0 {
+                "This machine's Tailscale key has expired. Sign in to Tailscale again.".to_string()
+            } else {
+                format!(
+                    "This machine's Tailscale key expires in {d} days. Turn off key expiry for it in the admin console too."
+                )
+            },
+        ));
     }
     out
-}
-
-/// A key-expiry line that needs doing now: expired, or within 30 days.
-fn urgent(text: &str) -> bool {
-    text.contains("expired") || text.contains(" days") && days_in(text) <= 30
-}
-
-/// The day count inside a warning line, for its tone.
-fn days_in(text: &str) -> i64 {
-    text.split(" in ")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(i64::MAX)
 }
 
 /// "Windows", "macOS", "Linux".
@@ -1780,10 +1790,9 @@ mod tests {
         };
         let w = key_expiry_warnings(&disc);
         assert_eq!(w.len(), 3, "{w:?}");
-        assert!(w[0].contains("Gaming-PC") && w[0].contains("176 days"));
-        assert_eq!(days_in(&w[0]), 176);
-        assert!(w[1].contains("Office") && w[1].contains("expired"));
-        assert!(w[2].starts_with("This machine") && days_in(&w[2]) == 12);
+        assert!(!w[0].0 && w[0].1.contains("Gaming-PC") && w[0].1.contains("176 days"));
+        assert!(w[1].0 && w[1].1.contains("Office") && w[1].1.contains("expired"));
+        assert!(w[2].0 && w[2].1.starts_with("This machine") && w[2].1.contains("12 days"));
         assert!(key_expiry_warnings(&Discovery::default()).is_empty());
     }
 

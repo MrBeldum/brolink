@@ -191,7 +191,7 @@ impl HostApp {
 
     /// Generate a Sunshine login if there is none, save it, and run the
     /// setup on a thread.
-    fn start_setup(&mut self, status: &Status) {
+    fn start_setup(&mut self, ctx: &egui::Context, status: &Status) {
         let migrate = crate::migrate::uses_old_engine(&status.streamer.kind);
         let shared = self.shared.clone();
         {
@@ -212,6 +212,7 @@ impl HostApp {
             }
         }
         let cfg = self.cfg.clone();
+        let ctx = ctx.clone();
         let install_engine = !status.streamer.installed || migrate || !status.streamer.running;
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
@@ -240,6 +241,9 @@ impl HostApp {
             s.setup_log = read_setup_log();
             s.setup_result = Some(result);
             s.touch();
+            drop(s);
+            // The Machines page shows setup too, and it has no timer.
+            ctx.request_repaint();
         });
     }
 
@@ -322,6 +326,13 @@ impl HostApp {
 
 /// What the service error says after the user stopped it from here.
 const STOPPED: &str = "Stopped from this window.";
+
+impl Shared {
+    /// The service is down because someone pressed Stop, not by accident.
+    pub(crate) fn stopped_by_user(&self) -> bool {
+        self.service_error.as_deref() == Some(STOPPED)
+    }
+}
 
 impl HostApp {
     /// Draw the page into `ui`, a column the window has already laid out.
@@ -532,7 +543,7 @@ impl HostApp {
                         ui::secondary_button(ui, label).clicked()
                     };
                     if clicked {
-                        self.start_setup(s);
+                        self.start_setup(ui.ctx(), s);
                     }
                     let note = if migrate {
                         Some("Keeps this PC's pairings and web login.")
@@ -668,7 +679,15 @@ impl HostApp {
                 wake.push_str(" · Fast Startup is on");
             }
             if let Some(age) = s.wake_packet_age_secs {
-                wake.push_str(&format!(" · Last wake packet {age} s ago"));
+                // The poller ignores this clock (only_aged), so it is kept
+                // current here, and only while it is on screen.
+                let (text, next) = match age {
+                    0..60 => (format!("{age} s"), 1),
+                    60..3600 => (format!("{} min", age / 60), 60 - age % 60),
+                    _ => (format!("{} h", age / 3600), 3600 - age % 3600),
+                };
+                wake.push_str(&format!(" · Last wake packet {text} ago"));
+                ui.ctx().request_repaint_after(Duration::from_secs(next));
             }
             rows.push(Kv::new("Wake-on-LAN", wake).tone(tone));
         }
@@ -843,7 +862,7 @@ impl HostApp {
                         .inner
                         .clicked();
                     if clicked {
-                        self.start_setup(s);
+                        self.start_setup(ui.ctx(), s);
                     }
                 },
             );
@@ -995,6 +1014,18 @@ fn relaunch_this_exe() -> bool {
 /// Poll the service every second; refresh Sunshine's client list now and
 /// then; restart the service after an update. The window repaints only
 /// when an answer differs from the last.
+/// Whether `new` is `old` a little later: the wake packet's age only counts
+/// up, and the Sharing page redraws that clock itself while it is shown.
+fn only_aged(old: &Status, new: &Status) -> bool {
+    let aged = match (old.wake_packet_age_secs, new.wake_packet_age_secs) {
+        (Some(a), Some(b)) => b >= a,
+        (a, b) => a == b,
+    };
+    let mut old = old.clone();
+    old.wake_packet_age_secs = new.wake_packet_age_secs;
+    aged && old == *new
+}
+
 fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut failures = 0u32;
@@ -1048,7 +1079,7 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                         s.gamepad_driver = gamepad;
                     }
                     let mut s = shared.lock();
-                    changed |= s.status.as_ref() != Some(&st);
+                    changed |= !s.status.as_ref().is_some_and(|old| only_aged(old, &st));
                     s.status = Some(st);
                     if s.service_error.as_deref().is_some_and(|e| e != STOPPED) {
                         s.service_error = None;

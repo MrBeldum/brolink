@@ -646,7 +646,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
         let der = client.pair_cancellable(&pin, &brolink_core::config::machine_name(), || {
-            submit_pin(t.ip, &pin, &c.progress);
+            submit_pin(t.ip, &pin, &c.progress, &c.ctx);
             stale(&c.progress, generation)
         })?;
         remember_cert(&t.node_id, &t.name, &der);
@@ -809,10 +809,19 @@ fn retry<T>(
 
 /// Hand the PIN to BroLink Host on the PC, which types it into Sunshine. If
 /// there is no BroLink Host, the PIN stays on screen for someone at the PC.
-fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
+fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>, ctx: &egui::Context) {
     let req = PinRequest {
         pin: pin.into(),
         name: brolink_core::config::machine_name(),
+    };
+    // Pairing draws no spinner, so a new reason has to ask for its frame.
+    let show = |detail: String| {
+        let mut p = progress.lock();
+        if p.detail != detail {
+            p.detail = detail;
+            drop(p);
+            ctx.request_repaint();
+        }
     };
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(75) {
@@ -825,12 +834,11 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>) {
             Ok(a) => {
                 let reason = a.error.unwrap_or_else(|| "PIN not accepted yet".into());
                 tracing::info!("PIN not accepted yet: {reason}");
-                progress.lock().detail = reason;
+                show(reason);
             }
             Err(e) => {
                 tracing::info!("BroLink Host did not take the PIN: {e}");
-                progress.lock().detail =
-                    "BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.".into();
+                show("BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.".into());
             }
         }
         std::thread::sleep(Duration::from_millis(800));
