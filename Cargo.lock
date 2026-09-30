@@ -774,7 +774,6 @@ dependencies = [
  "rcgen",
  "rsa",
  "rustls",
- "serde",
  "sha2",
  "tracing",
  "x509-parser",
