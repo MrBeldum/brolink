@@ -30,6 +30,10 @@ GitHub release notes, so each version gets a heading of the form
 - `brolink-host.exe`'s version details (Explorer's Details tab) named the
   wrong licence, MIT; they now say GPL-3.0-or-later, the licence BroLink
   and moonlight-common-c are under.
+- Windows setup no longer breaks on a network adapter whose name holds a
+  `"` or a `$`. The name was written into a double-quoted PowerShell
+  string, where a `"` ends the string (a syntax error that stops the whole
+  setup) and a `$` expands. It is now only ever a single-quoted literal.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.

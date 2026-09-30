@@ -382,15 +382,19 @@ if ($needFiles -or -not $svcUp) {{
         "Step \"Wake-on-LAN: adapter unknown, skipped\"\n".to_string()
     } else {
         format!(
-            r#"Step "Enabling Wake-on-LAN on '{adapter}'"
+            r#"# The names are single-quoted literals held in variables. Spliced into
+# a double-quoted string, a '$' in a name would expand and a '"' end it.
+$wakeAdapter = '{adapter}'
+$wakeDevice = '{desc}'
+Step "Enabling Wake-on-LAN on '$wakeAdapter'"
 try {{
-    Set-NetAdapterPowerManagement -Name '{adapter}' -WakeOnMagicPacket Enabled -ErrorAction Stop
+    Set-NetAdapterPowerManagement -Name $wakeAdapter -WakeOnMagicPacket Enabled -ErrorAction Stop
 }} catch {{ Write-Output "  cmdlet failed ($_); the driver keywords below still apply" }}
 # The NDIS keywords are what the driver reads: magic packet from sleep, from
 # modern standby, and (Realtek's own keyword) from a full shutdown. ARP and
 # NS offload keep the card answering for the PC's address while it sleeps,
 # which is what lets a unicast wake packet reach it through a router.
-$g = (Get-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue).InterfaceGuid
+$g = (Get-NetAdapter -Name $wakeAdapter -ErrorAction SilentlyContinue).InterfaceGuid
 $k = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{{4d36e972-e325-11ce-bfc1-08002be10318}}' -ErrorAction SilentlyContinue | Where-Object {{ (Get-ItemProperty $_.PSPath -Name NetCfgInstanceId -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g }} | Select-Object -First 1
 if ($k) {{
     $changed = $false
@@ -400,9 +404,9 @@ if ($k) {{
             $changed = $true
         }}
     }}
-    if ($changed) {{ Restart-NetAdapter -Name '{adapter}' -ErrorAction SilentlyContinue }}
+    if ($changed) {{ Restart-NetAdapter -Name $wakeAdapter -ErrorAction SilentlyContinue }}
 }} else {{ Write-Output "  no class key for the adapter; keywords unchanged" }}
-try {{ powercfg /deviceenablewake '{desc}' | Out-Null }} catch {{ Write-Output "  powercfg: $_" }}
+try {{ powercfg /deviceenablewake $wakeDevice | Out-Null }} catch {{ Write-Output "  powercfg: $_" }}
 "#,
             adapter = q(p.adapter),
             desc = q(p.adapter_description)
@@ -815,8 +819,6 @@ mod tests {
         );
     }
 
-    /// The script with its comments stripped: a "must not appear" check has
-    /// to be about what the script does, not about what it explains.
     /// Position of `needle` after the preamble's function definitions, so
     /// an ordering test reads the steps as they run, not the helpers.
     fn find_in_body(s: &str, needle: &str) -> Option<usize> {
@@ -824,6 +826,8 @@ mod tests {
         s[at..].find(needle).map(|i| i + at)
     }
 
+    /// The script with its comments stripped: a "must not appear" check has
+    /// to be about what the script does, not about what it explains.
     fn code(s: &str) -> String {
         s.lines()
             .filter(|l| !l.trim_start().starts_with('#'))
@@ -856,14 +860,29 @@ mod tests {
         });
         assert!(s.contains("--creds 'brolink' 'p''w'"), "{s}");
         assert!(!s.contains("Downloading the streaming engine"));
-        assert!(s.contains("Set-NetAdapterPowerManagement -Name 'Ethernet'"));
-        assert!(s.contains("Restart-NetAdapter -Name 'Ethernet'"));
+        assert!(s.contains("$wakeAdapter = 'Ethernet'"), "{s}");
+        assert!(s.contains("Set-NetAdapterPowerManagement -Name $wakeAdapter"));
+        assert!(s.contains("Restart-NetAdapter -Name $wakeAdapter"));
         assert!(s.contains("'S5WakeOnLan'"));
         assert!(s.contains("HiberbootEnabled -Value 0"));
         assert!(s.contains("powercfg /change standby-timeout-ac 0"));
         assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
         assert!(s.contains("protocol=UDP localport=9 program='C:\\x\\brolink-host.exe'"));
-        assert!(s.contains("powercfg /deviceenablewake 'Realtek PCIe GbE'"));
+        assert!(s.contains("$wakeDevice = 'Realtek PCIe GbE'"));
+        assert!(s.contains("powercfg /deviceenablewake $wakeDevice"));
+        // A name only ever appears as a single-quoted literal: in a
+        // double-quoted string `$(...)` would run and a `"` end the string.
+        let named = script(&Plan {
+            adapter: r#"Eth "$(Stop-Computer)" 'x'"#,
+            adapter_description: "NIC $env:TEMP",
+            ..plan(&exe, false)
+        });
+        assert!(
+            named.contains(r#"$wakeAdapter = 'Eth "$(Stop-Computer)" ''x'''"#),
+            "{named}"
+        );
+        assert!(named.contains("$wakeDevice = 'NIC $env:TEMP'"), "{named}");
+        assert_eq!(named.matches("Stop-Computer").count(), 1, "{named}");
         assert!(
             s.contains("localport=47850 remoteip=100.64.0.0/10 program='C:\\x\\brolink-host.exe'")
         );
@@ -1022,10 +1041,6 @@ mod tests {
     fn the_virtual_display_learns_every_size_a_mac_can_ask_for() {
         let exe = PathBuf::from(r"C:\x\brolink-host.exe");
         let s = script(&plan(&exe, false));
-        // A copy to try on a real PC: BROLINK_DUMP_SETUP=/tmp/setup.ps1.
-        if let Ok(path) = std::env::var("BROLINK_DUMP_SETUP") {
-            std::fs::write(path, &s).expect("dump the script");
-        }
         let body = code(&s);
         let step = find_in_body(&body, "Listing the sizes a Mac can ask for").expect("step");
         let fast = find_in_body(&body, "Turning Fast Startup off").expect("fast startup");
@@ -1409,8 +1424,11 @@ system_tray = enabled
         assert!(wet.contains("Brand-Engine $dir"), "{wet}");
     }
 
-    /// The seam the PowerShell syntax gate runs through: the generated script
-    /// is the real artefact, so it has to be obtainable off Windows.
+    /// The seam CI's PowerShell syntax check runs through (see
+    /// `.github/workflows/ci.yml`): the generated script is the real
+    /// artefact, so it has to be obtainable without running setup.
+    /// `BROLINK_DUMP_SETUP_SCRIPT=/tmp/setup.ps1` writes one; the other
+    /// `BROLINK_DUMP_*` variables pick the plan.
     #[test]
     fn the_generated_script_can_be_dumped_for_a_syntax_check() {
         let Ok(out) = std::env::var("BROLINK_DUMP_SETUP_SCRIPT") else {
