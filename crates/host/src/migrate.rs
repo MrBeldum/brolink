@@ -2,7 +2,7 @@
 //! engine is migrated: copy → verify → start → prove → uninstall, never
 //! uninstall-first. Elevation is why this is script, not Rust.
 //!
-//! Named list is the live Hermes inventory (task 14): required state is
+//! What is copied is what a live MSI install held: required state is
 //! `sunshine_state.json` plus `credentials/cacert.pem` and `cakey.pem`.
 //! `apps.json` and `sunshine.conf` are best-effort. The log is regenerated.
 

@@ -119,7 +119,7 @@ pub fn probe() -> Option<bool> {
             "{}if ($vddDevices.Count -eq 0) {{ 'none' }} elseif ($vddMissing.Count -eq 0) {{ 'ok' }} else {{ 'missing' }}",
             locate_ps()
         );
-        match powershell(&script) {
+        match crate::setup::powershell(&script) {
             Ok(o) => parse_probe(&o),
             Err(e) => {
                 tracing::debug!("virtual display probe: {e:#}");
@@ -138,24 +138,6 @@ fn parse_probe(out: &str) -> Option<bool> {
         "missing" => Some(false),
         _ => None,
     }
-}
-
-#[cfg(windows)]
-fn powershell(script: &str) -> anyhow::Result<String> {
-    use anyhow::Context;
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(0x0800_0000)
-        .output()
-        .context("run powershell")?;
-    anyhow::ensure!(
-        out.status.success(),
-        "powershell exited with {}: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]

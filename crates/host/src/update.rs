@@ -8,6 +8,8 @@
 //! Windows lets a running executable be renamed but not overwritten. The new
 //! exe is started with `--replaces <pid>`, which makes it wait for the old
 //! service to let go of the port, and the old one exits after answering.
+//! A new exe that cannot start, or exits at once, is moved aside and the
+//! old one put back, still serving.
 
 use anyhow::{Context, Result};
 use brolink_core::api::{UPDATE_MAX_BYTES, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
@@ -20,6 +22,10 @@ use std::time::Duration;
 
 /// Anything smaller is not the host.
 const MIN_SIZE: usize = 1024 * 1024;
+/// How long a new copy must stay up before the old one lets go. It waits
+/// for the old one's port, so it is still running after this unless it
+/// could not start at all.
+const STARTUP_GRACE: Duration = Duration::from_secs(2);
 
 /// Why an upload was not staged, with the HTTP status it earns.
 #[derive(Debug, PartialEq, Eq)]
@@ -134,6 +140,10 @@ fn is_host_executable(bytes: &[u8]) -> bool {
 /// Swap the staged executable in and start it. The caller exits afterwards;
 /// the new process waits for that before it takes the port.
 pub fn apply(exe: &Path) -> Result<()> {
+    apply_within(exe, STARTUP_GRACE)
+}
+
+fn apply_within(exe: &Path, grace: Duration) -> Result<()> {
     let new = staged(exe);
     anyhow::ensure!(new.exists(), "nothing is staged at {}", new.display());
     let old = {
@@ -152,6 +162,14 @@ pub fn apply(exe: &Path) -> Result<()> {
         rename_retry(&old, exe).context("restore the previous executable after a failed swap")?;
         return Err(e).context("move the new executable in");
     }
+    // Keep the old service installed if the replacement cannot run: this
+    // process is still serving requests, and a PC nobody can reach in
+    // person must not be left with a service that never starts.
+    let restore = |why: anyhow::Error| -> Result<()> {
+        rename_retry(exe, &new).context("move the failed replacement aside")?;
+        rename_retry(&old, exe).context("restore the previous executable")?;
+        Err(why.context("the previous executable is back in place"))
+    };
     let mut c = std::process::Command::new(exe);
     c.arg("--background")
         .arg("--replaces")
@@ -164,12 +182,15 @@ pub fn apply(exe: &Path) -> Result<()> {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
     }
-    if let Err(e) = c.spawn() {
-        // Keep the old service installed if Windows cannot start the
-        // replacement. The current process is still serving requests.
-        rename_retry(exe, &new).context("move failed replacement aside")?;
-        rename_retry(&old, exe).context("restore previous executable after launch failure")?;
-        return Err(e).context("start the new service (previous executable restored)");
+    let mut child = match c.spawn() {
+        Ok(child) => child,
+        Err(e) => return restore(anyhow::Error::new(e).context("start the new service")),
+    };
+    // One that has already exited could not start (a crash, a missing
+    // library): it would leave the PC with no service after this one quits.
+    std::thread::sleep(grace);
+    if let Ok(Some(status)) = child.try_wait() {
+        return restore(anyhow::anyhow!("the new service exited at once ({status})"));
     }
     Ok(())
 }
@@ -365,6 +386,26 @@ mod tests {
         assert!(apply(&exe).is_err());
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
         assert_eq!(std::fs::read(staged(&exe)).unwrap(), b"new");
+        // A replacement that starts and dies at once is put back too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = |body: &str| {
+                std::fs::write(staged(&exe), body).unwrap();
+                std::fs::set_permissions(staged(&exe), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            };
+            script("#!/bin/sh\nexit 3\n");
+            let e = apply_within(&exe, Duration::from_millis(500)).unwrap_err();
+            assert!(format!("{e:#}").contains("exited at once"), "{e:#}");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+            assert!(staged(&exe).exists());
+            // One that keeps running is the new service.
+            script("#!/bin/sh\nexec sleep 2\n");
+            apply_within(&exe, Duration::from_millis(300)).unwrap();
+            assert!(std::fs::read(&exe).unwrap().starts_with(b"#!/bin/sh"));
+            assert_eq!(std::fs::read(retired(&exe)).unwrap(), b"old");
+        }
         std::fs::write(retired(&exe), b"retired").unwrap();
         std::fs::write(dir.join("brolink-host.exe.old-notes"), b"keep").unwrap();
         tidy(&exe);

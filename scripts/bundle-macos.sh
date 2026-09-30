@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Unified node binary first (views and shares); viewer-only as a fallback.
-# When both a cross-compiled and a native build exist, the newer one is the
-# one that was just built.
+# The unified node binary (views and shares). When both a cross-compiled
+# and a native build exist, the newer one is the one that was just built.
 newest() {
   local pick=""
   for f in "$@"; do
@@ -16,12 +15,6 @@ newest() {
 }
 BIN="$(newest "$ROOT/target/aarch64-apple-darwin/release/brolink-host" "$ROOT/target/release/brolink-host")"
 if [[ -z "$BIN" ]]; then
-  BIN="$(newest "$ROOT/target/aarch64-apple-darwin/release/brolink-client" "$ROOT/target/release/brolink-client")"
-fi
-if [[ -z "$BIN" ]]; then
-  BIN="$ROOT/target/release/brolink-host"
-fi
-if [[ ! -f "$BIN" ]]; then
   echo "build the app first: cargo build --release -p brolink-host" >&2
   exit 1
 fi

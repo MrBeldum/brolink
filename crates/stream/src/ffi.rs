@@ -1,8 +1,6 @@
 //! Bindings to the C shim (`csrc/shim.h`) and to the moonlight-common-c input
 //! functions, which take only primitive arguments and need no shim.
 
-#![allow(non_camel_case_types, dead_code)]
-
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
 #[repr(C)]
@@ -50,11 +48,8 @@ pub struct ServerInfo {
 }
 
 pub const STREAM_CFG_LOCAL: c_int = 0;
-pub const STREAM_CFG_REMOTE: c_int = 1;
-pub const STREAM_CFG_AUTO: c_int = 2;
 pub const COLORSPACE_REC_709: c_int = 1;
 pub const COLOR_RANGE_LIMITED: c_int = 0;
-pub const COLOR_RANGE_FULL: c_int = 1;
 pub const ENCFLG_ALL: c_int = -1;
 
 pub const VIDEO_FORMAT_H264: c_int = 0x0001;
@@ -65,7 +60,6 @@ pub const VIDEO_FORMAT_MASK_H265: c_int = 0x0F00;
 pub const CAPABILITY_DIRECT_SUBMIT: c_int = 0x1;
 /// The decoder copes with a frame that references one older than the last
 /// (the host then repairs a lost frame without a whole new keyframe).
-pub const CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC: c_int = 0x2;
 pub const CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC: c_int = 0x4;
 pub const CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION: c_int = 0x10;
 
@@ -80,7 +74,6 @@ pub const ML_ERROR_UNEXPECTED_EARLY_TERMINATION: c_int = -102;
 pub const ML_ERROR_PROTECTED_CONTENT: c_int = -103;
 pub const ML_ERROR_FRAME_CONVERSION: c_int = -104;
 
-pub const CONN_STATUS_OKAY: c_int = 0;
 pub const CONN_STATUS_POOR: c_int = 1;
 
 pub const BUTTON_ACTION_PRESS: c_char = 0x07;
@@ -131,9 +124,7 @@ extern "C" {
     pub fn LiSendHighResHScrollEvent(amount: i16) -> c_int;
     pub fn LiGetEstimatedRttInfo(rtt: *mut u32, variance: *mut u32) -> bool;
     pub fn LiGetMicroseconds() -> u64;
-    pub fn LiGetPendingVideoFrames() -> c_int;
     pub fn LiGetRTPVideoStats() -> *const RtpVideoStats;
-    pub fn LiRequestIdrFrame();
 }
 
 pub fn stage_name(stage: c_int) -> String {

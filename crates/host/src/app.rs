@@ -697,6 +697,15 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 "/v1/status",
                 Duration::from_millis(800),
             );
+            let seen = |s: &Shared| {
+                (
+                    s.status.clone(),
+                    s.service_error.clone(),
+                    s.clients.clone(),
+                    s.gamepad_driver,
+                )
+            };
+            let before = seen(&shared.lock());
             match r {
                 Ok(st) => {
                     failures = 0;
@@ -760,7 +769,10 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                     }
                 }
             }
-            ctx.request_repaint();
+            // The window is drawn again only when there is something new.
+            if seen(&shared.lock()) != before {
+                ctx.request_repaint();
+            }
             tick += 1;
             std::thread::sleep(Duration::from_secs(1));
         }

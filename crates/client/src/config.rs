@@ -223,8 +223,8 @@ impl ClientConfig {
         c
     }
 
-    /// Keep a hand-edited or older file within what the UI offers. The
-    /// bitrate floor is the slider's 2 Mbps, under the Smooth preset's 4.
+    /// Keep a hand-edited or older file within what the UI offers: the
+    /// frame rates it lists and the bitrate slider's 2 to 150 Mbps.
     fn normalise(&mut self) {
         self.stream.fps = self.stream.fps.clamp(30, 240);
         self.stream.bitrate_kbps = self.stream.bitrate_kbps.clamp(2_000, 150_000);

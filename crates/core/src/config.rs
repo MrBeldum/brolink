@@ -1,6 +1,6 @@
 //! Where each app keeps its few settings: one TOML file in the per-user data
 //! directory (`%LOCALAPPDATA%\BroLink` on Windows, `~/Library/Application
-//! Support/BroLink` on macOS).
+//! Support/dev.brolink.BroLink` on macOS, `~/.local/share/brolink` on Linux).
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -14,8 +14,16 @@ use std::sync::{
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// The per-user data directory, created private to this user.
+///
+/// `BROLINK_DATA_DIR` replaces it when set. The workspace's
+/// `.cargo/config.toml` sets it for `cargo test` and `cargo run`, so a test
+/// run on a machine with BroLink installed leaves that install's settings,
+/// pairing identity and logs alone.
 pub fn data_dir() -> Result<PathBuf> {
-    let dir = if cfg!(windows) {
+    let dir = if let Some(dir) = std::env::var_os("BROLINK_DATA_DIR").filter(|d| !d.is_empty()) {
+        Some(PathBuf::from(dir))
+    } else if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .map(|p| p.join(crate::APP_NAME))
@@ -164,8 +172,7 @@ mod tests {
         assert_eq!(load::<Cfg>(&name), Cfg { n: 7 });
         std::fs::write(dir.join(&name), "not = [toml").unwrap();
         assert_eq!(load::<Cfg>(&name), Cfg::default());
-        // Loading junk moves it aside as `<stem>.bad-*`. This runs against the
-        // user's real data directory, so remove what the test left behind.
+        // Loading junk moves it aside as `<stem>.bad-*`, exactly once.
         let prefix = format!("{stem}.bad-");
         let preserved: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
@@ -214,6 +221,21 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// `.cargo/config.toml` points `cargo test` at `target/brolink-data`.
+    /// Without it every test that loads or saves settings would read and
+    /// rewrite the real install's files on the machine running the tests.
+    #[test]
+    fn tests_run_against_a_data_directory_under_target() {
+        let want = std::env::var_os("BROLINK_DATA_DIR").expect("cargo test sets BROLINK_DATA_DIR");
+        let dir = data_dir().unwrap();
+        assert_eq!(dir, PathBuf::from(want));
+        assert!(
+            dir.components().any(|c| c.as_os_str() == "target"),
+            "{}",
+            dir.display()
+        );
     }
 
     #[test]

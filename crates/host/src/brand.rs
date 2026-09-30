@@ -256,6 +256,18 @@ mod win {
         (ok.as_bool() && !p.is_null() && len > 0).then_some((p as *const c_void, len))
     }
 
+    /// `n` UTF-16 units at `p`, which points into a `Vec<u8>` and so has no
+    /// alignment a `&[u16]` could rely on.
+    ///
+    /// # Safety
+    /// `p` must point to `n` readable `u16`s.
+    unsafe fn read_u16s(p: *const c_void, n: usize) -> Vec<u16> {
+        let p = p as *const u16;
+        (0..n)
+            .map(|i| unsafe { p.add(i).read_unaligned() })
+            .collect()
+    }
+
     /// The fixed info, the strings and the language of `exe`'s version
     /// block; `None` when it has no block at all.
     #[allow(clippy::type_complexity)]
@@ -285,7 +297,7 @@ mod win {
         }
         let (lang, cp) = match query(&buf, "\\VarFileInfo\\Translation") {
             Some((p, len)) if len >= 4 => {
-                let t = unsafe { std::slice::from_raw_parts(p as *const u16, 2) };
+                let t = unsafe { read_u16s(p, 2) };
                 (t[0], t[1])
             }
             _ => (verinfo::LANG, verinfo::CODEPAGE),
@@ -296,8 +308,8 @@ mod win {
             // the usual one; look in both.
             for table in [format!("{lang:04X}{cp:04X}"), "040904B0".to_string()] {
                 if let Some((p, len)) = query(&buf, &format!("\\StringFileInfo\\{table}\\{key}")) {
-                    let u = unsafe { std::slice::from_raw_parts(p as *const u16, len as usize) };
-                    let s = String::from_utf16_lossy(u)
+                    let u = unsafe { read_u16s(p, len as usize) };
+                    let s = String::from_utf16_lossy(&u)
                         .trim_end_matches('\0')
                         .to_string();
                     if !s.is_empty() {

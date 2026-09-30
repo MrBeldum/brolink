@@ -23,7 +23,7 @@ fn main() {
             .set("CompanyName", "BroLink Contributors")
             .set(
                 "LegalCopyright",
-                "Copyright (c) 2026 BroLink Contributors, MIT license",
+                "Copyright (c) 2026 BroLink Contributors. GPL-3.0-or-later",
             )
             .set("OriginalFilename", "brolink-host.exe");
         if let Err(e) = res.compile() {

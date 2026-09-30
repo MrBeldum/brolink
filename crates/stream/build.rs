@@ -1,9 +1,45 @@
 //! Compiles moonlight-common-c (with its ENet and Reed-Solomon dependencies)
 //! and the small C shim that adapts its callback structs to plain function
 //! pointers. Crypto is not compiled from C: `src/crypto.rs` provides the
-//! `Plt*` functions the library expects.
+//! `Plt*` functions the library expects. What is vendored, and why, is in
+//! `third_party/moonlight-common-c/VERSION`.
 
 use std::path::Path;
+
+/// Every C file the library needs, relative to the vendored root. Listed
+/// rather than globbed, so a re-vendor that brings new files in has to
+/// decide about each one.
+const SOURCES: &[&str] = &[
+    "src/AudioStream.c",
+    "src/ByteBuffer.c",
+    "src/Connection.c",
+    "src/ControlStream.c",
+    "src/FakeCallbacks.c",
+    "src/InputStream.c",
+    "src/LinkedBlockingQueue.c",
+    "src/Misc.c",
+    "src/Platform.c",
+    "src/PlatformSockets.c",
+    "src/RtpAudioQueue.c",
+    "src/RtpVideoQueue.c",
+    "src/RtspConnection.c",
+    "src/RtspParser.c",
+    "src/SdpGenerator.c",
+    "src/VideoDepacketizer.c",
+    "src/VideoStream.c",
+    "enet/callbacks.c",
+    "enet/host.c",
+    "enet/list.c",
+    "enet/packet.c",
+    "enet/peer.c",
+    "enet/protocol.c",
+    // Each is empty on the other platform.
+    "enet/unix.c",
+    "enet/win32.c",
+    "nanors/rs.c",
+    "nanors/deps/obl/oblas_common.c",
+    "nanors/deps/obl/oblas_lite.c",
+];
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/moonlight-common-c");
@@ -27,16 +63,8 @@ fn main() {
         .define("NDEBUG", None)
         .define("HAS_SOCKLEN_T", "1")
         .warnings(false)
-        .opt_level(2);
-    for f in list(&root.join("src")) {
-        b.file(f);
-    }
-    for f in list(&root.join("enet")) {
-        b.file(f);
-    }
-    b.file(root.join("nanors/rs.c"))
-        .file(root.join("nanors/deps/obl/oblas_common.c"))
-        .file(root.join("nanors/deps/obl/oblas_lite.c"))
+        .opt_level(2)
+        .files(SOURCES.iter().map(|f| root.join(f)))
         .file("csrc/shim.c");
     if target_os == "windows" {
         b.define("_CRT_SECURE_NO_WARNINGS", None);
@@ -51,14 +79,4 @@ fn main() {
         }
     }
     b.compile("moonlight-common-c");
-}
-
-fn list(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut v: Vec<_> = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "c"))
-        .collect();
-    v.sort();
-    v
 }

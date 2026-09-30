@@ -12,7 +12,11 @@ use serde_json::Value;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+/// Turning HDR off answers within seconds.
 const TIMEOUT: Duration = Duration::from_secs(25);
+/// The report is slower: PowerShell with WMI and a screen sample, then two
+/// calls to the engine's web API of up to 8 s each.
+const REPORT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the PC said, in a form the stream's notice can show.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,7 +34,7 @@ pub struct Help {
 }
 
 pub fn ask(ip: Ipv4Addr) -> Result<Value> {
-    http::get_json::<Value>((ip, CONTROL_PORT), "/v1/display", TIMEOUT)
+    http::get_json::<Value>((ip, CONTROL_PORT), "/v1/display", REPORT_TIMEOUT)
 }
 
 /// Turn the PC's HDR desktop off (or back on) and return its new state.

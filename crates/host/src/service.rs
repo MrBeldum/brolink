@@ -1,8 +1,13 @@
-//! The background control service: what a Mac on the tailnet talks to.
+//! The background control service: what the other machines on the tailnet talk to.
 //!
 //! One TCP listener on every interface, one rule for who gets an answer:
-//! loopback (the host's own control panel) or a tailnet address that
-//! `tailscale whois` recognises. Everyone else gets a 403 and nothing more.
+//! loopback (the host's own control panel), or a tailnet machine that
+//! `tailscale whois` says belongs to the account this one is signed in as.
+//! A tagged machine (the relay VPS) belongs to no account, so it answers
+//! the members of its own tailnet. Everyone else gets a 403 and nothing
+//! more: a machine shared in from someone else's tailnet can reach the
+//! port, but may not pair, sleep the PC, read its clipboard or push it an
+//! executable.
 
 use crate::clipboard;
 use crate::config::HostConfig;
@@ -15,7 +20,8 @@ use brolink_core::api::{
     CLIPBOARD_PATH, UPDATE_PATH,
 };
 use brolink_core::http::{self, Request, Response};
-use brolink_core::{tailscale, CONTROL_PORT};
+use brolink_core::tailscale::{self, is_tailnet_ip};
+use brolink_core::CONTROL_PORT;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -26,6 +32,8 @@ use std::time::{Duration, Instant};
 const LOG_LINES: usize = 80;
 /// How long a `whois` answer is trusted before asking again.
 const AUTH_TTL: Duration = Duration::from_secs(60);
+/// How long an answer is remembered, so the same peer is not logged again.
+const AUTH_REMEMBER: Duration = Duration::from_secs(3600);
 const AUTH_CACHE_LIMIT: usize = 256;
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
@@ -33,17 +41,23 @@ const NETCHECK_TICKS: u64 = 120;
 
 pub struct Service {
     cfg: Mutex<HostConfig>,
+    /// This machine's name, re-read now and then: asking macOS or Linux
+    /// runs a program, which every status request used to do.
+    name: Mutex<String>,
     tailscale: Mutex<Result<tailscale::Status, String>>,
     wake: Mutex<WakeInfo>,
     /// When a magic packet for this PC last arrived.
     wake_seen: Mutex<Option<Instant>>,
-    /// Whether the virtual display lists every size a Mac can ask for;
+    /// Whether the virtual display lists every screen size a viewer can ask for;
     /// `None` on a PC without one. See `virtual_display`.
     virtual_display: Mutex<Option<bool>>,
     install: Mutex<Option<Install>>,
     streamer: Mutex<Streamer>,
     log: Mutex<VecDeque<String>>,
-    auth: Mutex<HashMap<IpAddr, (Instant, Option<u64>)>>,
+    /// `whois` answers for recent peers: when, and whether they may ask.
+    auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
+    /// The last `whois` failure logged.
+    whois_failed: Mutex<Option<String>>,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -54,6 +68,7 @@ impl Service {
     pub fn new() -> Self {
         Self {
             cfg: Mutex::new(HostConfig::load()),
+            name: Mutex::new(brolink_core::config::machine_name()),
             tailscale: Mutex::new(Err("not checked yet".into())),
             wake: Mutex::new(WakeInfo::default()),
             wake_seen: Mutex::new(None),
@@ -62,6 +77,7 @@ impl Service {
             streamer: Mutex::new(Streamer::default()),
             log: Mutex::new(VecDeque::new()),
             auth: Mutex::new(HashMap::new()),
+            whois_failed: Mutex::new(None),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -324,6 +340,7 @@ impl Service {
         }
 
         if tick.is_multiple_of(12) {
+            *self.name.lock() = brolink_core::config::machine_name();
             let w = wake::probe();
             let mut cur = self.wake.lock();
             if *cur != w {
@@ -331,7 +348,7 @@ impl Service {
                     (Some(mac), Some(true)) => self.log(format!("Wake-on-LAN ready on {} ({mac})", w.adapter)),
                     (Some(_), Some(false)) => self.log(format!("Wake-on-LAN is off on {}; run setup", w.adapter)),
                     (Some(_), None) => self.log(format!("Wake-on-LAN state on {} is unknown", w.adapter)),
-                    (None, _) => self.log("no wired adapter with a MAC found; the Mac will not be able to wake this PC"),
+                    (None, _) => self.log("no wired adapter with a MAC found; other machines will not be able to wake this one"),
                 }
                 *cur = w;
             }
@@ -340,10 +357,10 @@ impl Service {
             if *cur != v {
                 match v {
                     Some(true) => {
-                        self.log("the virtual display lists every size a Mac can ask for")
+                        self.log("the virtual display lists every screen size a viewer can ask for")
                     }
                     Some(false) => self
-                        .log("the virtual display is missing sizes a Mac can ask for; run setup"),
+                        .log("the virtual display is missing screen sizes a viewer can ask for; run setup"),
                     None => {}
                 }
                 *cur = v;
@@ -362,7 +379,7 @@ impl Service {
                 Ok(n) => {
                     let report = n.report();
                     let mut cur = svc.nat.lock();
-                    if cur.as_ref() != Some(&report) {
+                    if cur.as_ref().is_none_or(|c| nat_changed(c, &report)) {
                         svc.log(describe_nat(&report));
                     }
                     *cur = Some(report);
@@ -418,13 +435,13 @@ impl Service {
         }
         if *self.virtual_display.lock() == Some(false) {
             setup.push(
-                "The virtual display does not list every screen size a Mac can ask for.".into(),
+                "The virtual display does not list every screen size a viewer can ask for.".into(),
             );
         }
         Status {
             app: "brolink".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            name: brolink_core::config::machine_name(),
+            name: self.name.lock().clone(),
             os: ts
                 .as_ref()
                 .ok()
@@ -469,10 +486,9 @@ impl Service {
         }
     }
 
-    /// Loopback is the control panel. A tailnet peer is anyone `whois`
-    /// recognises: user machines and `tag:relay` nodes share a tailnet but
-    /// not a Tailscale user id, and a VPS desktop on the relay box has to
-    /// accept the Macs that found it.
+    /// Loopback is the control panel; a tailnet peer must pass
+    /// [`Owner::admits`]. A `whois` answer is remembered for [`AUTH_TTL`],
+    /// a refusal included; a failed `whois` is not remembered.
     fn authorized(&self, ip: IpAddr) -> bool {
         if ip.is_loopback() {
             return true;
@@ -480,50 +496,63 @@ impl Service {
         if !is_tailnet_ip(ip) {
             return false;
         }
-        if self.tailscale.lock().is_err() {
-            return false;
-        }
         let now = Instant::now();
-        let cached = self
-            .auth
-            .lock()
-            .get(&ip)
-            .filter(|(at, _)| now - *at < AUTH_TTL)
-            .map(|(_, u)| *u);
-        let user = match cached {
-            Some(u) => u,
-            None => {
-                let u = match tailscale::whois(ip) {
-                    Ok(w) => {
-                        self.log(format!(
-                            "{} ({}) asked",
-                            w.node.computed_name, w.user_profile.login_name
-                        ));
-                        Some(w.user_profile.id)
-                    }
-                    Err(e) => {
-                        self.log(format!("whois {ip}: {e}"));
-                        None
-                    }
-                };
-                let mut cache = self.auth.lock();
-                cache.retain(|_, (at, _)| at.elapsed() < AUTH_TTL);
-                if cache.len() >= AUTH_CACHE_LIMIT {
-                    if let Some(oldest) = cache
-                        .iter()
-                        .min_by_key(|(_, (at, _))| *at)
-                        .map(|(ip, _)| *ip)
-                    {
-                        cache.remove(&oldest);
-                    }
+        let previous = self.auth.lock().get(&ip).copied();
+        if let Some((at, allowed)) = previous {
+            if now - at < AUTH_TTL {
+                return allowed;
+            }
+        }
+        // Copied out so the lock is not held across the `whois` call.
+        let owner = match &*self.tailscale.lock() {
+            Ok(st) => Owner::of(st),
+            Err(_) => return false,
+        };
+        let allowed = match tailscale::whois(ip) {
+            Ok(w) => {
+                let allowed = owner.admits(&w);
+                // Once per peer, and again if the answer changes or it has
+                // been away an hour: a Mac polling every few seconds used
+                // to put a line here every minute, 96% of a Mac's log.
+                if previous.map(|(_, a)| a) != Some(allowed) {
+                    self.log(format!(
+                        "{} ({}) asked{}",
+                        w.node.computed_name,
+                        w.user_profile.login_name,
+                        if allowed {
+                            ""
+                        } else {
+                            ": not this account, refused"
+                        }
+                    ));
                 }
-                if u.is_some() {
-                    cache.insert(ip, (Instant::now(), u));
+                allowed
+            }
+            Err(e) => {
+                // Not remembered, so asked again on the next request; say
+                // so once rather than at every poll.
+                let line = format!("whois {ip}: {e}");
+                let mut last = self.whois_failed.lock();
+                if last.as_deref() != Some(line.as_str()) {
+                    self.log(line.clone());
+                    *last = Some(line);
                 }
-                u
+                return false;
             }
         };
-        user.is_some()
+        let mut cache = self.auth.lock();
+        cache.retain(|_, (at, _)| at.elapsed() < AUTH_REMEMBER);
+        if cache.len() >= AUTH_CACHE_LIMIT {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(ip, _)| *ip)
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(ip, (Instant::now(), allowed));
+        allowed
     }
 
     fn handle(&self, peer: SocketAddr, req: &Request) -> Response {
@@ -561,10 +590,10 @@ impl Service {
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
-            ("POST", "/v1/display") => self.set_display(req),
+            ("POST", "/v1/display") => self.set_display(peer.ip(), req),
             ("POST", "/v1/pin") => self.pin(req),
-            ("POST", "/v1/power") => self.power(req),
-            ("POST", p) if p == UPDATE_PATH => self.update(req),
+            ("POST", "/v1/power") => self.power(peer.ip(), req),
+            ("POST", p) if p == UPDATE_PATH => self.update(peer.ip(), req),
             ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
                 Ok(c) => Response::json(200, &c),
                 Err(e) => Response::json(500, &Ack::err(format!("clipboard: {e}"))),
@@ -590,7 +619,7 @@ impl Service {
 
     /// A newer `brolink-host.exe` from the Mac: stage it, answer, then swap
     /// it in and hand over. See [`crate::update`].
-    fn update(&self, req: &Request) -> Response {
+    fn update(&self, from: IpAddr, req: &Request) -> Response {
         if !cfg!(windows) {
             // A Mac replaces its own app from GitHub and a container is
             // rebuilt; swapping a Windows executable in here would only
@@ -622,7 +651,7 @@ impl Service {
         match update::stage(req, &exe) {
             Ok(version) => {
                 self.log(format!(
-                    "updating to {version}: the Mac sent the new BroLink Host"
+                    "updating to {version}: {from} sent the new BroLink Host"
                 ));
                 let running = self.update_running.clone();
                 std::thread::spawn(move || {
@@ -703,14 +732,14 @@ impl Service {
     /// setting the Mac can change: an HDR desktop on a PC with no monitor
     /// captures as black, and nobody can reach the PC's settings to fix it
     /// when the picture is the thing that is broken.
-    fn set_display(&self, req: &Request) -> Response {
+    fn set_display(&self, from: IpAddr, req: &Request) -> Response {
         let Ok(want) = req.json::<DisplayRequest>() else {
             return Response::json(400, &Ack::err("expected {\"advanced_color\": true|false}"));
         };
         match crate::display::set_advanced_color(want.advanced_color) {
             Ok(state) => {
                 self.log(format!(
-                    "the Mac turned the HDR desktop {}",
+                    "{from} turned the HDR desktop {}",
                     if want.advanced_color { "on" } else { "off" }
                 ));
                 Response::json(200, &state)
@@ -719,7 +748,7 @@ impl Service {
         }
     }
 
-    fn power(&self, req: &Request) -> Response {
+    fn power(&self, from: IpAddr, req: &Request) -> Response {
         let Ok(p) = req.json::<PowerRequest>() else {
             return Response::json(
                 400,
@@ -741,7 +770,7 @@ impl Service {
             .close_app();
         }
         self.log(format!(
-            "{} requested from the Mac",
+            "{} requested by {from}",
             p.action.label().to_lowercase()
         ));
         // Reply first: sleep can suspend the machine before the bytes leave.
@@ -766,11 +795,11 @@ impl Default for Service {
 pub fn describe_nat(n: &NatReport) -> String {
     let city = tailscale::derp_city(&n.derp);
     if !n.udp {
-        "network: UDP is blocked here, so a Mac can only reach this PC through a Tailscale relay"
+        "network: UDP is blocked here, so other machines reach this one only through a Tailscale relay"
             .into()
     } else if n.hard == Some(true) && !n.portmap {
         format!(
-            "network: hard NAT with no UPnP; a Mac on another network reaches this PC through the {city} relay unless the router gets UPnP or a forwarded UDP port"
+            "network: hard NAT with no UPnP; a machine on another network reaches this one through the {city} relay unless the router gets UPnP or a forwarded UDP port"
         )
     } else if n.hard == Some(true) {
         "network: hard NAT, but the router maps ports; direct connections should work".into()
@@ -779,6 +808,65 @@ pub fn describe_nat(n: &NatReport) -> String {
     } else {
         format!("network: NAT type unknown (nearest relay {city})")
     }
+}
+
+/// Whose machine this is, for deciding who may use the control API.
+#[derive(Debug, Clone, PartialEq)]
+struct Owner {
+    /// The Tailscale user this machine is signed in as; for a tagged
+    /// machine, Tailscale's shared "tagged-devices" user.
+    user: u64,
+    /// The machine carries ACL tags, so no person owns it.
+    tagged: bool,
+    /// `CurrentTailnet.Name`: the owner's login for a personal tailnet,
+    /// the domain for an organisation's.
+    tailnet: String,
+}
+
+impl Owner {
+    fn of(st: &tailscale::Status) -> Self {
+        Self {
+            user: st.self_node.user_id,
+            tagged: !st.self_node.tags.is_empty(),
+            tailnet: st
+                .current_tailnet
+                .as_ref()
+                .map(|t| t.name.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The same account may ask. A tagged machine has no account of its
+    /// own, so it takes the members of its tailnet: the owner of a
+    /// personal tailnet, the users of an organisation's domain. A machine
+    /// shared in from another tailnet is neither, even though `whois`
+    /// knows it and the tailnet's rules let it reach this port.
+    fn admits(&self, peer: &tailscale::WhoIs) -> bool {
+        let user = peer.user_profile.id;
+        if user == 0 {
+            return false;
+        }
+        if user == self.user {
+            return true;
+        }
+        if !self.tagged || self.tailnet.is_empty() {
+            return false;
+        }
+        let login = peer.user_profile.login_name.as_str();
+        login.eq_ignore_ascii_case(&self.tailnet)
+            || login
+                .rsplit_once('@')
+                .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(&self.tailnet))
+    }
+}
+
+/// Whether the NAT itself changed. The nearest relay region moves between
+/// runs on its own (Paris, then Chicago, then Paris again on the same
+/// network), and logging each move pushed useful lines out of the 80 the
+/// window shows.
+fn nat_changed(old: &NatReport, new: &NatReport) -> bool {
+    (old.udp, old.ipv4, old.ipv6, old.hard, old.portmap)
+        != (new.udp, new.ipv4, new.ipv6, new.hard, new.portmap)
 }
 
 /// True when a service answers on loopback.
@@ -846,40 +934,78 @@ fn control_host(host: &str) -> bool {
         return true;
     }
     host.parse::<SocketAddr>().is_ok_and(|addr| {
-        addr.port() == CONTROL_PORT
-            && (addr.ip().is_loopback() || matches!(addr.ip(), IpAddr::V4(ip) if is_tailnet(ip)))
+        addr.port() == CONTROL_PORT && (addr.ip().is_loopback() || is_tailnet_ip(addr.ip()))
     })
-}
-
-/// Tailscale hands out addresses from 100.64.0.0/10.
-fn is_tailnet(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    o[0] == 100 && (64..128).contains(&o[1])
-}
-
-/// IPv4 CGNAT overlay, or IPv6 unique-local (Tailscale uses fd7a:115c:a1e0::/48).
-fn is_tailnet_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_tailnet(v4),
-        IpAddr::V6(v6) => v6.octets()[0] & 0xfe == 0xfc,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn whois(id: u64, login: &str) -> tailscale::WhoIs {
+        tailscale::WhoIs {
+            user_profile: tailscale::User {
+                id,
+                login_name: login.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The shapes of a real tailnet: a PC and a Mac signed in as one
+    /// person, a relay VPS tagged `tag:relay`, and a friend's machine
+    /// shared in from their own tailnet.
     #[test]
-    fn tailnet_range_is_recognised() {
-        assert!(is_tailnet("100.64.0.1".parse().unwrap()));
-        assert!(is_tailnet("100.127.255.254".parse().unwrap()));
-        assert!(is_tailnet("100.64.0.10".parse().unwrap()));
-        assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
-        assert!(!is_tailnet("192.168.1.2".parse().unwrap()));
-        assert!(is_tailnet_ip("100.111.100.57".parse().unwrap()));
-        assert!(is_tailnet_ip("fd7a:115c:a1e0::9e2a:381c".parse().unwrap()));
-        assert!(!is_tailnet_ip("8.8.8.8".parse().unwrap()));
-        assert!(!is_tailnet_ip("2001:4860:4860::8888".parse().unwrap()));
+    fn only_the_account_or_for_a_tagged_machine_its_tailnet_may_ask() {
+        const ADA: u64 = 21;
+        const TAGGED: u64 = 18;
+        let status = |user: u64, tags: &str| {
+            tailscale::parse_status(&format!(
+                r#"{{"BackendState":"Running","Self":{{"UserID":{user},"Tags":[{tags}]}},
+                    "CurrentTailnet":{{"Name":"ada@example.com"}}}}"#
+            ))
+            .unwrap()
+        };
+        let mac = whois(ADA, "ada@example.com");
+        let relay = whois(TAGGED, "tagged-devices");
+        let friend = whois(77, "bob@example.net");
+
+        let pc = Owner::of(&status(ADA, ""));
+        assert!(!pc.tagged);
+        assert!(pc.admits(&mac), "the owner's Mac");
+        assert!(
+            !pc.admits(&friend),
+            "a shared-in machine may not pair, sleep or update the PC"
+        );
+        assert!(
+            !pc.admits(&relay),
+            "an internet-facing relay may not push the PC an executable"
+        );
+        assert!(!pc.admits(&whois(0, "")), "whois without a user");
+
+        let vps = Owner::of(&status(TAGGED, r#""tag:relay""#));
+        assert!(vps.tagged);
+        assert!(vps.admits(&mac), "a tagged VPS serves its tailnet's owner");
+        assert!(
+            vps.admits(&relay),
+            "and machines tagged in the same tailnet"
+        );
+        assert!(!vps.admits(&friend));
+
+        // An organisation's tailnet is named after its domain.
+        let org = Owner {
+            tailnet: "example.com".into(),
+            ..vps.clone()
+        };
+        assert!(org.admits(&whois(5, "ada@EXAMPLE.com")));
+        assert!(!org.admits(&whois(6, "eve@example.com.evil")));
+        // Without a tailnet name a tagged machine takes nobody but its kind.
+        let unnamed = Owner {
+            tailnet: String::new(),
+            ..vps
+        };
+        assert!(!unnamed.admits(&mac));
     }
 
     #[test]
@@ -905,8 +1031,12 @@ mod tests {
             "localhost:47850",
             "100.64.0.10:47850",
             "[::1]:47850",
+            "[fd7a:115c:a1e0::1]:47850",
         ] {
             assert!(control_host(host), "{host}");
+        }
+        for host in ["8.8.8.8:47850", "[2001:db8::1]:47850", "100.64.0.10:80"] {
+            assert!(!control_host(host), "{host}");
         }
         let req = Request {
             headers: vec![("content-type".into(), "application/json-not-really".into())],
@@ -921,15 +1051,15 @@ mod tests {
         let req = Request::default();
         svc.update_running.store(true, Ordering::Release);
         if cfg!(windows) {
-            assert_eq!(svc.update(&req).status, 409);
+            assert_eq!(svc.update(LOOPBACK, &req).status, 409);
         } else {
             // Not a Windows PC: refused before the slot is even looked at.
-            let r = svc.update(&req);
+            let r = svc.update(LOOPBACK, &req);
             assert_eq!(r.status, 400);
             assert!(r.body.contains("Windows PC"), "{}", r.body);
         }
         svc.update_running.store(false, Ordering::Release);
-        assert_eq!(svc.update(&req).status, 400);
+        assert_eq!(svc.update(LOOPBACK, &req).status, 400);
         assert!(!svc.update_running.load(Ordering::Acquire));
     }
 
@@ -1017,6 +1147,8 @@ mod tests {
         );
     }
 
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
     fn json_header() -> Vec<(String, String)> {
         vec![("content-type".into(), "application/json".into())]
     }
@@ -1075,6 +1207,26 @@ mod tests {
             },
         );
         assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn a_new_nearest_relay_is_not_a_new_nat() {
+        let paris = NatReport {
+            udp: true,
+            hard: Some(true),
+            derp: "par".into(),
+            ..Default::default()
+        };
+        let chicago = NatReport {
+            derp: "ord".into(),
+            ..paris.clone()
+        };
+        assert!(!nat_changed(&paris, &chicago));
+        let mapped = NatReport {
+            portmap: true,
+            ..paris.clone()
+        };
+        assert!(nat_changed(&paris, &mapped));
     }
 
     #[test]

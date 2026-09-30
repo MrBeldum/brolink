@@ -63,8 +63,6 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     /// Ask for HEVC when both sides can; otherwise H.264.
     pub hevc: bool,
-    /// The PC is not on this LAN: smaller packets, remote pacing.
-    pub remote: bool,
 }
 
 /// What `Session::start` needs from `/serverinfo` and `/launch`.
@@ -362,33 +360,6 @@ impl Session {
             inner: self.inner.clone(),
         }
     }
-
-    pub fn mouse_move(&self, dx: i16, dy: i16) {
-        self.input().mouse_move(dx, dy);
-    }
-
-    pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
-        self.input().mouse_position(x, y, width, height);
-    }
-
-    /// `button` is one of `ffi::BUTTON_*`.
-    pub fn mouse_button(&self, button: c_int, down: bool) {
-        self.input().mouse_button(button, down);
-    }
-
-    /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
-    pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
-        self.input().key(vk, down, modifiers);
-    }
-
-    pub fn text(&self, text: &str) {
-        self.input().text(text);
-    }
-
-    /// Vertical and horizontal scroll in 1/120ths of a wheel click.
-    pub fn scroll(&self, vertical: i16, horizontal: i16) {
-        self.input().scroll(vertical, horizontal);
-    }
 }
 
 impl Drop for Session {
@@ -448,11 +419,6 @@ fn sunshine_encoder_kbps(request: u64) -> u64 {
     kbps -= SUNSHINE_AUDIO_KBPS.min(kbps / 5);
     kbps -= SUNSHINE_CONTROL_KBPS.min(kbps / 10);
     kbps
-}
-
-/// Tailscale (and any RFC 1918 path) is a LAN to the stream protocol.
-pub fn lan_like_stream(ip: std::net::Ipv4Addr) -> bool {
-    brolink_core::tailscale::overlay_or_lan(ip)
 }
 
 fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: [u8; 16]) {
@@ -546,7 +512,7 @@ unsafe extern "C" fn video_setup(
     _fps: c_int,
 ) -> c_int {
     let Some(inner) = current() else { return -1 };
-    match video::new_decoder(format, w as u32, h as u32) {
+    match video::new_decoder(format) {
         Ok(d) => {
             let mut st = inner.stats.lock();
             st.width = w as u32;
@@ -969,9 +935,8 @@ mod real {
         let fps = number("BROLINK_TEST_FPS", 60);
         let bitrate_kbps = number("BROLINK_TEST_BITRATE_KBPS", 10_000);
         let seconds = number("BROLINK_TEST_SECONDS", 12);
-        let remote = std::env::var_os("BROLINK_TEST_REMOTE").is_some();
         assert!(width > 0 && height > 0 && fps > 0 && bitrate_kbps > 0 && seconds >= 12);
-        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps remote={remote} duration={seconds}s");
+        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps duration={seconds}s");
         let dir = std::env::var_os("BROLINK_TEST_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("brolink-pair-test"));
@@ -1043,7 +1008,6 @@ mod real {
                 fps,
                 bitrate_kbps,
                 hevc: std::env::var_os("BROLINK_TEST_HEVC").is_some(),
-                remote,
             },
             ri_key,
             ri_iv,
@@ -1069,7 +1033,9 @@ mod real {
                 // raw input sees continuous relative motion. Watch the PC's
                 // cursor (GetCursorPos) to confirm the relative injection lands.
                 let phase = (start.elapsed().as_millis() / 400) % 2;
-                session.mouse_move(if phase == 0 { 40 } else { -40 }, 0);
+                session
+                    .input()
+                    .mouse_move(if phase == 0 { 40 } else { -40 }, 0);
             }
             if let Some(f) = frames.take() {
                 if frames.seq() % 60 == 1 {
@@ -1090,15 +1056,20 @@ mod real {
             std::thread::sleep(Duration::from_millis(5));
         }
         let stats = session.stats();
-        eprintln!("stats: {stats:?}, frames published: {}", frames.seq());
-        assert!(connected, "never connected");
-        assert!(frames.seq() > 60, "too few frames: {}", frames.seq());
+        let published = frames.seq();
+        eprintln!("stats: {stats:?}, frames published: {published}");
         session.stop();
         let t = Instant::now();
         while !session.finished() && t.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(session.finished(), "session did not finish");
         eprintln!("stopped in {:?}", t.elapsed());
+        // Leave the PC as it was found: end the app this test started.
+        if !resume {
+            let _ = client.quit();
+        }
+        assert!(connected, "never connected");
+        assert!(published > 60, "too few frames: {published}");
+        assert!(session.finished(), "session did not finish");
     }
 }

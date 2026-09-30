@@ -65,7 +65,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
     ui::setting_row(ui, "Video format", Some("HEVC gives sharper detail per megabit. Auto uses HEVC when supported; H.264 improves compatibility."), |ui| {
         ui::segmented(ui, &[(Codec::Auto, "Auto"), (Codec::Hevc, "HEVC"), (Codec::H264, "H.264")], &mut s.codec);
     });
-    let effective = crate::path::effective(s, &crate::path::Path::default());
+    let effective = crate::path::effective(s);
     let (w, h) = effective.resolution.pixels(native);
     ui.add_space(12.0);
     ui::status_pill(

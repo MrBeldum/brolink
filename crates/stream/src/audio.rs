@@ -9,7 +9,8 @@ use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 
 /// Queued sound beyond this is cut back to [`KEEP_MS`].
@@ -39,7 +40,9 @@ pub struct Player {
     pcm: Vec<f32>,
     /// Interleaved samples at the stream's rate and channel count.
     queue: Arc<Mutex<VecDeque<f32>>>,
-    stop: Arc<AtomicBool>,
+    /// Dropped with the player, which ends the output thread and with it
+    /// the device stream.
+    _output_thread: mpsc::Sender<()>,
     output: Arc<Mutex<Output>>,
     /// Frames the output device has pulled, silence included: proof that
     /// sound is leaving.
@@ -48,7 +51,6 @@ pub struct Player {
     keep: usize,
     packets: u64,
     lost: u64,
-    decoded: u64,
     undecodable: u64,
 }
 
@@ -105,14 +107,14 @@ impl Player {
             bail!("Opus decoder failed ({err})");
         }
         let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
-        let stop = Arc::new(AtomicBool::new(false));
+        let (stop, stopped) = mpsc::channel();
         let output = Arc::new(Mutex::new(Output::Opening));
         let pulled = Arc::new(AtomicU64::new(0));
         output_thread(
             sample_rate,
             channels as u16,
             queue.clone(),
-            stop.clone(),
+            stopped,
             output.clone(),
             pulled.clone(),
         );
@@ -127,14 +129,13 @@ impl Player {
             // negotiated frame would refuse a longer packet outright.
             pcm: vec![0.0; max_frame * channels],
             queue,
-            stop,
+            _output_thread: stop,
             output,
             pulled,
             max_queued: per_ms * MAX_QUEUED_MS,
             keep,
             packets: 0,
             lost: 0,
-            decoded: 0,
             undecodable: 0,
         })
     }
@@ -173,7 +174,6 @@ impl Player {
             }
             return;
         }
-        self.decoded += n as u64;
         let samples = &self.pcm[..n as usize * self.channels];
         let mut q = self.queue.lock();
         q.extend(samples);
@@ -185,16 +185,6 @@ impl Player {
 
     pub fn output(&self) -> Output {
         self.output.lock().clone()
-    }
-
-    /// Packets received from the PC, lost ones not counted.
-    pub fn packets(&self) -> u64 {
-        self.packets
-    }
-
-    /// Samples per channel decoded so far.
-    pub fn decoded(&self) -> u64 {
-        self.decoded
     }
 
     /// Frames the output device has taken so far.
@@ -232,7 +222,6 @@ fn phrase(output: &Output, packets: u64, lost: u64, pulled: u64) -> String {
 
 impl Drop for Player {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
         unsafe { audiopus_sys::opus_multistream_decoder_destroy(self.decoder) };
     }
 }
@@ -246,7 +235,7 @@ fn output_thread(
     source_rate: u32,
     source_channels: u16,
     queue: Arc<Mutex<VecDeque<f32>>>,
-    stop: Arc<AtomicBool>,
+    stop: mpsc::Receiver<()>,
     output: Arc<Mutex<Output>>,
     pulled: Arc<AtomicU64>,
 ) {
@@ -294,14 +283,37 @@ fn output_thread(
                     source_rate as usize * source_channels as usize * 40 / 1000,
                 )
             };
-            let err_fn = |e| tracing::warn!("audio output: {e}");
+            // CoreAudio moves a default-device stream to the new default by
+            // itself and reports it as an error; only the name shown needs
+            // to follow. It used to be logged as a warning and the stats kept
+            // naming the device sound had left.
+            let err_fn = {
+                let output = output.clone();
+                move |e: cpal::Error| {
+                    if e.kind() != cpal::ErrorKind::DeviceChanged {
+                        tracing::warn!("audio output: {e}");
+                        return;
+                    }
+                    let Some(now) = cpal::default_host()
+                        .default_output_device()
+                        .map(|d| d.to_string())
+                        .filter(|n| !n.is_empty())
+                    else {
+                        return;
+                    };
+                    tracing::info!("audio: now playing on {now}");
+                    if let Output::Playing { device, .. } = &mut *output.lock() {
+                        *device = now;
+                    }
+                }
+            };
             let stream = match supported.sample_format() {
                 cpal::SampleFormat::F32 => {
                     let mut m = mixer();
                     device.build_output_stream(
                         config,
                         move |out: &mut [f32], _| m.fill(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     )
                 }
@@ -310,7 +322,7 @@ fn output_thread(
                     device.build_output_stream(
                         config,
                         move |out: &mut [i16], _| m.fill_i16(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     )
                 }
@@ -319,7 +331,7 @@ fn output_thread(
                     device.build_output_stream(
                         config,
                         move |out: &mut [i32], _| m.fill_i32(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     )
                 }
@@ -329,7 +341,7 @@ fn output_thread(
                     match device.build_output_stream(
                         config,
                         move |out: &mut [f32], _| m.fill(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     ) {
                         Ok(s) => Ok(s),
@@ -339,7 +351,7 @@ fn output_thread(
                             device.build_output_stream(
                                 config,
                                 move |out: &mut [i16], _| m.fill_i16(out),
-                                err_fn,
+                                err_fn.clone(),
                                 None,
                             )
                         }
@@ -365,9 +377,8 @@ fn output_thread(
                 rate,
                 channels,
             };
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+            // Returns when the player, and with it the sender, is dropped.
+            let _ = stop.recv();
         })
         .expect("spawn audio thread");
 }
@@ -547,12 +558,12 @@ mod tests {
         for _ in 0..10 {
             p.push(&packet);
         }
-        assert_eq!(p.packets(), 10);
-        assert_eq!(p.decoded(), 10 * 480);
+        assert_eq!(p.packets, 10);
+        assert_eq!(p.queue.lock().len(), 10 * 480 * 2, "480 stereo frames each");
         // A lost packet is concealed at the stream's frame size.
         p.push(&[]);
-        assert_eq!(p.decoded(), 11 * 480);
-        assert_eq!(p.undecodable, 0);
+        assert_eq!(p.queue.lock().len(), 11 * 480 * 2);
+        assert_eq!((p.lost, p.undecodable), (1, 0));
         // The queue never grows past the cap, and never by a partial frame.
         for _ in 0..100 {
             p.push(&packet);

@@ -502,7 +502,8 @@ impl eframe::App for ClientApp {
             return;
         }
 
-        ctx.request_repaint_after(Duration::from_millis(400));
+        // Workers repaint when something changes; this only ages notices.
+        ctx.request_repaint_after(Duration::from_secs(1));
         if self.tailscale_checked.elapsed() > Duration::from_secs(2) {
             self.tailscale_checked = Instant::now();
             self.tailscale_ok = tailscale::cli().is_some();
@@ -611,7 +612,7 @@ impl eframe::App for ClientApp {
                             ui.add_space(14.0);
                             self.pcs_card(ui, ctx, &disc, &prog);
                             ui::titled_card(ui, "Next session", None, |ui| {
-                                let settings = path::effective(&self.cfg.stream, &path::Path::default());
+                                let settings = path::effective(&self.cfg.stream);
                                 let (w, h) = settings.resolution.pixels(Self::native_pixels(ctx));
                                 ui.horizontal_wrapped(|ui| {
                                     ui::status_pill(ui, &format!("{w} × {h}"), Tone::Info);
@@ -2109,7 +2110,7 @@ mod snapshots {
             rtt_ms: Some(210),
             ..Default::default()
         };
-        let settings = crate::path::effective(&crate::config::StreamSettings::default(), &path);
+        let settings = crate::path::effective(&crate::config::StreamSettings::default());
         let session = brolink_stream::Session::start(
             brolink_stream::session::Server {
                 address: "10.255.255.1".into(),
@@ -2124,7 +2125,6 @@ mod snapshots {
                 fps: 30,
                 bitrate_kbps: 4000,
                 hevc: true,
-                remote: true,
             },
             [0; 16],
             [0; 16],

@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -68,6 +68,16 @@ pub struct Status {
     pub self_node: Node,
     pub peer: BTreeMap<String, Node>,
     pub user: BTreeMap<String, User>,
+    /// The tailnet this machine is in. Absent before Tailscale 1.26.
+    pub current_tailnet: Option<Tailnet>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct Tailnet {
+    /// The owner's login for a personal tailnet ("ada@example.com"), the
+    /// domain for an organisation's ("example.com").
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -181,17 +191,6 @@ impl Status {
         self.user
             .get(&self.self_node.user_id.to_string())
             .map(|u| u.login_name.as_str())
-    }
-    /// Peers running Windows. Relay-tagged nodes are omitted even when they
-    /// report Windows. Prefer [`machine_peers`] for the streamable list.
-    pub fn windows_peers(&self) -> Vec<&Node> {
-        let mut v: Vec<&Node> = self
-            .peer
-            .values()
-            .filter(|n| n.is_windows() && !n.is_relay())
-            .collect();
-        v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
-        v
     }
     /// Every tailnet peer that can share a desktop: any OS, minus `tag:relay`
     /// nodes that exist only to carry packets. Sorted by hostname.
@@ -329,20 +328,21 @@ pub fn netcheck() -> Result<NetCheck> {
     parse_netcheck(&out)
 }
 
-/// The three-letter code of a DERP region, as `tailscale status` prints it.
-/// True for loopback, RFC 1918, or Tailscale's CGNAT range (`100.64/10`).
-/// BroLink never rides the raw internet, so these addresses are a LAN as
-/// far as the stream protocol is concerned.
-pub fn overlay_or_lan(ip: Ipv4Addr) -> bool {
-    if ip.is_loopback() || ip.is_private() {
-        return true;
-    }
-    // 100.64.0.0/10 (shared address space). `Ipv4Addr::is_shared` is not
-    // stable on the toolchain BroLink pins.
+/// An address Tailscale hands out: IPv4 from 100.64.0.0/10.
+pub fn is_tailnet(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
-    o[0] == 100 && o[1] >= 64 && o[1] <= 127
+    o[0] == 100 && (64..128).contains(&o[1])
 }
 
+/// [`is_tailnet`], or IPv6 unique-local (Tailscale uses fd7a:115c:a1e0::/48).
+pub fn is_tailnet_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_tailnet(v4),
+        IpAddr::V6(v6) => v6.octets()[0] & 0xfe == 0xfc,
+    }
+}
+
+/// The three-letter code of a DERP region, as `tailscale status` prints it.
 pub fn derp_code(region: i32) -> &'static str {
     match region {
         1 => "nyc",
@@ -490,6 +490,14 @@ fn run_limited(cmd: &mut Command, limit: Duration) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// The Windows machines in the list, as the tests below look at them.
+    fn windows_peers(st: &Status) -> Vec<&Node> {
+        st.machine_peers()
+            .into_iter()
+            .filter(|n| n.is_windows())
+            .collect()
+    }
+
     const SAMPLE: &str = r#"{
       "Version": "1.102.3", "BackendState": "Running",
       "Self": {"ID": "nSELF", "HostName": "Gaming-PC", "DNSName": "gaming-pc.example.ts.net.", "OS": "windows",
@@ -514,7 +522,7 @@ mod tests {
         assert!(st.running());
         assert_eq!(st.self_node.ipv4(), Some("100.64.0.10".parse().unwrap()));
         assert_eq!(st.self_login(), Some("user@example.com"));
-        let pcs = st.windows_peers();
+        let pcs = windows_peers(&st);
         assert_eq!(
             pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
             ["Den", "Gaming-PC-2", "Office"]
@@ -530,10 +538,6 @@ mod tests {
         );
         assert_eq!(st.peer["nodekey:a"].os_label(), "macOS");
         assert_eq!(st.peer["nodekey:b"].os_label(), "Windows");
-        assert!(overlay_or_lan("100.64.0.10".parse().unwrap()));
-        assert!(overlay_or_lan("192.168.1.10".parse().unwrap()));
-        assert!(overlay_or_lan("127.0.0.1".parse().unwrap()));
-        assert!(!overlay_or_lan("8.8.8.8".parse().unwrap()));
         assert_eq!(
             pcs[2].ipv4(),
             Some("100.64.0.30".parse().unwrap()),
@@ -587,7 +591,7 @@ mod tests {
     fn a_stopped_daemon_is_not_running() {
         let st = parse_status(r#"{"BackendState":"Stopped"}"#).unwrap();
         assert!(!st.running());
-        assert!(st.windows_peers().is_empty());
+        assert!(windows_peers(&st).is_empty());
         assert_eq!(st.self_login(), None);
     }
 
@@ -641,7 +645,7 @@ mod tests {
         )
         .unwrap();
 
-        let pcs = st.windows_peers();
+        let pcs = windows_peers(&st);
         assert_eq!(
             pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
             ["Gaming-PC", "tagged-pc"],
@@ -712,6 +716,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.len(), 1048576);
+    }
+
+    #[test]
+    fn tailnet_range_is_recognised() {
+        assert!(is_tailnet("100.64.0.1".parse().unwrap()));
+        assert!(is_tailnet("100.127.255.254".parse().unwrap()));
+        assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
+        assert!(!is_tailnet("192.168.1.2".parse().unwrap()));
+        assert!(is_tailnet_ip("100.111.100.57".parse().unwrap()));
+        assert!(is_tailnet_ip("fd7a:115c:a1e0::9e2a:381c".parse().unwrap()));
+        assert!(!is_tailnet_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_tailnet_ip("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_tailnet_name_is_read_when_present() {
+        let st = parse_status(
+            r#"{"BackendState":"Running","CurrentTailnet":{"Name":"user@example.com","MagicDNSSuffix":"tail0.ts.net"}}"#,
+        )
+        .unwrap();
+        assert_eq!(st.current_tailnet.unwrap().name, "user@example.com");
+        assert!(parse_status(SAMPLE).unwrap().current_tailnet.is_none());
     }
 
     #[test]

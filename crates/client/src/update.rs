@@ -1,7 +1,7 @@
 //! Keeping this app and every BroLink Host it can see on the newest release.
 //!
-//! The Mac is the one machine with a GitHub login (the repository is
-//! private), so it does the fetching for everyone. Every few hours it asks
+//! The Mac does the fetching for everyone (with a GitHub login if the
+//! repository is private; see `brolink_core::update`). Every few hours it asks
 //! GitHub for the latest release. A newer app is downloaded, verified against
 //! GitHub's digest and its own code signature, and swapped into place once no
 //! stream is running; the app then relaunches itself. A newer host is
@@ -16,14 +16,14 @@
 use crate::config::ClientConfig;
 use crate::session::{Discovery, Live, Progress};
 use anyhow::{anyhow, bail, Context, Result};
-use brolink_core::api::{Ack, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
+use brolink_core::api::{Ack, Status, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
 use brolink_core::update::{self, Release, HOST_EXE, MAC_ASSET, WINDOWS_ASSET};
 use brolink_core::{http, CONTROL_PORT};
 use brolink_ui::Tone;
 use parking_lot::Mutex;
 use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,6 +64,19 @@ pub fn spawn(
     progress: Arc<Mutex<Progress>>,
     ctx: egui::Context,
 ) {
+    if !cfg!(target_os = "macos") {
+        // Everything below assumes a Mac: it replaces an app bundle and
+        // unpacks the Windows zip with /usr/bin/unzip. A Windows PC gets
+        // its new host pushed from the Mac, and a Linux node is rebuilt, so
+        // there is nothing here for either to fetch or send.
+        let _ = (discovery, live, progress, ctx);
+        state.lock().message = if cfg!(windows) {
+            "New versions arrive from the Mac on your Tailscale account.".into()
+        } else {
+            "BroLink updates itself on a Mac; install new releases here by hand.".into()
+        };
+        return;
+    }
     std::thread::spawn(move || {
         let mut next = Instant::now() + FIRST_CHECK;
         let mut release: Option<Release> = None;
@@ -493,19 +506,49 @@ fn push_host(rel: &Release, token: Option<&str>, ip: Ipv4Addr) -> Result<()> {
     let exe = host_exe(rel, token)?;
     let sha = update::sha256_hex(&exe);
     let version = rel.version.to_string();
+    let host = SocketAddr::from((ip, CONTROL_PORT));
     let mut last = None;
     for attempt in 1..=3 {
         match send_host(ip, &version, &sha, &exe) {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < 3 && is_transient(&e) => {
+            Err(e) => {
+                // A host can take the file and restart before its reply
+                // gets out, so the Mac sees a dropped connection and the
+                // retry hears "already runs". Ask the host what it runs
+                // before calling either a failure.
+                if (attempt > 1 || is_transient(&e))
+                    && runs_at_least(host, &rel.version, Duration::from_secs(15))
+                {
+                    return Ok(());
+                }
+                if attempt == 3 || !is_transient(&e) {
+                    return Err(e);
+                }
                 tracing::warn!("host update attempt {attempt}/3: {e:#}");
                 std::thread::sleep(Duration::from_secs(2 * attempt as u64));
                 last = Some(e);
             }
-            Err(e) => return Err(e),
         }
     }
     Err(last.unwrap_or_else(|| anyhow!("update failed")))
+}
+
+/// Whether the host at `addr` reports `want` or newer within `within`: it
+/// may still be handing over to the new executable when first asked.
+fn runs_at_least(addr: SocketAddr, want: &Version, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        let running = http::get_json::<Status>(addr, "/v1/status", Duration::from_secs(2))
+            .ok()
+            .and_then(|s| Version::parse(&s.version).ok());
+        if running.is_some_and(|v| v >= *want) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn send_host(ip: Ipv4Addr, version: &str, sha: &str, exe: &[u8]) -> Result<()> {
@@ -648,6 +691,43 @@ mod tests {
         assert!(msg.contains("Update BroLink Host"), "{msg}");
         assert!(!msg.contains("Broken pipe"), "{msg}");
         assert!(!msg.contains("os error"), "{msg}");
+    }
+
+    /// A one-reply HTTP server saying the host runs `version`.
+    fn status_server(version: &'static str) -> SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = format!(r#"{{"app":"brolink","version":"{version}"}}"#);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_host_already_on_the_release_counts_as_updated() {
+        let want = Version::new(4, 0, 3);
+        assert!(runs_at_least(status_server("4.0.3"), &want, Duration::ZERO));
+        assert!(runs_at_least(status_server("4.1.0"), &want, Duration::ZERO));
+        assert!(!runs_at_least(
+            status_server("4.0.2"),
+            &want,
+            Duration::ZERO
+        ));
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert!(!runs_at_least(closed, &want, Duration::ZERO));
     }
 
     #[test]

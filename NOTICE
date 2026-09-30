@@ -10,8 +10,8 @@ Compiled into the client (crates/stream):
     Includes ENet (MIT, Lee Salzman) and nanors (MIT, sleepybishop).
   Opus, BSD-3-Clause, Xiph.Org Foundation; statically linked through the
     audiopus_sys crate.                     https://opus-codec.org
-  OpenH264, BSD-2-Clause, Cisco Systems. Only the Windows development
-    client uses it, as a software H.264 decoder; the Mac uses VideoToolbox.
+  OpenH264, BSD-2-Clause, Cisco Systems. Only a Windows or Linux viewer
+    uses it, as a software H.264 decoder; the Mac uses VideoToolbox.
     It is built from source, so Cisco's binary patent grant does not cover
     it.                                     https://github.com/cisco/openh264
 

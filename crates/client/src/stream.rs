@@ -1133,7 +1133,6 @@ fn pointer_on_stream(
     in_video && !over_bar && !popup && !overlay && !over_overlay
 }
 
-/// "Auto · Smooth" → "Auto", "Custom · Sharp" → "Sharp", else "Custom".
 /// Whether `host_version` is too old for `/v1/update`, with the release
 /// that an install through the stream would put on it.
 pub fn old_host(
@@ -1257,7 +1256,6 @@ mod tests {
                 fps: 30,
                 bitrate_kbps: 4000,
                 hevc: true,
-                remote: true,
             },
             [0; 16],
             [0; 16],

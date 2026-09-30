@@ -191,17 +191,19 @@ pub fn write_response(stream: &mut TcpStream, resp: &Response) -> Result<()> {
     )
 }
 
-/// Accept forever, with a bounded number of active connections. `handler` sees the peer
-/// address so it can decide who is allowed to ask.
-pub fn serve<F>(listener: TcpListener, handler: F)
+/// [`serve_with_peer_check`] for everyone, for the tests.
+#[cfg(test)]
+fn serve<F>(listener: TcpListener, handler: F)
 where
     F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
 {
     serve_with_peer_check(listener, |_| true, handler);
 }
 
-/// Authorize the peer before reading headers or allocating a request body.
-/// The check runs in a bounded connection worker, so it may perform I/O.
+/// Accept forever, with a bounded number of active connections. `authorize`
+/// sees the peer before its headers are read or a body is allocated; it
+/// runs in the connection's worker, so it may do I/O. `handler` sees the
+/// peer too, so it can decide per route.
 pub fn serve_with_peer_check<A, F>(listener: TcpListener, authorize: A, handler: F)
 where
     A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
@@ -267,6 +269,20 @@ impl Drop for ConnectionSlot {
     }
 }
 
+/// A connection to the first of `addr`'s addresses that accepts one, each
+/// given `timeout`. A name can resolve to an IPv6 address first that this
+/// network has no route to, ahead of an IPv4 one that works.
+pub(crate) fn connect(addr: impl ToSocketAddrs, timeout: Duration) -> Result<TcpStream> {
+    let mut last = None;
+    for a in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&a, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.map(io_err).unwrap_or_else(|| anyhow!("no address")))
+}
+
 /// One request, one reply, within `timeout` for connect and for the read.
 pub fn request(
     addr: impl ToSocketAddrs,
@@ -275,19 +291,13 @@ pub fn request(
     body: Option<&str>,
     timeout: Duration,
 ) -> Result<Response> {
-    let addr = addr
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow!("no address"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
-    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
-    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
-    exchange(
-        &mut stream,
+    request_with(
+        addr,
         method,
         path,
-        &addr.to_string(),
-        body.unwrap_or(""),
+        &[("Content-Type", "application/json")],
+        body.unwrap_or("").as_bytes(),
+        timeout,
     )
 }
 
@@ -300,14 +310,11 @@ pub fn request_with(
     body: &[u8],
     timeout: Duration,
 ) -> Result<Response> {
-    let addr = addr
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow!("no address"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
+    let mut stream = connect(addr, timeout)?;
     stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
     stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
-    exchange_with(&mut stream, method, path, &addr.to_string(), headers, body)
+    let host = stream.peer_addr().map_err(io_err)?.to_string();
+    exchange_with(&mut stream, method, path, &host, headers, body)
 }
 
 /// One HTTP/1.1 request with a JSON body and its reply over any stream (TCP,
@@ -667,6 +674,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_address_that_refuses_is_skipped_for_the_next_one() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap();
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        std::thread::spawn(move || serve(listener, |_, _| Response::json(200, &Ack::ok())));
+        let t = Duration::from_secs(2);
+        let r = request(&[closed, open][..], "GET", "/", None, t).unwrap();
+        assert_eq!(r.status, 200, "{}", r.body);
+        let e = request(closed, "GET", "/", None, t).unwrap_err();
+        assert!(!e.to_string().is_empty());
+        assert!(connect(&[][..] as &[SocketAddr], t).is_err());
     }
 
     #[test]

@@ -93,6 +93,8 @@ cp deploy/node/env.example deploy/node/.env
 docker compose -f deploy/node/docker-compose.yml up -d --build
 ```
 
+A desktop can also run natively under systemd on the VPS, beside the
+relay, as this project's own VPS does: [deploy/native/README.md](deploy/native/README.md).
 The packet relay (when two NATs cannot punch through) is a separate kit:
 [deploy/relay/RELAY.md](deploy/relay/RELAY.md).
 
@@ -155,9 +157,12 @@ Ethernet is strongly preferred; most Wi-Fi adapters cannot wake a PC.
 
 - The host's control service listens on TCP 47850 and answers only
   loopback and Tailscale addresses that `tailscale whois` attributes to the
-  account the PC is signed in as. Everyone else gets a 403. The firewall
-  rule setup adds is scoped to `100.64.0.0/10`.
-- The stream is BroLink's stream protocol over Tailscale (WireGuard), with
+  account the PC is signed in as. A tagged server (the relay VPS) belongs
+  to no account and answers the members of its own tailnet. Everyone else,
+  including machines shared in from other tailnets, gets a 403. The
+  firewall rule setup adds is scoped to `100.64.0.0/10`.
+- The stream is the GameStream protocol (moonlight-common-c on the viewer,
+  Sunshine on the host), encrypted, inside Tailscale (WireGuard), with
   certificate pairing on top; BroLink pins the PC's certificate after the
   first pairing.
 - No BroLink account or password exists. The engine login BroLink
@@ -194,8 +199,9 @@ crates/host     node: control service, engine setup, unified window (view + shar
 crates/client   viewer UI: machine list, wake, pair, stream window and toolbar
 crates/ui       theme and widgets shared by both windows
 deploy/node/    Docker kit: virtual desktop + engine + BroLink on a VPS
+deploy/native/  systemd user units for the same desktop without Docker
 deploy/relay/   Docker kit: Tailscale peer relay
-third_party/    moonlight-common-c (GPL-3.0), vendored
+third_party/    moonlight-common-c (GPL-3.0), vendored; VERSION says what and why
 docs/           platform notes
 scripts/        installers and the macOS bundle
 ```

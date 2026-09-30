@@ -4,6 +4,84 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- The control service again answers only machines signed in to the same
+  Tailscale account. Since 4.0.0 it answered any machine Tailscale could
+  name, so a machine shared in from someone else's tailnet could pair with
+  the PC, sleep or restart it, read and write its clipboard, and push it a
+  new `brolink-host.exe`. A tagged server such as the relay VPS belongs to
+  no account, so it answers the members of its own tailnet, which keeps a
+  Mac able to open the VPS desktop.
+- Text copied on a Mac or Linux machine you are streaming from now reaches
+  the machine you are watching on. Only Windows reported a clipboard
+  sequence number; everywhere else it was always 0, so the viewer took
+  every copy for the one it had already seen. On a Linux desktop, text
+  pasted in from the viewer also stays on the clipboard now instead of
+  vanishing when no clipboard manager picks it up.
+- A Windows PC whose pushed update crashes on start keeps the version it
+  had. The service used to exit as soon as the new executable had been
+  launched, so a replacement that died straight away left the PC with no
+  BroLink service until someone logged in again. It now waits two seconds,
+  and puts the previous executable back if the new one has already exited.
+- Update downloads try each of a server's addresses in turn. Only the first
+  one the name resolved to was ever tried, so one unreachable address (an
+  IPv6 one on a network without IPv6, say) failed the whole update check.
+- `brolink-host.exe`'s version details (Explorer's Details tab) named the
+  wrong licence, MIT; they now say GPL-3.0-or-later, the licence BroLink
+  and moonlight-common-c are under.
+- Windows setup no longer breaks on a network adapter whose name holds a
+  `"` or a `$`. The name was written into a double-quoted PowerShell
+  string, where a `"` ends the string (a syntax error that stops the whole
+  setup) and a `$` expands. It is now only ever a single-quoted literal.
+- The macOS install scripts restart the background service after putting
+  the new app in place. It kept running the old version until the next
+  login, so a Mac that shares its desktop served other machines from the
+  previous release.
+- A Windows machine no longer runs the Mac's updater. Since 4.0 every
+  machine runs the same window, so a Windows PC also checked GitHub and
+  would try to send other Windows PCs their update with a Mac-only unzip,
+  failing every few minutes. Its settings now say that updates arrive
+  from the Mac.
+- Installing BroLink Host through the stream (for a PC on 3.0) can finish
+  on a Mac. The Mac served the file from a socket that macOS left
+  non-blocking, so sending the executable stopped as soon as the network
+  buffer filled and the PC rejected the truncated download.
+- **Share this machine** works on a Windows account whose folder has a
+  space in it ("C:\Users\Ada Lovelace"). The elevated setup was handed
+  that folder through PowerShell's Start-Process, which splits unquoted
+  arguments at spaces, so it received half a path and an unexpected
+  extra argument and failed.
+- The service log keeps what matters. Every machine that polled the
+  service was logged again each minute ("hermes (…) asked" was 2,707 of
+  the 2,810 lines in this Mac's `service.log`), and every change of the
+  nearest Tailscale relay region logged a network line. Each peer is now
+  logged when first seen, when its answer changes or after an hour away,
+  and the network line only when the NAT itself changes.
+- When the Mac's sound output changes mid-stream (AirPods connect, say),
+  the stream's stats name the device the sound moved to. macOS already
+  moved it; BroLink kept naming the old one and logged a warning.
+- A host update that lands is no longer reported as a failure. A PC can
+  take the new executable and restart before its reply reaches the Mac;
+  the Mac then retried, heard "this PC already runs BroLink Host 4.0.2",
+  and showed "Could not update" in red. It now asks the PC which version
+  it runs before calling a push failed.
+- Cancel stops a connection attempt straight away while the PC is not
+  answering. The pairing check retried eight times regardless, which could
+  hold the window on "Checking pairing…" for most of a minute after Cancel.
+- A Windows or Linux viewer no longer calls its stream HEVC: those decode
+  H.264 only, and the toolbar named the codec the PC could offer instead
+  of the one in use.
+- The check that notices a black picture costs the decoder 0.14 ms a frame
+  instead of 2.5 ms at 3024×1964 when the picture really is black (15% of
+  a core at 60 fps, on the path every frame takes to the screen).
+- An idle window redraws about once a second instead of two or three
+  times, about a third less CPU while the lobby sits open.
+- A Mac or Linux machine that shares its desktop no longer runs a program
+  (`scutil` or `hostname`) for every status request it answers.
+- When the picture is black, the PC's explanation gets a minute to arrive
+  instead of 25 seconds, which its slower checks sometimes needed.
+
 ## 4.0.2 (2026-09-22)
 
 - `panel.log` and `service.log` no longer grow without end. Both were

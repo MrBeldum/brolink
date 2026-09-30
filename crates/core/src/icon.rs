@@ -3,7 +3,8 @@
 //! build script, which includes this file by path, so it must not refer to
 //! anything else in this crate.
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use image::{Rgba, RgbaImage};
 
@@ -64,6 +65,14 @@ fn tile_bounds(im: &RgbaImage) -> (u32, u32, u32, u32) {
 /// square and applies the rounded app-icon shape itself. Pre-padding left
 /// a square plate around the mark.
 pub fn render(size: u32) -> Vec<u8> {
+    // Each window's header and the window icon ask for the same size at
+    // startup, before the first frame; the resize is the slow part.
+    static RENDERED: Mutex<BTreeMap<u32, Vec<u8>>> = Mutex::new(BTreeMap::new());
+    let mut rendered = RENDERED.lock().unwrap_or_else(|e| e.into_inner());
+    rendered.entry(size).or_insert_with(|| draw(size)).clone()
+}
+
+fn draw(size: u32) -> Vec<u8> {
     if size == 0 {
         return Vec::new();
     }
