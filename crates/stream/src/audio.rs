@@ -283,14 +283,37 @@ fn output_thread(
                     source_rate as usize * source_channels as usize * 40 / 1000,
                 )
             };
-            let err_fn = |e| tracing::warn!("audio output: {e}");
+            // CoreAudio moves a default-device stream to the new default by
+            // itself and reports it as an error; only the name shown needs
+            // to follow. It used to be logged as a warning and the stats kept
+            // naming the device sound had left.
+            let err_fn = {
+                let output = output.clone();
+                move |e: cpal::Error| {
+                    if e.kind() != cpal::ErrorKind::DeviceChanged {
+                        tracing::warn!("audio output: {e}");
+                        return;
+                    }
+                    let Some(now) = cpal::default_host()
+                        .default_output_device()
+                        .map(|d| d.to_string())
+                        .filter(|n| !n.is_empty())
+                    else {
+                        return;
+                    };
+                    tracing::info!("audio: now playing on {now}");
+                    if let Output::Playing { device, .. } = &mut *output.lock() {
+                        *device = now;
+                    }
+                }
+            };
             let stream = match supported.sample_format() {
                 cpal::SampleFormat::F32 => {
                     let mut m = mixer();
                     device.build_output_stream(
                         config,
                         move |out: &mut [f32], _| m.fill(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     )
                 }
@@ -299,7 +322,7 @@ fn output_thread(
                     device.build_output_stream(
                         config,
                         move |out: &mut [i16], _| m.fill_i16(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     )
                 }
@@ -308,7 +331,7 @@ fn output_thread(
                     device.build_output_stream(
                         config,
                         move |out: &mut [i32], _| m.fill_i32(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     )
                 }
@@ -318,7 +341,7 @@ fn output_thread(
                     match device.build_output_stream(
                         config,
                         move |out: &mut [f32], _| m.fill(out),
-                        err_fn,
+                        err_fn.clone(),
                         None,
                     ) {
                         Ok(s) => Ok(s),
@@ -328,7 +351,7 @@ fn output_thread(
                             device.build_output_stream(
                                 config,
                                 move |out: &mut [i16], _| m.fill_i16(out),
-                                err_fn,
+                                err_fn.clone(),
                                 None,
                             )
                         }

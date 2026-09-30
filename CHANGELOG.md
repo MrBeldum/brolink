@@ -58,6 +58,9 @@ GitHub release notes, so each version gets a heading of the form
   nearest Tailscale relay region logged a network line. Each peer is now
   logged when first seen, when its answer changes or after an hour away,
   and the network line only when the NAT itself changes.
+- When the Mac's sound output changes mid-stream (AirPods connect, say),
+  the stream's stats name the device the sound moved to. macOS already
+  moved it; BroLink kept naming the old one and logged a warning.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.
