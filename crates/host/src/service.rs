@@ -374,7 +374,7 @@ impl Service {
                 Ok(n) => {
                     let report = n.report();
                     let mut cur = svc.nat.lock();
-                    if cur.as_ref() != Some(&report) {
+                    if cur.as_ref().is_none_or(|c| nat_changed(c, &report)) {
                         svc.log(describe_nat(&report));
                     }
                     *cur = Some(report);
@@ -846,6 +846,15 @@ impl Owner {
     }
 }
 
+/// Whether the NAT itself changed. The nearest relay region moves between
+/// runs on its own (Paris, then Chicago, then Paris again on the same
+/// network), and logging each move pushed useful lines out of the 80 the
+/// window shows.
+fn nat_changed(old: &NatReport, new: &NatReport) -> bool {
+    (old.udp, old.ipv4, old.ipv6, old.hard, old.portmap)
+        != (new.udp, new.ipv4, new.ipv6, new.hard, new.portmap)
+}
+
 /// True when a service answers on loopback.
 pub fn service_alive() -> bool {
     http::request(
@@ -1182,6 +1191,26 @@ mod tests {
             },
         );
         assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn a_new_nearest_relay_is_not_a_new_nat() {
+        let paris = NatReport {
+            udp: true,
+            hard: Some(true),
+            derp: "par".into(),
+            ..Default::default()
+        };
+        let chicago = NatReport {
+            derp: "ord".into(),
+            ..paris.clone()
+        };
+        assert!(!nat_changed(&paris, &chicago));
+        let mapped = NatReport {
+            portmap: true,
+            ..paris.clone()
+        };
+        assert!(nat_changed(&paris, &mapped));
     }
 
     #[test]
