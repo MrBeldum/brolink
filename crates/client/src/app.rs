@@ -1641,6 +1641,16 @@ fn os_label(os: &str) -> &'static str {
 fn describe(pc: &Pc) -> (Tone, String) {
     let os = os_label(&pc.os);
     let at = pc.ip.map(|ip| format!(" · {ip}")).unwrap_or_default();
+    // A phone on the tailnet is listed, but it will never share a desktop:
+    // "BroLink isn't installed" would send someone looking for an app.
+    let lower = pc.os.to_ascii_lowercase();
+    if lower == "ios" || lower == "android" || lower == "ipados" {
+        let name = if lower == "android" { "Android" } else { "iOS" };
+        return (
+            Tone::Neutral,
+            format!("{name}{at} · Phones and tablets can't share a desktop"),
+        );
+    }
     if pc.remembered {
         let seen = pc.known.as_ref().and_then(|k| k.last_seen_unix);
         return (
@@ -1806,6 +1816,16 @@ mod tests {
         pc.host.as_mut().unwrap().setup = vec!["The streaming engine is not installed.".into()];
         assert_eq!(describe(&pc).0, Tone::Warning, "set up there, not ready");
         pc.host.as_mut().unwrap().setup.clear();
+        let phone = Pc {
+            os: "iOS".into(),
+            online: true,
+            ..pc.clone()
+        };
+        assert!(
+            line(&phone).contains("can't share a desktop"),
+            "{}",
+            line(&phone)
+        );
         pc.path = crate::path::Path {
             direct: Some(false),
             relay: "tok".into(),
