@@ -27,6 +27,9 @@ GitHub release notes, so each version gets a heading of the form
 - Update downloads try each of a server's addresses in turn. Only the first
   one the name resolved to was ever tried, so one unreachable address (an
   IPv6 one on a network without IPv6, say) failed the whole update check.
+- `brolink-host.exe`'s version details (Explorer's Details tab) named the
+  wrong licence, MIT; they now say GPL-3.0-or-later, the licence BroLink
+  and moonlight-common-c are under.
 
 ## 4.0.2 (2026-09-22)
 
