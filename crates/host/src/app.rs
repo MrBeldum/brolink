@@ -728,11 +728,11 @@ impl HostApp {
                 let id = format!("ID {}", &uuid[..uuid.len().min(8)]);
                 ui::list_row(ui, None, name, &id, |ui| {
                     if self.confirm_unpair.as_deref() == Some(uuid) {
-                        if ui::destructive_button(ui, "Unpair").clicked() {
-                            self.unpair(ui.ctx(), name, uuid);
+                        if ui::ghost_button(ui, "Keep").clicked() {
                             self.confirm_unpair = None;
                         }
-                        if ui::ghost_button(ui, "Keep").clicked() {
+                        if ui::destructive_button(ui, "Unpair").clicked() {
+                            self.unpair(ui.ctx(), name, uuid);
                             self.confirm_unpair = None;
                         }
                     } else if ui::danger_button(ui, "Unpair…")

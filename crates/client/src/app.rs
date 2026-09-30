@@ -759,6 +759,9 @@ impl ClientApp {
         if let Some((tone, text)) = self.updates.lock().notice.clone() {
             ui::notice(ui, tone, &text);
         }
+        for text in key_expiry_warnings(disc).iter().filter(|t| urgent(t)) {
+            ui::notice(ui, Tone::Danger, text);
+        }
         if prog.active() {
             self.session_card(ui, prog);
         } else if let Step::Ended { error } = &prog.step {
@@ -857,7 +860,6 @@ impl ClientApp {
                 first = false;
                 let (tone, detail) = describe(pc);
                 ui::list_row(ui, Some(tone), &pc.name, &detail, |ui| {
-                    self.row_menu(ui, pc);
                     if pc.can_stream() && !pc.remembered {
                         let label = if pc.online {
                             "Connect"
@@ -875,6 +877,7 @@ impl ClientApp {
                             self.connect(ctx, pc);
                         }
                     }
+                    self.row_menu(ui, pc);
                 });
             }
         });
@@ -1028,23 +1031,19 @@ impl ClientApp {
         });
     }
 
-    /// Key expiry that is about to cut a machine off, then everything else
-    /// worth knowing about the paths, folded away.
+    /// Everything worth knowing about the paths and keys that is not
+    /// urgent, folded away. Urgent key expiry is at the top of the page.
     fn details(&self, ui: &mut egui::Ui, disc: &Discovery) {
-        let mut later = Vec::new();
-        for text in key_expiry_warnings(disc) {
-            let urgent = text.contains("expired") || text.contains(" days") && days_in(&text) <= 30;
-            if urgent {
-                ui::notice(ui, Tone::Danger, &text);
-            } else {
-                later.push((Tone::Neutral, text));
-            }
-        }
         let mut items: Vec<(Tone, String)> = path_warnings(disc)
             .into_iter()
             .map(|t| (Tone::Warning, t))
             .collect();
-        items.extend(later);
+        items.extend(
+            key_expiry_warnings(disc)
+                .into_iter()
+                .filter(|t| !urgent(t))
+                .map(|t| (Tone::Neutral, t)),
+        );
         if items.is_empty() {
             return;
         }
@@ -1612,6 +1611,11 @@ fn key_expiry_warnings(disc: &Discovery) -> Vec<String> {
         });
     }
     out
+}
+
+/// A key-expiry line that needs doing now: expired, or within 30 days.
+fn urgent(text: &str) -> bool {
+    text.contains("expired") || text.contains(" days") && days_in(text) <= 30
 }
 
 /// The day count inside a warning line, for its tone.
@@ -2622,6 +2626,29 @@ pub(crate) mod snapshots {
     }
 
     #[test]
+    fn tab_reaches_a_rows_controls_in_reading_order() {
+        use egui_kittest::kittest::By;
+        let mut h = build(Setup::new(one()), MIN, 1.0, false);
+        let mut order = Vec::new();
+        for _ in 0..6 {
+            h.press_key(egui::Key::Tab);
+            h.run_steps(1);
+            if let Some(n) = h.query_all(By::new().predicate(|n| n.is_focused())).next() {
+                order.push(n.label().unwrap_or_default());
+            }
+        }
+        let at = |label: &str| order.iter().position(|l| l == label);
+        let (Some(connect), Some(more)) = (at("Connect"), at("More for Studio")) else {
+            panic!("Tab never reached the row: {order:?}");
+        };
+        assert!(connect < more, "Connect comes before its menu: {order:?}");
+        assert!(
+            at("Machines").is_some_and(|m| m < connect),
+            "the tabs come first: {order:?}"
+        );
+    }
+
+    #[test]
     fn this_machine_leads_the_list_and_opens_sharing() {
         let mut h = build(
             Setup::new(pcs()).local(Some(a_status("MacBook-Pro", "macOS"))),
@@ -2930,6 +2957,32 @@ pub(crate) mod snapshots {
         h.get_by_label_contains("Connection details").click();
         h.run_steps(3);
         save(h.render().unwrap(), "client-details-open-1280x800@2x.png");
+    }
+
+    /// Keyboard focus is visible on every kind of control.
+    #[test]
+    #[ignore = "renders with a GPU; run on demand to review the UI"]
+    fn snapshots_keyboard_focus() {
+        for (name, page, tabs) in [
+            ("lobby", Page::Machines, 5),
+            ("settings", Page::Settings, 5),
+            ("settings-switch", Page::Settings, 13),
+        ] {
+            let mut h = build(Setup::new(pcs()).page(page), TYPICAL, 2.0, true);
+            for _ in 0..tabs {
+                h.press_key(egui::Key::Tab);
+                h.run_steps(1);
+            }
+            h.run_steps(2);
+            assert!(
+                h.ctx.memory(|m| m.focused()).is_some(),
+                "Tab reaches a control on {name}"
+            );
+            save(
+                h.render().unwrap(),
+                &format!("client-focus-{name}-1280x800@2x.png"),
+            );
+        }
     }
 
     /// The stream screen as the window shows it, before any picture has

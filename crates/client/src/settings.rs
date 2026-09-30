@@ -105,13 +105,11 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
             } else {
                 s.bitrate_kbps / 1000
             };
-            // Right to left: the value first, then the track before it.
-            ui::slider_value(ui, &format!("{mbps} Mbps"));
-            let w = (ui.available_width() - space::LG).clamp(96.0, 180.0);
-            if ui::slider(ui, &mut mbps, 2..=150, w, "Bitrate").changed() {
+            if ui::slider(ui, &mut mbps, 2..=150, 180.0, "Bitrate").changed() {
                 s.quality = Quality::Custom;
                 s.bitrate_kbps = mbps * 1000;
             }
+            ui::slider_value(ui, &format!("{mbps} Mbps"));
         },
     );
     ui::row_separator(ui);

@@ -19,8 +19,8 @@ use crate::video;
 use brolink_core::api::PowerAction;
 use brolink_ui::{self as ui, size, space, theme, Kv, Tone, PALETTE as P};
 use egui::{
-    Align, Align2, Color32, CursorIcon, Event, Frame, Id, Layout, Margin, Pos2, Rect, RichText,
-    Vec2, ViewportCommand,
+    Align2, Color32, CursorIcon, Event, Frame, Id, Margin, Pos2, Rect, RichText, Vec2,
+    ViewportCommand,
 };
 use semver::Version;
 use std::time::{Duration, Instant};
@@ -528,25 +528,25 @@ impl View {
                                 let (keys, _) = host_key();
                                 ui::shortcut(ui, keys, "hides this bar");
                             }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui::trailing(ui, |ui| {
                                 ui.spacing_mut().item_spacing.x = space::XS;
-                                if ui::danger_button(ui, "Disconnect").clicked() {
-                                    actions.push(Action::Disconnect);
+                                if overflow {
+                                    self.more_menu(ui, ctx, env, actions);
+                                } else {
+                                    self.mouse_menu(ui, ctx, live, cfg, actions);
+                                    self.keys_menu(ui, live, cfg, actions);
+                                    self.stats_button(ui);
+                                    self.fullscreen_button(ui, env, actions);
+                                    self.power_menu(ui, env, actions);
                                 }
-                                toolbar_rule(ui);
                                 if ui::ghost_button(ui, "Stream settings").clicked() {
                                     self.held.release_all(&live.input);
                                     self.set_captured(ctx, false);
                                     self.settings = Some(cfg.stream.clone());
                                 }
-                                if overflow {
-                                    self.more_menu(ui, ctx, env, actions);
-                                } else {
-                                    self.power_menu(ui, env, actions);
-                                    self.fullscreen_button(ui, env, actions);
-                                    self.stats_button(ui);
-                                    self.keys_menu(ui, live, cfg, actions);
-                                    self.mouse_menu(ui, ctx, live, cfg, actions);
+                                toolbar_rule(ui);
+                                if ui::danger_button(ui, "Disconnect").clicked() {
+                                    actions.push(Action::Disconnect);
                                 }
                             });
                         });

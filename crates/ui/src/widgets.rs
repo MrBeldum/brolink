@@ -1488,13 +1488,54 @@ pub(crate) fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 // Rows
 // ---------------------------------------------------------------------------
 
+/// Lay out `add` left to right, pushed against the right edge of the space
+/// left in `ui`. Controls sit where a right-to-left layout would put them,
+/// but keyboard focus and screen readers meet them in reading order: egui
+/// focuses widgets in the order they are made, and a right-to-left layout
+/// makes the rightmost first. The width is measured on the previous pass;
+/// when it changes, the pass is discarded and laid out again before
+/// anything is shown.
+pub fn trailing<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let avail = ui.available_rect_before_wrap();
+    let key = ui.auto_id_with("brolink.trailing");
+    let known: f32 = ui.data(|d| d.get_temp(key)).unwrap_or(0.0);
+    let w = known.min(avail.width()).max(0.0);
+    let rect = Rect::from_min_max(Pos2::new(avail.max.x - w, avail.min.y), avail.max);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let inner = add(&mut child);
+    let used = child.min_rect();
+    let got = if used.is_positive() {
+        used.width()
+    } else {
+        0.0
+    };
+    if (got - known).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(key, got));
+        ui.ctx().request_discard("trailing controls changed width");
+    }
+    let response = ui.allocate_rect(
+        if used.is_positive() {
+            used
+        } else {
+            Rect::from_min_size(avail.right_top(), Vec2::ZERO)
+        },
+        Sense::hover(),
+    );
+    InnerResponse::new(inner, response)
+}
+
 /// A row with text on the left and controls on the right. The controls are
 /// laid out first, so the text gets exactly the width they leave and wraps
 /// there instead of running underneath them. When they leave too little,
 /// the text takes the full width below the controls.
 ///
 /// `min_h` is the row's height with padding; controls centre in it and
-/// text starts `text_top` below its top.
+/// text starts `text_top` below its top. Controls are added left to right
+/// (see [`trailing`]).
 fn split_row<R>(
     ui: &mut Ui,
     min_h: f32,
@@ -1507,11 +1548,19 @@ fn split_row<R>(
     let mut right_ui = ui.new_child(
         UiBuilder::new()
             .max_rect(row)
-            .layout(Layout::right_to_left(Align::Center)),
+            .layout(Layout::top_down(Align::Min)),
     );
-    right_ui.spacing_mut().item_spacing.x = space::SM;
-    let r = right(&mut right_ui);
-    let used = right_ui.min_rect();
+    let placed = trailing(&mut right_ui, |ui| {
+        ui.spacing_mut().item_spacing.x = space::SM;
+        ui.set_min_height(min_h);
+        right(ui)
+    });
+    let r = placed.inner;
+    let used = if placed.response.rect.width() > 0.0 {
+        placed.response.rect
+    } else {
+        Rect::NOTHING
+    };
     let taken = if used.is_positive() {
         row.max.x - used.min.x + space::LG
     } else {
@@ -1534,7 +1583,11 @@ fn split_row<R>(
     left_ui.spacing_mut().item_spacing.y = space::XXS;
     left(&mut left_ui);
     let bottom = (left_ui.min_rect().max.y + text_top)
-        .max(used.max.y)
+        .max(if used.is_positive() {
+            used.max.y
+        } else {
+            row.min.y
+        })
         .max(row.min.y + min_h);
     ui.allocate_rect(
         Rect::from_min_max(row.min, Pos2::new(row.max.x, bottom)),
@@ -1603,8 +1656,8 @@ pub fn toggle_row(ui: &mut Ui, on: &mut bool, label: &str, hint: Option<&str>) -
 pub const NOTICES: &str = include_str!("../../../NOTICE");
 
 /// A row in a list of machines or devices: an optional status dot, the
-/// name and one line of detail on the left, actions on the right. Add the
-/// primary action first; it lands rightmost. The detail stays on one line
+/// name and one line of detail on the left, actions on the right, added in
+/// reading order (left to right). The detail stays on one line
 /// and is cut with an ellipsis rather than wrapping; the full text shows
 /// on hover.
 pub fn list_row(
