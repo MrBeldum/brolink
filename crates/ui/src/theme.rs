@@ -1,94 +1,215 @@
-//! Palette, typography and widget styling.
+//! Design tokens: colour, type, spacing, radii and elevation, and the egui
+//! style built from them.
 //!
-//! One dark theme, deliberately: the client spends its life next to a black
-//! video surface, and the host is a status window people glance at. Everything
-//! is derived from the handful of colours in [`Palette`], so a retune is a
-//! change to one struct.
+//! One dark theme, deliberately. The client spends its life next to a black
+//! video surface and the product site (bardbro.com) is black, white and
+//! hairlines, so the app is too: neutral surfaces a step apart, one text
+//! colour in three strengths, white for the primary action and for "on",
+//! and colour only where it carries meaning — green, amber and red for
+//! status, and the logo's violet for keyboard focus, selection and
+//! progress. Screens take every colour, size and distance from here; a
+//! retune is a change to this file.
 
 use egui::{
-    epaint::Shadow, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
-    FontTweak, Margin, Stroke, TextStyle, Vec2, Visuals,
+    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Margin,
+    Stroke, TextStyle, Vec2, Visuals,
 };
 use std::sync::Arc;
 
-/// The colours the two apps are built from.
+// ---------------------------------------------------------------------------
+// Colour
+// ---------------------------------------------------------------------------
+
+/// Every colour the two windows and the stream overlay use.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
-    /// Window background.
+    /// Window background (elevation 0).
     pub bg: Color32,
-    /// Cards and panels that sit on the background.
+    /// Grouped lists, cards and panels on the background (elevation 1).
     pub surface: Color32,
-    /// Inputs and buttons that sit on a card.
+    /// Controls on a surface: buttons, fields, the off track of a switch.
     pub raised: Color32,
-    /// The same, hovered.
+    /// A raised control under the pointer, and a hovered list row.
     pub raised_hover: Color32,
-    /// Hairlines around cards and controls.
-    pub border: Color32,
-    /// Hairlines that should read a little louder (hovered controls).
-    pub border_strong: Color32,
-    /// Sunken areas: text boxes, the log.
+    /// A raised control being pressed.
+    pub pressed: Color32,
+    /// Sunken areas: logs and blocks of code.
     pub well: Color32,
-    /// Primary text.
+    /// Floating panels over the stream picture.
+    pub overlay: Color32,
+    /// Separators between rows and around groups.
+    pub hairline: Color32,
+    /// Outlines of controls.
+    pub border: Color32,
+    /// Outlines of hovered controls.
+    pub border_strong: Color32,
+    /// Primary text. 16:1 on `bg`.
     pub text: Color32,
-    /// Secondary text: hints, captions, metadata.
-    pub muted: Color32,
-    /// Tertiary text: disabled labels, placeholders.
-    pub faint: Color32,
-    /// Brand accent. Foreground colour: links, warnings, PIN digits, status
-    /// pills and selection. Readable at 4.5:1 on both `bg` and `surface`.
+    /// Secondary text: descriptions, metadata. 7:1 on `surface`.
+    pub text_secondary: Color32,
+    /// Tertiary text: labels, captions, small print. At least 4.5:1 on
+    /// every surface up to `raised_hover`.
+    pub text_tertiary: Color32,
+    /// Disabled labels. Exempt from contrast minimums; never the only cue.
+    pub text_disabled: Color32,
+    /// The primary button's fill and a switch that is on.
+    pub primary: Color32,
+    pub primary_hover: Color32,
+    pub primary_pressed: Color32,
+    /// Text and marks drawn on `primary`.
+    pub on_primary: Color32,
+    /// The logo's violet, lightened to read on the dark surfaces. Keyboard
+    /// focus, text selection, progress. Never a fill behind text.
     pub accent: Color32,
-    /// The accent as a solid fill (the primary button, the selected segment).
-    /// White text on this fill holds 4.5:1 in idle, hover and pressed states.
-    pub accent_fill: Color32,
-    /// Secondary brand colour from the logo (pink). Decorative only — never
-    /// carries text: white on this fill is 2.87:1.
-    pub accent2: Color32,
-    /// Text drawn on top of the accent fill.
-    pub on_accent: Color32,
+    /// Healthy, online, ready.
     pub success: Color32,
+    /// Needs attention; still works.
+    pub warning: Color32,
+    /// Broken, failed, destructive. Text on dark surfaces.
     pub danger: Color32,
-    pub info: Color32,
+    /// Fill behind white text on a destructive button.
+    pub danger_fill: Color32,
 }
 
-/// Logo-derived dark palette (`logo.webp`: violet / pink / cyan on near-black).
-///
-/// Locked tokens: bg `#07080c`, surface `#101219`, accent2 `#f05fd6`,
-/// info `#22d3ee`, on_accent white. The logo violet is split into two roles:
-/// `accent` (`#8d5ef6`, the `#8b5cf6` logo violet lightened) is foreground
-/// text and reads 4.5:1 on both `bg` and `surface`; `accent_fill` (`#8257f6`,
-/// the logo violet darkened) is the solid button fill whose white text holds
-/// 4.5:1 in every state. One violet cannot do both at 4.5:1 — the luminance
-/// windows are disjoint, so the roles are separate tokens.
+/// The palette. Contrast ratios are checked by the tests at the bottom.
 pub const PALETTE: Palette = Palette {
-    bg: Color32::from_rgb(7, 8, 12),        // #07080c
-    surface: Color32::from_rgb(16, 18, 25), // #101219
-    raised: Color32::from_rgb(25, 28, 38),
-    raised_hover: Color32::from_rgb(34, 38, 50),
-    border: Color32::from_rgb(30, 34, 46),
-    border_strong: Color32::from_rgb(54, 58, 78),
-    well: Color32::from_rgb(5, 6, 10),
-    text: Color32::from_rgb(232, 236, 242),
-    muted: Color32::from_rgb(143, 154, 172),
-    faint: Color32::from_rgb(92, 102, 118),
-    accent: Color32::from_rgb(141, 94, 246),      // #8d5ef6
-    accent_fill: Color32::from_rgb(130, 87, 246), // #8257f6
-    accent2: Color32::from_rgb(240, 95, 214),     // #f05fd6
-    on_accent: Color32::WHITE,
-    success: Color32::from_rgb(63, 185, 80),
-    danger: Color32::from_rgb(248, 81, 73),
-    info: Color32::from_rgb(34, 211, 238), // #22d3ee
+    bg: Color32::from_rgb(0x0a, 0x0a, 0x0a),
+    surface: Color32::from_rgb(0x11, 0x11, 0x11),
+    raised: Color32::from_rgb(0x1a, 0x1a, 0x1a),
+    raised_hover: Color32::from_rgb(0x24, 0x24, 0x24),
+    pressed: Color32::from_rgb(0x2e, 0x2e, 0x2e),
+    well: Color32::from_rgb(0x06, 0x06, 0x06),
+    overlay: Color32::from_rgba_premultiplied(0x08, 0x08, 0x08, 0xeb),
+    hairline: Color32::from_rgb(0x24, 0x24, 0x24),
+    border: Color32::from_rgb(0x36, 0x36, 0x36),
+    border_strong: Color32::from_rgb(0x4a, 0x4a, 0x4a),
+    text: Color32::from_rgb(0xed, 0xed, 0xed),
+    text_secondary: Color32::from_rgb(0xa1, 0xa1, 0xa1),
+    text_tertiary: Color32::from_rgb(0x8c, 0x8c, 0x8c),
+    text_disabled: Color32::from_rgb(0x5e, 0x5e, 0x5e),
+    primary: Color32::from_rgb(0xed, 0xed, 0xed),
+    primary_hover: Color32::from_rgb(0xd4, 0xd4, 0xd4),
+    primary_pressed: Color32::from_rgb(0xbd, 0xbd, 0xbd),
+    on_primary: Color32::from_rgb(0x0a, 0x0a, 0x0a),
+    accent: Color32::from_rgb(0xa7, 0x8b, 0xfa),
+    success: Color32::from_rgb(0x4c, 0xc3, 0x8a),
+    warning: Color32::from_rgb(0xf0, 0xb2, 0x49),
+    danger: Color32::from_rgb(0xff, 0x63, 0x69),
+    danger_fill: Color32::from_rgb(0xcd, 0x2b, 0x31),
 };
 
-/// Font families registered by [`apply`], for text that needs a specific
-/// weight. Everything else goes through [`FontFamily::Proportional`], which
-/// resolves to Inter Regular.
-pub const MEDIUM: &str = "Inter-Medium";
-pub const SEMIBOLD: &str = "Inter-SemiBold";
+// ---------------------------------------------------------------------------
+// Spacing, sizes, radii
+// ---------------------------------------------------------------------------
 
-/// Named text styles beyond egui's built-ins.
-pub const TITLE: &str = "title";
-pub const DISPLAY: &str = "display";
-pub const CAPTION: &str = "caption";
+/// The spacing scale, on a 4-point grid. Layout uses these and nothing in
+/// between.
+pub mod space {
+    pub const XXS: f32 = 2.0;
+    pub const XS: f32 = 4.0;
+    pub const SM: f32 = 8.0;
+    pub const MD: f32 = 12.0;
+    pub const LG: f32 = 16.0;
+    pub const XL: f32 = 24.0;
+    pub const XXL: f32 = 32.0;
+    pub const XXXL: f32 = 48.0;
+}
+
+/// Fixed sizes of recurring elements.
+pub mod size {
+    use egui::Vec2;
+    /// Height of a button, field or select.
+    pub const CONTROL: f32 = 32.0;
+    /// Height of a compact control (the stream toolbar, menus).
+    pub const CONTROL_SM: f32 = 28.0;
+    /// The smallest target a pointer is asked to hit (WCAG 2.5.8).
+    pub const HIT_MIN: f32 = 24.0;
+    /// Height of the window's top bar.
+    pub const TOP_BAR: f32 = 48.0;
+    /// Height of the stream toolbar.
+    pub const TOOLBAR: f32 = 44.0;
+    /// Minimum height of a row in a list or a settings group.
+    pub const ROW: f32 = 44.0;
+    /// Diameter of a status dot.
+    pub const DOT: f32 = 8.0;
+    /// Width of the switch control.
+    pub const SWITCH: Vec2 = Vec2::new(36.0, 20.0);
+}
+
+/// Corner radii. Small and consistent: controls are nearly square, as on
+/// the product site; only floating panels round off more.
+pub mod radius {
+    /// Buttons, fields, keycaps, tags.
+    pub const SM: u8 = 4;
+    /// Cards, grouped lists, notices, menus.
+    pub const MD: u8 = 6;
+    /// Floating panels over the stream.
+    pub const LG: u8 = 10;
+}
+
+/// Maximum widths of the content column, per kind of page.
+pub mod column {
+    /// Lists: the machine list.
+    pub const WIDE: f32 = 880.0;
+    /// Forms: settings, sharing.
+    pub const NARROW: f32 = 720.0;
+}
+
+/// Shadows, by how far a layer floats above the window.
+pub mod elevation {
+    use egui::{epaint::Shadow, Color32};
+    /// Menus, dropdowns, tooltips.
+    pub const POPUP: Shadow = Shadow {
+        offset: [0, 8],
+        blur: 24,
+        spread: 0,
+        color: Color32::from_black_alpha(140),
+    };
+    /// Panels floating over the stream picture.
+    pub const OVERLAY: Shadow = Shadow {
+        offset: [0, 12],
+        blur: 32,
+        spread: 0,
+        color: Color32::from_black_alpha(160),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Type
+// ---------------------------------------------------------------------------
+
+/// Font families registered by [`apply`]. [`FontFamily::Proportional`] is
+/// Geist Regular and [`FontFamily::Monospace`] is Geist Mono Regular; these
+/// name the heavier cuts.
+pub const MEDIUM: &str = "Geist-Medium";
+pub const SEMIBOLD: &str = "Geist-SemiBold";
+pub const MONO_MEDIUM: &str = "GeistMono-Medium";
+
+/// The type scale, in points. Every piece of text uses one of these.
+pub mod text {
+    /// A page's title: "Machines", "Settings", a machine's name.
+    pub const PAGE_TITLE: f32 = 22.0;
+    /// A card or dialog title.
+    pub const TITLE: f32 = 15.0;
+    /// Running text and controls.
+    pub const BODY: f32 = 14.0;
+    /// Descriptions under a label, metadata, small print.
+    pub const CAPTION: f32 = 12.5;
+    /// Mono uppercase section labels, as on the product site.
+    pub const LABEL: f32 = 11.0;
+    /// Mono data: addresses, versions, rates, logs.
+    pub const MONO: f32 = 12.5;
+    /// The pairing PIN.
+    pub const DISPLAY: f32 = 32.0;
+    /// Tracking of the mono uppercase labels (0.06 em at 11 pt).
+    pub const LABEL_TRACKING: f32 = 0.66;
+    /// Tracking of page titles (-0.02 em).
+    pub const TITLE_TRACKING: f32 = -0.44;
+}
+
+pub fn regular(size: f32) -> FontId {
+    FontId::proportional(size)
+}
 
 pub fn medium(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(MEDIUM.into()))
@@ -98,12 +219,20 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
 }
 
-pub fn title() -> TextStyle {
-    TextStyle::Name(TITLE.into())
+pub fn mono(size: f32) -> FontId {
+    FontId::monospace(size)
 }
 
-pub fn display() -> TextStyle {
-    TextStyle::Name(DISPLAY.into())
+pub fn mono_medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(MONO_MEDIUM.into()))
+}
+
+/// Named text styles beyond egui's built-ins.
+pub const TITLE: &str = "title";
+pub const CAPTION: &str = "caption";
+
+pub fn title() -> TextStyle {
+    TextStyle::Name(TITLE.into())
 }
 
 pub fn caption() -> TextStyle {
@@ -116,102 +245,117 @@ pub fn stroke(width: f32, color: Color32) -> Stroke {
     Stroke::new(width, color)
 }
 
-/// Corner radius used for cards and other large containers.
-pub const RADIUS_LG: u8 = 12;
-/// Corner radius used for controls.
-pub const RADIUS: u8 = 8;
-
 /// Install the fonts and style on a context. Call once at startup.
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
     let mut style = (*ctx.style()).clone();
     style.visuals = visuals();
     style.text_styles = [
-        (TextStyle::Small, FontId::proportional(12.0)),
-        (TextStyle::Body, FontId::proportional(14.0)),
-        (TextStyle::Button, medium(14.0)),
-        (TextStyle::Heading, semibold(20.0)),
-        (TextStyle::Monospace, FontId::monospace(13.0)),
-        (title(), semibold(15.0)),
-        (display(), semibold(40.0)),
-        (caption(), FontId::proportional(12.5)),
+        (TextStyle::Small, regular(text::CAPTION)),
+        (TextStyle::Body, regular(text::BODY)),
+        (TextStyle::Button, medium(text::BODY)),
+        (TextStyle::Heading, semibold(text::PAGE_TITLE)),
+        (TextStyle::Monospace, mono(text::MONO)),
+        (title(), semibold(text::TITLE)),
+        (caption(), regular(text::CAPTION)),
     ]
     .into();
     let sp = &mut style.spacing;
-    sp.item_spacing = Vec2::new(8.0, 8.0);
-    sp.button_padding = Vec2::new(14.0, 7.0);
-    sp.interact_size = Vec2::new(40.0, 30.0);
-    sp.indent = 18.0;
-    sp.slider_width = 220.0;
-    sp.slider_rail_height = 6.0;
-    sp.text_edit_width = 320.0;
-    sp.combo_width = 140.0;
+    sp.item_spacing = Vec2::new(space::SM, space::SM);
+    sp.button_padding = Vec2::new(space::MD, 6.0);
+    sp.interact_size = Vec2::new(40.0, size::CONTROL);
+    sp.indent = space::LG;
+    sp.slider_width = 200.0;
+    sp.slider_rail_height = 4.0;
+    sp.text_edit_width = 240.0;
+    sp.combo_width = 160.0;
+    sp.combo_height = 320.0;
     sp.icon_width = 16.0;
     sp.icon_width_inner = 10.0;
     sp.icon_spacing = 6.0;
-    sp.window_margin = Margin::same(14);
-    sp.menu_margin = Margin::same(8);
-    sp.tooltip_width = 360.0;
-    sp.scroll.bar_width = 8.0;
+    sp.menu_width = 220.0;
+    sp.menu_spacing = space::XS;
+    sp.window_margin = Margin::same(space::LG as i8);
+    sp.menu_margin = Margin::same(space::XS as i8);
+    sp.tooltip_width = 320.0;
+    sp.scroll.bar_width = 6.0;
     sp.scroll.floating = true;
-    sp.scroll.bar_inner_margin = 4.0;
+    sp.scroll.bar_inner_margin = space::XS;
     style.url_in_tooltip = true;
+    // Popups, menus and tooltips appear and go at once: a fade would ask
+    // for repaints the stream view does not want.
+    style.animation_time = 0.1;
     ctx.set_style(style);
+}
+
+fn font(bytes: &'static [u8]) -> Arc<FontData> {
+    // Geist sits a hair high on egui's line box; nudge it so text centres
+    // in buttons and rows.
+    let mut data = FontData::from_static(bytes);
+    data.tweak = FontTweak {
+        y_offset_factor: 0.04,
+        ..Default::default()
+    };
+    Arc::new(data)
 }
 
 fn fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
-    // Inter is bundled so the two apps look the same on every machine; the
-    // egui defaults stay in the family lists as fallbacks for symbols and
-    // emoji Inter does not carry.
-    fonts.font_data.insert(
-        "Inter".into(),
-        Arc::new(tweaked(FontData::from_static(include_bytes!(
-            "../assets/Inter-Regular.ttf"
-        )))),
+    // Geist and Geist Mono are bundled so every machine draws the same
+    // letters as the product site. egui's own fonts stay at the end of each
+    // family as fallbacks for glyphs Geist does not carry.
+    let add = |fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]| {
+        fonts.font_data.insert(name.into(), font(bytes));
+    };
+    add(
+        &mut fonts,
+        "Geist",
+        include_bytes!("../assets/Geist-Regular.ttf"),
     );
-    fonts.font_data.insert(
-        MEDIUM.into(),
-        Arc::new(tweaked(FontData::from_static(include_bytes!(
-            "../assets/Inter-Medium.ttf"
-        )))),
+    add(
+        &mut fonts,
+        MEDIUM,
+        include_bytes!("../assets/Geist-Medium.ttf"),
     );
-    fonts.font_data.insert(
-        SEMIBOLD.into(),
-        Arc::new(tweaked(FontData::from_static(include_bytes!(
-            "../assets/Inter-SemiBold.ttf"
-        )))),
+    add(
+        &mut fonts,
+        SEMIBOLD,
+        include_bytes!("../assets/Geist-SemiBold.ttf"),
     );
-    let fallbacks: Vec<String> = fonts
-        .families
-        .get(&FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-    let with = |name: &str| {
+    add(
+        &mut fonts,
+        "GeistMono",
+        include_bytes!("../assets/GeistMono-Regular.ttf"),
+    );
+    add(
+        &mut fonts,
+        MONO_MEDIUM,
+        include_bytes!("../assets/GeistMono-Medium.ttf"),
+    );
+    let fallbacks = |family: FontFamily| -> Vec<String> {
+        fonts.families.get(&family).cloned().unwrap_or_default()
+    };
+    let sans = fallbacks(FontFamily::Proportional);
+    let monos = fallbacks(FontFamily::Monospace);
+    let with = |name: &str, rest: &[String]| {
         let mut v = vec![name.to_string()];
-        v.extend(fallbacks.iter().cloned());
+        v.extend(rest.iter().cloned());
         v
     };
+    let families = [
+        (FontFamily::Proportional, with("Geist", &sans)),
+        (FontFamily::Name(MEDIUM.into()), with(MEDIUM, &sans)),
+        (FontFamily::Name(SEMIBOLD.into()), with(SEMIBOLD, &sans)),
+        (FontFamily::Monospace, with("GeistMono", &monos)),
+        (
+            FontFamily::Name(MONO_MEDIUM.into()),
+            with(MONO_MEDIUM, &monos),
+        ),
+    ];
+    for (family, list) in families {
+        fonts.families.insert(family, list);
+    }
     fonts
-        .families
-        .insert(FontFamily::Proportional, with("Inter"));
-    fonts
-        .families
-        .insert(FontFamily::Name(MEDIUM.into()), with(MEDIUM));
-    fonts
-        .families
-        .insert(FontFamily::Name(SEMIBOLD.into()), with(SEMIBOLD));
-    fonts
-}
-
-/// Inter sits a touch high on its line at egui's default metrics; nudge it
-/// so text centres in buttons and pills.
-fn tweaked(mut data: FontData) -> FontData {
-    data.tweak = FontTweak {
-        y_offset_factor: 0.02,
-        ..Default::default()
-    };
-    data
 }
 
 fn visuals() -> Visuals {
@@ -221,25 +365,15 @@ fn visuals() -> Visuals {
     v.panel_fill = p.bg;
     v.window_fill = p.surface;
     v.window_stroke = stroke(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(RADIUS_LG);
-    v.window_shadow = Shadow {
-        offset: [0, 8],
-        blur: 24,
-        spread: 0,
-        color: Color32::from_black_alpha(120),
-    };
-    v.popup_shadow = Shadow {
-        offset: [0, 6],
-        blur: 18,
-        spread: 0,
-        color: Color32::from_black_alpha(110),
-    };
-    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_corner_radius = CornerRadius::same(radius::LG);
+    v.window_shadow = elevation::OVERLAY;
+    v.popup_shadow = elevation::POPUP;
+    v.menu_corner_radius = CornerRadius::same(radius::MD);
     v.extreme_bg_color = p.well;
     v.faint_bg_color = p.raised;
     v.code_bg_color = p.well;
-    v.hyperlink_color = p.accent;
-    v.warn_fg_color = p.accent;
+    v.hyperlink_color = p.text;
+    v.warn_fg_color = p.warning;
     v.error_fg_color = p.danger;
     v.button_frame = true;
     v.collapsing_header_frame = false;
@@ -247,21 +381,23 @@ fn visuals() -> Visuals {
     v.striped = false;
     v.slider_trailing_fill = true;
     v.handle_shape = egui::style::HandleShape::Circle;
-    v.selection.bg_fill = p.accent.gamma_multiply(0.35);
+    v.selection.bg_fill = p.accent.gamma_multiply(0.30);
     v.selection.stroke = stroke(1.0, p.accent);
     v.text_cursor.stroke = stroke(2.0, p.accent);
+    v.interact_cursor = Some(egui::CursorIcon::PointingHand);
+    v.clip_rect_margin = 0.0;
 
     let w = &mut v.widgets;
-    let r = CornerRadius::same(RADIUS);
+    let r = CornerRadius::same(radius::SM);
     w.noninteractive.bg_fill = p.surface;
     w.noninteractive.weak_bg_fill = p.surface;
-    w.noninteractive.bg_stroke = stroke(1.0, p.border);
-    w.noninteractive.fg_stroke = stroke(1.0, p.text);
+    w.noninteractive.bg_stroke = stroke(1.0, p.hairline);
+    w.noninteractive.fg_stroke = stroke(1.0, p.text_secondary);
     w.noninteractive.corner_radius = r;
 
     w.inactive.bg_fill = p.raised;
     w.inactive.weak_bg_fill = p.raised;
-    w.inactive.bg_stroke = stroke(1.0, p.border_strong.gamma_multiply(0.6));
+    w.inactive.bg_stroke = stroke(1.0, p.border);
     w.inactive.fg_stroke = stroke(1.0, p.text);
     w.inactive.corner_radius = r;
     w.inactive.expansion = 0.0;
@@ -269,14 +405,16 @@ fn visuals() -> Visuals {
     w.hovered.bg_fill = p.raised_hover;
     w.hovered.weak_bg_fill = p.raised_hover;
     w.hovered.bg_stroke = stroke(1.0, p.border_strong);
-    w.hovered.fg_stroke = stroke(1.5, p.text);
+    w.hovered.fg_stroke = stroke(1.0, p.text);
     w.hovered.corner_radius = r;
     w.hovered.expansion = 0.0;
 
-    w.active.bg_fill = p.border_strong;
-    w.active.weak_bg_fill = p.border_strong;
-    w.active.bg_stroke = stroke(1.0, p.border_strong);
-    w.active.fg_stroke = stroke(1.5, p.text);
+    // egui draws a focused built-in widget (select, slider, menu item) with
+    // the active visuals, so this outline is also their focus ring.
+    w.active.bg_fill = p.pressed;
+    w.active.weak_bg_fill = p.pressed;
+    w.active.bg_stroke = stroke(1.5, p.accent);
+    w.active.fg_stroke = stroke(1.0, p.text);
     w.active.corner_radius = r;
     w.active.expansion = 0.0;
 
@@ -288,10 +426,8 @@ fn visuals() -> Visuals {
     v
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
+/// WCAG 2 contrast ratio between two opaque colours.
+pub fn contrast(fg: Color32, bg: Color32) -> f64 {
     fn lin(c: u8) -> f64 {
         let s = f64::from(c) / 255.0;
         if s <= 0.04045 {
@@ -300,42 +436,75 @@ mod tests {
             ((s + 0.055) / 1.055).powf(2.4)
         }
     }
+    let lum = |c: Color32| 0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b());
+    let (a, b) = (lum(fg), lum(bg));
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
 
-    fn lum(c: Color32) -> f64 {
-        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn contrast(fg: Color32, bg: Color32) -> f64 {
-        let (a, b) = (lum(fg), lum(bg));
-        let (hi, lo) = if a > b { (a, b) } else { (b, a) };
-        (hi + 0.05) / (lo + 0.05)
+    const AA: f64 = 4.5;
+    /// WCAG 1.4.11: meaningful non-text marks (status dots, focus rings).
+    const NON_TEXT: f64 = 3.0;
+
+    #[test]
+    fn every_text_colour_meets_aa_on_every_surface_it_sits_on() {
+        let p = PALETTE;
+        let surfaces = [p.bg, p.surface, p.raised, p.raised_hover, Color32::BLACK];
+        for bg in surfaces {
+            for (name, fg) in [
+                ("text", p.text),
+                ("secondary", p.text_secondary),
+                ("tertiary", p.text_tertiary),
+                ("success", p.success),
+                ("warning", p.warning),
+                ("danger", p.danger),
+                ("accent", p.accent),
+            ] {
+                let c = contrast(fg, bg);
+                assert!(c >= AA, "{name} on {bg:?} is {c:.2}:1");
+            }
+        }
     }
 
     #[test]
-    fn logo_tokens_match_specified_hex() {
+    fn filled_buttons_keep_their_label_readable_in_every_state() {
         let p = PALETTE;
-        assert_eq!(p.bg, Color32::from_rgb(7, 8, 12));
-        assert_eq!(p.surface, Color32::from_rgb(16, 18, 25));
-        assert_eq!(p.accent, Color32::from_rgb(141, 94, 246));
-        assert_eq!(p.accent_fill, Color32::from_rgb(130, 87, 246));
-        assert_eq!(p.accent2, Color32::from_rgb(240, 95, 214));
-        assert_eq!(p.info, Color32::from_rgb(34, 211, 238));
-        assert_eq!(p.on_accent, Color32::WHITE);
-        assert_ne!(p.well, p.bg);
+        for fill in [p.primary, p.primary_hover, p.primary_pressed] {
+            assert!(contrast(p.on_primary, fill) >= AA, "{fill:?}");
+        }
+        assert!(contrast(Color32::WHITE, p.danger_fill) >= AA);
     }
 
     #[test]
-    fn text_on_surfaces_meets_aa() {
+    fn focus_and_status_marks_stand_out_from_the_background() {
         let p = PALETTE;
-        assert!(contrast(p.text, p.bg) >= 7.0);
-        assert!(contrast(p.text, p.surface) >= 7.0);
-        assert!(contrast(p.muted, p.bg) >= 4.5);
-        assert!(contrast(p.info, p.bg) >= 4.5);
-        assert!(contrast(p.accent2, p.bg) >= 4.5);
-        // Foreground accent (links, warnings, pills) must read on both.
-        assert!(contrast(p.accent, p.bg) >= 4.5);
-        assert!(contrast(p.accent, p.surface) >= 4.5);
-        // White button text on the fill must read at 4.5:1.
-        assert!(contrast(p.on_accent, p.accent_fill) >= 4.5);
+        for mark in [p.accent, p.success, p.warning, p.danger, p.text_tertiary] {
+            assert!(contrast(mark, p.bg) >= NON_TEXT, "{mark:?}");
+            assert!(contrast(mark, p.surface) >= NON_TEXT, "{mark:?}");
+        }
+        // The focus ring is drawn outside a control, two points clear of
+        // it, so it is always seen against the background.
+    }
+
+    #[test]
+    fn the_scales_step_on_the_grid() {
+        for s in [
+            space::XS,
+            space::SM,
+            space::MD,
+            space::LG,
+            space::XL,
+            space::XXL,
+            space::XXXL,
+        ] {
+            assert_eq!(s % 4.0, 0.0, "{s} is off the 4-point grid");
+        }
+        const { assert!(radius::SM < radius::MD && radius::MD < radius::LG) };
+        const { assert!(size::HIT_MIN <= size::SWITCH.y + 4.0) };
+        const { assert!(size::CONTROL_SM >= size::HIT_MIN) };
     }
 }

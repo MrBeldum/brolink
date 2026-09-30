@@ -71,14 +71,16 @@ impl Path {
         }
     }
 
-    /// A DERP detour is the one thing worth red; a relay of your own is a
-    /// detour too, but one sized to the round trip, so it gets the colour a
-    /// long direct path gets.
+    /// A DERP detour is the one thing worth a warning: it works, but it is
+    /// shared and often fixable (see [`explain`]). A relay of your own is a
+    /// detour chosen on purpose, and a long direct path is just distance,
+    /// so both are plain; only a short direct path is green. Nothing about
+    /// a path is red: red means broken.
     pub fn tone(&self) -> Tone {
         match (path_kind(self), self.rtt_ms) {
-            (Some(PathKind::Derp), _) => Tone::Danger,
-            (Some(PathKind::PeerRelay), _) => Tone::Accent,
-            (Some(PathKind::Direct), Some(ms)) if ms >= 80 => Tone::Accent,
+            (Some(PathKind::Derp), _) => Tone::Warning,
+            (Some(PathKind::PeerRelay), _) => Tone::Neutral,
+            (Some(PathKind::Direct), Some(ms)) if ms >= 80 => Tone::Neutral,
             (Some(PathKind::Direct), _) => Tone::Success,
             (None, _) => Tone::Neutral,
         }
@@ -197,7 +199,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(p.label(), "Relayed via Tokyo · 210 ms");
-        assert_eq!(p.tone(), Tone::Danger);
+        assert_eq!(
+            p.tone(),
+            Tone::Warning,
+            "a detour worth fixing, not a failure"
+        );
         let p = Path {
             direct: Some(true),
             relay: "tok".into(),
@@ -213,8 +219,8 @@ mod tests {
         };
         assert_eq!(
             p.tone(),
-            Tone::Accent,
-            "a long round trip is worth a colour"
+            Tone::Neutral,
+            "a long round trip is distance, not a fault"
         );
         assert_eq!(Path::default().label(), "Path unknown");
         assert_eq!(Path::default().tone(), Tone::Neutral);
@@ -237,7 +243,7 @@ mod tests {
             rtt_ms: Some(60),
         };
         assert_eq!(p.label(), "Via your relay · 60 ms");
-        assert_eq!(p.tone(), Tone::Accent, "a detour, not an alarm");
+        assert_eq!(p.tone(), Tone::Neutral, "a detour chosen on purpose");
         assert!(!p.label().contains("Tokyo"));
 
         // Given: the relay is named before any traffic has flowed.
@@ -246,7 +252,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(early.label(), "Via your relay");
-        assert_eq!(early.tone(), Tone::Accent);
+        assert_eq!(early.tone(), Tone::Neutral);
 
         // Given: a direct path holds while Tailscale still names the relay.
         let direct = Path {

@@ -4,6 +4,54 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- The window is redesigned around one design system, in the product
+  site's black, white and hairlines, set in Geist and Geist Mono. Colour
+  now means something: green for ready, amber for needs attention, red
+  for broken, and the logo's violet only for keyboard focus and
+  progress. Every text colour meets WCAG AA on every surface it sits on;
+  the old footer and captions did not.
+- Tabs across the top: **Machines**, **Sharing** and **Settings**
+  (Command-1, 2 and Command-comma on a Mac; Ctrl elsewhere; Escape goes
+  back). The Sharing tab is new in the unified app: this machine's setup,
+  what it reports (Tailscale, streaming engine, network, Wake-on-LAN,
+  controllers), the devices paired with it, its options and its log.
+  Until now the unified window showed only a one-line summary and a
+  setup button; paired devices, the log and Stop service were
+  unreachable.
+- The machine list shows each machine's state as a dot and one line,
+  with **Connect** (or **Wake and connect**) and a menu for Wake, Test
+  wake, Sleep, Restart, Shut down and Copy Tailscale address. Buttons
+  stay put and dim while a connection is in progress instead of
+  disappearing. This machine leads the list and opens its Sharing tab.
+- Connecting says what is happening and what to expect; pairing shows
+  the PIN in boxes. A failure is titled "Couldn't connect to …" or
+  "… disconnected", with **Try again**, and a lighter profile is offered
+  only when the stream itself failed. The empty list, "looking",
+  Tailscale missing and Tailscale stopped each say what to do.
+- Settings is grouped (Stream, Window and input, Power, Updates, Relay,
+  About) and the quality profile is one control: Recommended, Smooth,
+  Balanced, Sharp or Custom. Mouse capture is now a setting as well as a
+  toolbar choice. "Command acts as Ctrl" shows only on a Mac, and "Keep
+  this PC awake" only on Windows, where it does something.
+- In a stream, the toolbar's menus look and behave the same, open
+  towards the window's middle, and fold into one **More** menu on narrow
+  windows. The host key is shown as keycaps (control option on a Mac,
+  Ctrl Alt elsewhere) when a stream starts and on the toolbar. The
+  connecting screen has a **Cancel** button, so leaving no longer needs
+  the host key. Stream settings and Stream performance are proper
+  panels with a close button; Escape closes Stream settings.
+- A relayed path is amber, not red: it works, and Connection details
+  says how to get a direct one.
+- The idle window no longer repaints on a timer (it redrew 2.5 times a
+  second forever), and the Tailscale check that could start a process
+  every two seconds on the UI thread now runs on its own thread.
+  Unpairing and installing the controller driver no longer block the
+  window.
+- The app is about 570 KB smaller: Geist's five cuts replace Inter's
+  three.
+
 ## 4.0.2 (2026-09-22)
 
 - `panel.log` and `service.log` no longer grow without end. Both were
