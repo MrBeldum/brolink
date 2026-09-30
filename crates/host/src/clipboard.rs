@@ -153,7 +153,7 @@ pub fn write(text: &str) -> Result<()> {
 /// stands in for one: it changes whenever different text is copied, which
 /// is all a reader needs to tell a new copy from one it has seen. A fixed
 /// `seq` made every copy on a Mac or Linux desktop look like the last.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg(any(not(windows), test))]
 fn text_seq(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
