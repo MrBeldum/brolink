@@ -7,12 +7,18 @@ GitHub release notes, so each version gets a heading of the form
 ## Unreleased
 
 - The control service again answers only machines signed in to the same
-  Tailscale account. Since 3.x it answered any machine Tailscale could
+  Tailscale account. Since 4.0.0 it answered any machine Tailscale could
   name, so a machine shared in from someone else's tailnet could pair with
   the PC, sleep or restart it, read and write its clipboard, and push it a
   new `brolink-host.exe`. A tagged server such as the relay VPS belongs to
   no account, so it answers the members of its own tailnet, which keeps a
   Mac able to open the VPS desktop.
+- Text copied on a Mac or Linux machine you are streaming from now reaches
+  the machine you are watching on. Only Windows reported a clipboard
+  sequence number; everywhere else it was always 0, so the viewer took
+  every copy for the one it had already seen. On a Linux desktop, text
+  pasted in from the viewer also stays on the clipboard now instead of
+  vanishing when no clipboard manager picks it up.
 
 ## 4.0.2 (2026-09-22)
 
