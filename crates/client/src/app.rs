@@ -1372,7 +1372,7 @@ impl ClientApp {
             } else {
                 format!("{message} · {}", update::ago(checked))
             };
-            ui::setting_row(ui, "Status", Some(&hint), |ui| {
+            ui::setting_row(ui, "Last check", Some(&hint), |ui| {
                 let clicked = ui
                     .add_enabled_ui(self.cfg.auto_update, |ui| {
                         ui::secondary_button(ui, "Check now")

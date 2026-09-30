@@ -439,7 +439,17 @@ impl HostApp {
             .collect();
         let tailscale_item = s.setup.iter().find(|l| l.starts_with("Tailscale"));
         let done = admin_items.is_empty() && tailscale_item.is_none();
-        if done && result.is_none() && !running {
+        if done && !running && !matches!(result, Some(Err(_))) {
+            if result.is_some() {
+                ui::notice(
+                    ui,
+                    Tone::Success,
+                    &format!(
+                        "Setup finished. Other machines can connect to this {} now.",
+                        self.os.noun()
+                    ),
+                );
+            }
             return;
         }
         let migrate = crate::migrate::uses_old_engine(&s.streamer.kind);
@@ -544,7 +554,7 @@ impl HostApp {
                     ui::notice(
                         ui,
                         Tone::Success,
-                        "Setup finished. The list above clears as the service re-checks, within a few seconds.",
+                        "Setup finished. The service is re-checking; the items above clear within a few seconds.",
                     );
                 }
                 Some(Err(e)) => {
@@ -776,7 +786,11 @@ impl HostApp {
                 ui,
                 &mut self.cfg.power_allowed,
                 &format!("Let other machines sleep, restart or shut down this {noun}"),
-                Some(&format!("Any machine your Tailscale access rules allow can ask. Waking this {noun} works only from its own network.")),
+                Some(&if self.os == Os::Windows {
+                    format!("Any machine your Tailscale access rules allow can ask. Waking this {noun} works only from its own network.")
+                } else {
+                    "Any machine your Tailscale access rules allow can ask.".to_string()
+                }),
             ) {
                 self.dirty = true;
             }

@@ -49,8 +49,8 @@ GitHub release notes, so each version gets a heading of the form
   every two seconds on the UI thread now runs on its own thread.
   Unpairing and installing the controller driver no longer block the
   window.
-- The app is about 570 KB smaller: Geist's five cuts replace Inter's
-  three.
+- The app is about 470 KB smaller (11.7 MB for the macOS release
+  binary): Geist's five cuts replace Inter's three.
 
 ## 4.0.2 (2026-09-22)
 
