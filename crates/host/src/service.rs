@@ -1,4 +1,4 @@
-//! The background control service: what a Mac on the tailnet talks to.
+//! The background control service: what the other machines on the tailnet talk to.
 //!
 //! One TCP listener on every interface, one rule for who gets an answer:
 //! loopback (the host's own control panel), or a tailnet machine that
@@ -48,7 +48,7 @@ pub struct Service {
     wake: Mutex<WakeInfo>,
     /// When a magic packet for this PC last arrived.
     wake_seen: Mutex<Option<Instant>>,
-    /// Whether the virtual display lists every size a Mac can ask for;
+    /// Whether the virtual display lists every screen size a viewer can ask for;
     /// `None` on a PC without one. See `virtual_display`.
     virtual_display: Mutex<Option<bool>>,
     install: Mutex<Option<Install>>,
@@ -348,7 +348,7 @@ impl Service {
                     (Some(mac), Some(true)) => self.log(format!("Wake-on-LAN ready on {} ({mac})", w.adapter)),
                     (Some(_), Some(false)) => self.log(format!("Wake-on-LAN is off on {}; run setup", w.adapter)),
                     (Some(_), None) => self.log(format!("Wake-on-LAN state on {} is unknown", w.adapter)),
-                    (None, _) => self.log("no wired adapter with a MAC found; the Mac will not be able to wake this PC"),
+                    (None, _) => self.log("no wired adapter with a MAC found; other machines will not be able to wake this one"),
                 }
                 *cur = w;
             }
@@ -357,10 +357,10 @@ impl Service {
             if *cur != v {
                 match v {
                     Some(true) => {
-                        self.log("the virtual display lists every size a Mac can ask for")
+                        self.log("the virtual display lists every screen size a viewer can ask for")
                     }
                     Some(false) => self
-                        .log("the virtual display is missing sizes a Mac can ask for; run setup"),
+                        .log("the virtual display is missing screen sizes a viewer can ask for; run setup"),
                     None => {}
                 }
                 *cur = v;
@@ -435,7 +435,7 @@ impl Service {
         }
         if *self.virtual_display.lock() == Some(false) {
             setup.push(
-                "The virtual display does not list every screen size a Mac can ask for.".into(),
+                "The virtual display does not list every screen size a viewer can ask for.".into(),
             );
         }
         Status {
@@ -590,10 +590,10 @@ impl Service {
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
-            ("POST", "/v1/display") => self.set_display(req),
+            ("POST", "/v1/display") => self.set_display(peer.ip(), req),
             ("POST", "/v1/pin") => self.pin(req),
-            ("POST", "/v1/power") => self.power(req),
-            ("POST", p) if p == UPDATE_PATH => self.update(req),
+            ("POST", "/v1/power") => self.power(peer.ip(), req),
+            ("POST", p) if p == UPDATE_PATH => self.update(peer.ip(), req),
             ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
                 Ok(c) => Response::json(200, &c),
                 Err(e) => Response::json(500, &Ack::err(format!("clipboard: {e}"))),
@@ -619,7 +619,7 @@ impl Service {
 
     /// A newer `brolink-host.exe` from the Mac: stage it, answer, then swap
     /// it in and hand over. See [`crate::update`].
-    fn update(&self, req: &Request) -> Response {
+    fn update(&self, from: IpAddr, req: &Request) -> Response {
         if !cfg!(windows) {
             // A Mac replaces its own app from GitHub and a container is
             // rebuilt; swapping a Windows executable in here would only
@@ -651,7 +651,7 @@ impl Service {
         match update::stage(req, &exe) {
             Ok(version) => {
                 self.log(format!(
-                    "updating to {version}: the Mac sent the new BroLink Host"
+                    "updating to {version}: {from} sent the new BroLink Host"
                 ));
                 let running = self.update_running.clone();
                 std::thread::spawn(move || {
@@ -732,14 +732,14 @@ impl Service {
     /// setting the Mac can change: an HDR desktop on a PC with no monitor
     /// captures as black, and nobody can reach the PC's settings to fix it
     /// when the picture is the thing that is broken.
-    fn set_display(&self, req: &Request) -> Response {
+    fn set_display(&self, from: IpAddr, req: &Request) -> Response {
         let Ok(want) = req.json::<DisplayRequest>() else {
             return Response::json(400, &Ack::err("expected {\"advanced_color\": true|false}"));
         };
         match crate::display::set_advanced_color(want.advanced_color) {
             Ok(state) => {
                 self.log(format!(
-                    "the Mac turned the HDR desktop {}",
+                    "{from} turned the HDR desktop {}",
                     if want.advanced_color { "on" } else { "off" }
                 ));
                 Response::json(200, &state)
@@ -748,7 +748,7 @@ impl Service {
         }
     }
 
-    fn power(&self, req: &Request) -> Response {
+    fn power(&self, from: IpAddr, req: &Request) -> Response {
         let Ok(p) = req.json::<PowerRequest>() else {
             return Response::json(
                 400,
@@ -770,7 +770,7 @@ impl Service {
             .close_app();
         }
         self.log(format!(
-            "{} requested from the Mac",
+            "{} requested by {from}",
             p.action.label().to_lowercase()
         ));
         // Reply first: sleep can suspend the machine before the bytes leave.
@@ -795,11 +795,11 @@ impl Default for Service {
 pub fn describe_nat(n: &NatReport) -> String {
     let city = tailscale::derp_city(&n.derp);
     if !n.udp {
-        "network: UDP is blocked here, so a Mac can only reach this PC through a Tailscale relay"
+        "network: UDP is blocked here, so other machines reach this one only through a Tailscale relay"
             .into()
     } else if n.hard == Some(true) && !n.portmap {
         format!(
-            "network: hard NAT with no UPnP; a Mac on another network reaches this PC through the {city} relay unless the router gets UPnP or a forwarded UDP port"
+            "network: hard NAT with no UPnP; a machine on another network reaches this one through the {city} relay unless the router gets UPnP or a forwarded UDP port"
         )
     } else if n.hard == Some(true) {
         "network: hard NAT, but the router maps ports; direct connections should work".into()
@@ -1051,15 +1051,15 @@ mod tests {
         let req = Request::default();
         svc.update_running.store(true, Ordering::Release);
         if cfg!(windows) {
-            assert_eq!(svc.update(&req).status, 409);
+            assert_eq!(svc.update(LOOPBACK, &req).status, 409);
         } else {
             // Not a Windows PC: refused before the slot is even looked at.
-            let r = svc.update(&req);
+            let r = svc.update(LOOPBACK, &req);
             assert_eq!(r.status, 400);
             assert!(r.body.contains("Windows PC"), "{}", r.body);
         }
         svc.update_running.store(false, Ordering::Release);
-        assert_eq!(svc.update(&req).status, 400);
+        assert_eq!(svc.update(LOOPBACK, &req).status, 400);
         assert!(!svc.update_running.load(Ordering::Acquire));
     }
 
@@ -1146,6 +1146,8 @@ mod tests {
             r.body
         );
     }
+
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     fn json_header() -> Vec<(String, String)> {
         vec![("content-type".into(), "application/json".into())]
