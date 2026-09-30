@@ -9,7 +9,8 @@ use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 
 /// Queued sound beyond this is cut back to [`KEEP_MS`].
@@ -39,7 +40,9 @@ pub struct Player {
     pcm: Vec<f32>,
     /// Interleaved samples at the stream's rate and channel count.
     queue: Arc<Mutex<VecDeque<f32>>>,
-    stop: Arc<AtomicBool>,
+    /// Dropped with the player, which ends the output thread and with it
+    /// the device stream.
+    _output_thread: mpsc::Sender<()>,
     output: Arc<Mutex<Output>>,
     /// Frames the output device has pulled, silence included: proof that
     /// sound is leaving.
@@ -104,14 +107,14 @@ impl Player {
             bail!("Opus decoder failed ({err})");
         }
         let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
-        let stop = Arc::new(AtomicBool::new(false));
+        let (stop, stopped) = mpsc::channel();
         let output = Arc::new(Mutex::new(Output::Opening));
         let pulled = Arc::new(AtomicU64::new(0));
         output_thread(
             sample_rate,
             channels as u16,
             queue.clone(),
-            stop.clone(),
+            stopped,
             output.clone(),
             pulled.clone(),
         );
@@ -126,7 +129,7 @@ impl Player {
             // negotiated frame would refuse a longer packet outright.
             pcm: vec![0.0; max_frame * channels],
             queue,
-            stop,
+            _output_thread: stop,
             output,
             pulled,
             max_queued: per_ms * MAX_QUEUED_MS,
@@ -219,7 +222,6 @@ fn phrase(output: &Output, packets: u64, lost: u64, pulled: u64) -> String {
 
 impl Drop for Player {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
         unsafe { audiopus_sys::opus_multistream_decoder_destroy(self.decoder) };
     }
 }
@@ -233,7 +235,7 @@ fn output_thread(
     source_rate: u32,
     source_channels: u16,
     queue: Arc<Mutex<VecDeque<f32>>>,
-    stop: Arc<AtomicBool>,
+    stop: mpsc::Receiver<()>,
     output: Arc<Mutex<Output>>,
     pulled: Arc<AtomicU64>,
 ) {
@@ -352,9 +354,8 @@ fn output_thread(
                 rate,
                 channels,
             };
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+            // Returns when the player, and with it the sender, is dropped.
+            let _ = stop.recv();
         })
         .expect("spawn audio thread");
 }
