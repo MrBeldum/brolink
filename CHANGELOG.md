@@ -34,6 +34,10 @@ GitHub release notes, so each version gets a heading of the form
   `"` or a `$`. The name was written into a double-quoted PowerShell
   string, where a `"` ends the string (a syntax error that stops the whole
   setup) and a `$` expands. It is now only ever a single-quoted literal.
+- The macOS install scripts restart the background service after putting
+  the new app in place. It kept running the old version until the next
+  login, so a Mac that shares its desktop served other machines from the
+  previous release.
 - Cancel stops a connection attempt straight away while the PC is not
   answering. The pairing check retried eight times regardless, which could
   hold the window on "Checking pairing…" for most of a minute after Cancel.
