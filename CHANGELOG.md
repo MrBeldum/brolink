@@ -42,6 +42,15 @@ GitHub release notes, so each version gets a heading of the form
   connecting screen has a **Cancel** button, so leaving no longer needs
   the host key. Stream settings and Stream performance are proper
   panels with a close button; Escape closes Stream settings.
+- Every menu, dropdown and panel fits the window down to its smallest
+  size (640×420). A menu opens upwards when there is more room above,
+  and scrolls, with its scroll bar showing, when neither side has room
+  for all of it; at the smallest size the stream toolbar's More menu cut
+  off "Command acts as Ctrl" and the PC's power items. Stream settings
+  and Stream performance stay below the toolbar, and Tab scrolls the
+  control it reaches into view.
+- A notice's actions line up with its text: "Dismiss" sat 12 points to
+  the right of the words above it.
 - A relayed path is amber, not red: it works, and Connection details
   says how to get a direct one.
 - The idle window no longer repaints on a timer (it redrew 2.5 times a

@@ -1330,7 +1330,7 @@ impl ClientApp {
                     } else {
                         ui::select(ui, "app_pick", app.clone(), 160.0, |ui| {
                             for a in &prog.apps {
-                                if ui.selectable_value(&mut app, a.clone(), a).clicked() {
+                                if ui::select_option(ui, &mut app, a.clone(), a).clicked() {
                                     changed = true;
                                 }
                             }
@@ -2655,6 +2655,62 @@ pub(crate) mod snapshots {
     }
 
     #[test]
+    fn a_notices_quiet_action_lines_up_with_its_text() {
+        for state in ["failed", "confirm-restart"] {
+            let setup = states().into_iter().find(|(n, _)| *n == state).unwrap().1;
+            let h = build(setup, TYPICAL, 1.0, false);
+            let (title, action) = match state {
+                "failed" => ("Couldn't connect to Office", "Dismiss"),
+                _ => ("Restart Gaming-PC?", "Restart"),
+            };
+            let text = h.get_by_label(title).raw_bounds().unwrap().x0;
+            let button = h.get_by_label(action).raw_bounds().unwrap().x0;
+            // A quiet button's label starts its padding in from its box;
+            // a filled one's edge is what lines up.
+            let label = if action == "Dismiss" {
+                button + f64::from(space::MD)
+            } else {
+                button
+            };
+            assert!(
+                (label - text).abs() <= 0.5,
+                "{state}: {action} starts at {label}, the text at {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_menus_stay_inside_the_smallest_window() {
+        // Gaming-PC's menu is the longest; Den's row is the lowest, so its
+        // menu has to open upwards.
+        for pc in ["Gaming-PC", "Office", "Den"] {
+            let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+            crate::stream::tests::assert_menu_fits(
+                &mut h,
+                MIN,
+                &format!("More for {pc}"),
+                "Copy Tailscale address",
+            );
+        }
+        // A row near the bottom of the window, as the page first shows it:
+        // its menu has no room below, so it opens upwards.
+        let mut h = build(Setup::new(many()), MIN, 1.0, false);
+        h.get_by_label("More for vps-sanjose").simulate_click();
+        h.run_steps(3);
+        let menu = ui::open_menu_rect(&h.ctx).expect("the menu is open");
+        let trigger = h.get_by_label("More for vps-sanjose").raw_bounds().unwrap();
+        assert!(
+            f64::from(menu.bottom()) <= trigger.y0,
+            "a low row's menu opens upwards: {menu:?}"
+        );
+        crate::stream::tests::assert_inside(
+            "vps-sanjose's menu",
+            menu,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, MIN),
+        );
+    }
+
+    #[test]
     fn tab_reaches_a_rows_controls_in_reading_order() {
         use egui_kittest::kittest::By;
         let mut h = build(Setup::new(one()), MIN, 1.0, false);
@@ -2982,6 +3038,40 @@ pub(crate) mod snapshots {
         h.get_by_label("More for Gaming-PC").click();
         h.run_steps(3);
         save(h.render().unwrap(), "client-row-menu-1280x800@2x.png");
+        // At the smallest size: Tab reaches the longest menu's last item,
+        // and a low row's menu, opened where the page first shows it,
+        // opens upwards.
+        for ppp in [1.0, 2.0] {
+            let mut h = build(Setup::new(pcs()), MIN, ppp, true);
+            crate::stream::tests::assert_menu_fits(
+                &mut h,
+                MIN,
+                "More for Gaming-PC",
+                "Copy Tailscale address",
+            );
+            save(
+                h.render().unwrap(),
+                &file_name("client", "row-menu", MIN, ppp),
+            );
+            let mut h = build(Setup::new(many()), MIN, ppp, true);
+            h.get_by_label("More for vps-sanjose").simulate_click();
+            h.run_steps(3);
+            let menu = ui::open_menu_rect(&h.ctx).expect("the menu is open");
+            let trigger = h.get_by_label("More for vps-sanjose").raw_bounds().unwrap();
+            assert!(
+                f64::from(menu.bottom()) <= trigger.y0,
+                "a low row's menu opens upwards: {menu:?}"
+            );
+            crate::stream::tests::assert_inside(
+                "vps-sanjose's menu",
+                menu,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, MIN),
+            );
+            save(
+                h.render().unwrap(),
+                &file_name("client", "row-menu-low-row", MIN, ppp),
+            );
+        }
         let mut h = build(Setup::new(pcs()), TYPICAL, 2.0, true);
         h.get_by_label_contains("Connection details").click();
         h.run_steps(3);

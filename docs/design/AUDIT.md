@@ -49,6 +49,7 @@ writes `target/ui-snapshots/`. Names below refer to that folder
 | V9 | Low | The stream toolbar was a rectangle with a white hairline on all four sides. | Fixed: bottom hairline only. |
 | V10 | Low | Bitrate slider: large hollow knob, violet trail, a drag box beside it. | Fixed: a slim slider with a mono value, arrow-key steps. |
 | V11 | Low | The App field was 20 pt tall beside 30-pt controls. | Fixed. |
+| V12 | Low | A notice's quiet action ("Dismiss", "Cancel") sat 12 points right of the text above it: its label is inset by the button's padding, and no fill or outline shows the box. A notice with no actions kept an empty row's height; the setup card's "Get Tailscale" link started left of the item it belongs to. | Fixed: `action_row` pulls a leading quiet button back by its padding; an empty row takes no room; `dot_item` puts the link in the item's text column. |
 
 ### Contrast (WCAG 2.2 AA, computed)
 
@@ -105,6 +106,7 @@ All pairs are asserted in `crates/ui/src/theme.rs` and `widgets.rs` tests.
 | X3 | Medium | No window shortcuts. | Fixed: Command/Ctrl-1, 2, comma; Escape. |
 | X4 | Low | Switch hit target 40×22 (< 24). | Fixed: 36×24. |
 | X5 | Low | Pills and other painted text were missing from the accessibility tree. | Fixed: status, tags, keycaps and the PIN report labels. |
+| X6 | High | At 640×420 the stream toolbar's More menu ran past the bottom of the window: "Command acts as Ctrl" and the PC items could not be reached, by pointer or keyboard. Stream performance ran off the bottom, and panels sat under the toolbar. Tab could move focus to a control scrolled out of sight. | Fixed: menus open where they fit (upwards when there is more room above) and scroll inside when neither side has room; dropdown lists, panels and questions do the same, below the toolbar; Tab scrolls the focused control into view; focus rings are no longer cut at a window's edge. Tested at 640×420 by rect, with snapshots. |
 
 ## Design system
 
