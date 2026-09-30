@@ -66,18 +66,23 @@ impl Frame {
             return false;
         }
         let black = if self.full_range { 1 } else { 17 };
+        // Whole-row reductions rather than a short-circuiting `all`: the
+        // compiler turns a max or min over a row into vector instructions,
+        // and the scan still stops at the first row with a visible pixel.
+        // A black frame is every row, sixty times a second.
+        let max = |row: &[u8]| row.iter().fold(0, |m, &v| m.max(v));
+        let min = |row: &[u8]| row.iter().fold(u8::MAX, |m, &v| m.min(v));
         self.y
             .chunks(self.y_stride)
             .take(height)
-            .all(|row| row[..width].iter().all(|&v| v <= black))
+            .all(|row| max(&row[..width]) <= black)
             && self
                 .uv
                 .chunks(self.uv_stride)
                 .take(chroma_height)
                 .all(|row| {
-                    row[..chroma_width]
-                        .iter()
-                        .all(|&v| (127..=129).contains(&v))
+                    let row = &row[..chroma_width];
+                    min(row) >= 127 && max(row) <= 129
                 })
     }
 }
