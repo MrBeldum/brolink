@@ -14,7 +14,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -370,13 +370,7 @@ fn split_url(url: &str) -> Result<(String, String)> {
 }
 
 fn connect(host: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
-    let addr = (host, 443u16)
-        .to_socket_addrs()
-        .with_context(|| format!("resolve {host}"))?
-        .next()
-        .ok_or_else(|| anyhow!("{host} has no address"))?;
-    let tcp = TcpStream::connect_timeout(&addr, TIMEOUT)
-        .map_err(crate::http::io_err)
+    let tcp = crate::http::connect((host, 443u16), TIMEOUT)
         .with_context(|| format!("connect to {host}"))?;
     tcp.set_read_timeout(Some(TIMEOUT))
         .map_err(crate::http::io_err)?;
