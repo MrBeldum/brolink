@@ -53,7 +53,7 @@ pub struct Service {
     virtual_display: Mutex<Option<bool>>,
     install: Mutex<Option<Install>>,
     streamer: Mutex<Streamer>,
-    log: Mutex<VecDeque<String>>,
+    log: Arc<Mutex<VecDeque<String>>>,
     /// `whois` answers for recent peers: when, and whether they may ask.
     auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
     /// The last `whois` failure logged.
@@ -75,7 +75,7 @@ impl Service {
             virtual_display: Mutex::new(None),
             install: Mutex::new(None),
             streamer: Mutex::new(Streamer::default()),
-            log: Mutex::new(VecDeque::new()),
+            log: Arc::new(Mutex::new(VecDeque::new())),
             auth: Mutex::new(HashMap::new()),
             whois_failed: Mutex::new(None),
             nat: Mutex::new(None),
@@ -85,13 +85,7 @@ impl Service {
     }
 
     pub fn log(&self, msg: impl Into<String>) {
-        let msg = msg.into();
-        tracing::info!("{msg}");
-        let mut log = self.log.lock();
-        if log.len() >= LOG_LINES {
-            log.pop_front();
-        }
-        log.push_back(msg);
+        push_log(&self.log, msg.into());
     }
 
     fn session_active(&self) -> bool {
@@ -654,6 +648,7 @@ impl Service {
                     "updating to {version}: {from} sent the new BroLink Host"
                 ));
                 let running = self.update_running.clone();
+                let log = self.log.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(500));
                     match update::apply(&exe) {
@@ -662,7 +657,7 @@ impl Service {
                             std::process::exit(0);
                         }
                         Err(e) => {
-                            tracing::error!("update to {version} failed: {e:#}");
+                            push_log(&log, format!("update to {version} failed: {e:#}"));
                             running.store(false, Ordering::Release);
                         }
                     }
@@ -938,6 +933,15 @@ fn control_host(host: &str) -> bool {
     })
 }
 
+/// One line in the service log the window shows (and in the log file).
+fn push_log(log: &Mutex<VecDeque<String>>, msg: String) {
+    tracing::info!("{msg}");
+    let mut log = log.lock();
+    if log.len() >= LOG_LINES {
+        log.pop_front();
+    }
+    log.push_back(msg);
+}
 #[cfg(test)]
 mod tests {
     use super::*;

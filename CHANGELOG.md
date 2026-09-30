@@ -70,6 +70,8 @@ GitHub release notes, so each version gets a heading of the form
   launched, so a replacement that died straight away left the PC with no
   BroLink service until someone logged in again. It now waits two seconds,
   and puts the previous executable back if the new one has already exited.
+  The PC's log says so, and the Mac warns once instead of sending the same
+  release again every three minutes.
 - Update downloads try each of a server's addresses in turn. Only the first
   one the name resolved to was ever tried, so one unreachable address (an
   IPv6 one on a network without IPv6, say) failed the whole update check.

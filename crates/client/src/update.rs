@@ -53,6 +53,12 @@ pub struct State {
     pub notice: Option<(Tone, String)>,
     /// Hosts sent an update recently: node id to (version, when).
     pub pushed: BTreeMap<String, (Version, Instant)>,
+    /// Hosts that took the file for this version: node id to version.
+    pub delivered: BTreeMap<String, Version>,
+    /// Hosts that took a version and came back on the old one, which means
+    /// the new executable died on start and the host put the old one back.
+    /// Sending the same file again would only repeat that.
+    pub rolled_back: BTreeMap<String, Version>,
     /// Hosts too old to receive `/v1/update`; told the user once.
     pub told_old: BTreeSet<String>,
 }
@@ -87,7 +93,9 @@ pub fn spawn(
             if !cfg.auto_update {
                 let mut st = state.lock();
                 st.message = "Off. This app and the PCs stay on their current versions.".into();
-                st.notice = None;
+                if st.notice.take().is_some() {
+                    ctx.request_repaint();
+                }
                 continue;
             }
             let due = state.lock().check_now || Instant::now() >= next;
@@ -162,6 +170,7 @@ pub fn spawn(
                     let mut p = progress.lock();
                     if live.is_none() && !p.active() {
                         p.updating = true;
+                        ctx.request_repaint();
                         true
                     } else {
                         false
@@ -207,16 +216,43 @@ pub fn spawn(
                     }
                     continue;
                 }
+                if !rel.is_newer_than(&v) {
+                    // Updated after all (through the stream, say): the
+                    // rollback warning is no longer true.
+                    let mut st = state.lock();
+                    if st.rolled_back.remove(&pc.node_id).is_some()
+                        && matches!(st.notice, Some((Tone::Warning, _)))
+                    {
+                        st.notice = None;
+                        ctx.request_repaint();
+                    }
+                }
                 if !should_push(&v, rel) || streaming_to == Some(ip) {
                     continue;
                 }
-                let recently = state
-                    .lock()
-                    .pushed
-                    .get(&pc.node_id)
-                    .is_some_and(|(pv, at)| *pv == rel.version && at.elapsed() < PUSH_GRACE);
-                if recently {
-                    continue;
+                {
+                    let mut st = state.lock();
+                    let recently = st
+                        .pushed
+                        .get(&pc.node_id)
+                        .is_some_and(|(pv, at)| *pv == rel.version && at.elapsed() < PUSH_GRACE);
+                    if recently || st.rolled_back.get(&pc.node_id) == Some(&rel.version) {
+                        continue;
+                    }
+                    if st.delivered.get(&pc.node_id) == Some(&rel.version) {
+                        // It took the file, the grace is over, and it still
+                        // runs the old version.
+                        st.rolled_back
+                            .insert(pc.node_id.clone(), rel.version.clone());
+                        st.message = format!(
+                            "BroLink Host {} did not start on {}, so it kept {v}. It is not sent again until BroLink restarts; its log says why.",
+                            rel.version, pc.name
+                        );
+                        st.notice = Some((Tone::Warning, st.message.clone()));
+                        tracing::warn!("{} rolled back host {}", pc.name, rel.version);
+                        ctx.request_repaint();
+                        continue;
+                    }
                 }
                 let outcome = push_host(rel, token.as_deref(), ip);
                 let mut st = state.lock();
@@ -224,6 +260,7 @@ pub fn spawn(
                     .insert(pc.node_id.clone(), (rel.version.clone(), Instant::now()));
                 match outcome {
                     Ok(()) => {
+                        st.delivered.insert(pc.node_id.clone(), rel.version.clone());
                         st.message = format!(
                             "Sent BroLink Host {} to {}; it restarts by itself.",
                             rel.version, pc.name
@@ -239,10 +276,16 @@ pub fn spawn(
                 }
                 ctx.request_repaint();
             }
-            // Notices about hosts fade once the grace period has passed.
+            // Notices about hosts fade once the grace period has passed,
+            // except a rollback, which stays until someone reads it.
             let mut st = state.lock();
-            if st.ready.is_none() && st.pushed.values().all(|(_, at)| at.elapsed() > PUSH_GRACE) {
+            let fades = !matches!(st.notice, None | Some((Tone::Warning, _)));
+            if fades
+                && st.ready.is_none()
+                && st.pushed.values().all(|(_, at)| at.elapsed() > PUSH_GRACE)
+            {
                 st.notice = None;
+                ctx.request_repaint();
             }
         }
     });
