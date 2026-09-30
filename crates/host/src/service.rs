@@ -56,6 +56,8 @@ pub struct Service {
     log: Mutex<VecDeque<String>>,
     /// `whois` answers for recent peers: when, and whether they may ask.
     auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
+    /// The last `whois` failure logged.
+    whois_failed: Mutex<Option<String>>,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -75,6 +77,7 @@ impl Service {
             streamer: Mutex::new(Streamer::default()),
             log: Mutex::new(VecDeque::new()),
             auth: Mutex::new(HashMap::new()),
+            whois_failed: Mutex::new(None),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -526,7 +529,14 @@ impl Service {
                 allowed
             }
             Err(e) => {
-                self.log(format!("whois {ip}: {e}"));
+                // Not remembered, so asked again on the next request; say
+                // so once rather than at every poll.
+                let line = format!("whois {ip}: {e}");
+                let mut last = self.whois_failed.lock();
+                if last.as_deref() != Some(line.as_str()) {
+                    self.log(line.clone());
+                    *last = Some(line);
+                }
                 return false;
             }
         };
