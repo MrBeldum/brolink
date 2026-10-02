@@ -252,14 +252,19 @@ struct ConnectionSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl ConnectionSlot {
     fn acquire(active: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
-        active
-            .fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                |n| (n < MAX_CONNECTIONS).then_some(n + 1),
-            )
-            .ok()
-            .map(|_| Self(active.clone()))
+        use std::sync::atomic::Ordering::Relaxed;
+        // A compare-and-swap loop rather than `fetch_update`, which Rust 1.99
+        // renamed `try_update`: this builds on both.
+        let mut n = active.load(Relaxed);
+        loop {
+            if n >= MAX_CONNECTIONS {
+                return None;
+            }
+            match active.compare_exchange_weak(n, n + 1, Relaxed, Relaxed) {
+                Ok(_) => return Some(Self(active.clone())),
+                Err(seen) => n = seen,
+            }
+        }
     }
 }
 

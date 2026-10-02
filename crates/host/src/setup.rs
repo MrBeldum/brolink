@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn the_service_is_latchs_and_the_fallback_is_proven_not_assumed() {
+    fn the_latch_service_and_the_fallback_are_proven_not_assumed() {
         let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
 
@@ -1144,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_looks_for_latchs_own_engine_before_any_other() {
+    fn setup_looks_for_the_latch_engine_before_any_other() {
         let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, false));
         let line = s
@@ -1440,7 +1440,7 @@ system_tray = enabled
     }
 
     #[test]
-    fn branding_follows_the_copy_touches_only_latchs_engine_and_skips_dry_runs() {
+    fn branding_follows_the_copy_touches_only_the_latch_engine_and_skips_dry_runs() {
         let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let fresh = code(&script(&plan(&exe, true)));
         let copied = fresh
