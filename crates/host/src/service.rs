@@ -167,8 +167,6 @@ impl Service {
     /// A PC nobody can reach in person has to come back by itself after a
     /// restart, so the logon entry is kept unless the owner turned it off.
     fn ensure_autostart(&self, exe: &std::path::Path) {
-        #[cfg(not(windows))]
-        crate::unix_setup::repair_adopted_engine_config();
         if !self.cfg.lock().start_with_windows {
             return;
         }

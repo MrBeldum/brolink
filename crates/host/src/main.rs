@@ -63,6 +63,10 @@ fn main() -> Result<()> {
     } else {
         "panel.log"
     });
+    // init_logging has just called data_dir(), which takes over an older
+    // install's folder; the engine's config inside still names the old one.
+    #[cfg(not(windows))]
+    latch_host::unix_setup::repair_adopted_engine_config();
     #[cfg(target_os = "macos")]
     if let Err(e) = latch_host::unix_setup::adopt_legacy_bundle(args.background) {
         // Only returns when there was nothing to move or the move failed;

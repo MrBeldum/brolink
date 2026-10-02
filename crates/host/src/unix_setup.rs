@@ -66,11 +66,16 @@ pub fn conf_path() -> Result<PathBuf> {
     Ok(engine_dir()?.join("config").join("sunshine.conf"))
 }
 
-/// After this copy took over an older install's data folder, the engine's
-/// `sunshine.conf` still names the engine login by the old folder's path.
-/// Point it at the folder it is in now, and give the login file the new
-/// name, so the engine finds the login it was set up with. Nothing happens
-/// on an install that was never moved.
+/// The engine login file an earlier version wrote, and what it is called now.
+const OLD_LOGIN_FILE: &str = "brolink-web.json";
+const LOGIN_FILE: &str = "latch-web.json";
+
+/// An install that an older version set up has two things in the engine's
+/// `sunshine.conf` that name it: the path of the engine login file, which is
+/// called `brolink-web.json` and sits wherever setup put it, and any path
+/// under the old data folder, which this copy has moved. Point both at what
+/// is there now, and rename the login file, so the engine finds the login
+/// it was set up with. Nothing happens on an install that was never moved.
 pub fn repair_adopted_engine_config() {
     let (Ok(conf), Ok(data), Some(old)) = (
         conf_path(),
@@ -79,31 +84,40 @@ pub fn repair_adopted_engine_config() {
     ) else {
         return;
     };
-    let Ok(text) = fs::read_to_string(&conf) else {
+    repair_conf(
+        &conf,
+        &old.display().to_string(),
+        &data.display().to_string(),
+    );
+}
+
+/// [`repair_adopted_engine_config`] for the conf at `conf`, with the old and
+/// the new data folder as strings.
+fn repair_conf(conf: &Path, old: &str, data: &str) {
+    let Ok(text) = fs::read_to_string(conf) else {
         return;
     };
-    let old = old.display().to_string();
-    if !text.contains(&old) {
-        return;
-    }
-    let config = conf.parent().unwrap_or(&data).to_path_buf();
-    let (old_login, login) = (
-        config.join("brolink-web.json"),
-        config.join("latch-web.json"),
-    );
-    if old_login.exists() && !login.exists() {
-        let _ = fs::rename(&old_login, &login);
-    }
     let fixed: Vec<String> = text
         .lines()
         .map(|line| match line.split_once('=') {
-            Some((key, _)) if key.trim() == "credentials_file" => {
-                format!("credentials_file = {}", login.display())
+            Some((key, value)) if key.trim() == "credentials_file" => {
+                let path = PathBuf::from(value.trim().replace(old, data));
+                if path.file_name().is_some_and(|n| n == OLD_LOGIN_FILE) {
+                    let renamed = path.with_file_name(LOGIN_FILE);
+                    if path.exists() && !renamed.exists() {
+                        let _ = fs::rename(&path, &renamed);
+                    }
+                    return format!("credentials_file = {}", renamed.display());
+                }
+                format!("credentials_file = {}", path.display())
             }
-            _ => line.replace(&old, &data.display().to_string()),
+            _ => line.replace(old, data),
         })
         .collect();
-    let _ = fs::write(&conf, fixed.join("\n") + "\n");
+    let fixed = fixed.join("\n") + "\n";
+    if fixed != text {
+        let _ = fs::write(conf, fixed);
+    }
 }
 
 /// Candidate engine installs, Latch's copy first.
@@ -180,7 +194,7 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
     stop_engine();
     let conf = conf_path()?;
     let existing = fs::read_to_string(&conf).unwrap_or_default();
-    let credentials = conf.with_file_name("latch-web.json");
+    let credentials = conf.with_file_name(LOGIN_FILE);
     let profile = conceal_conf(&existing)
         .lines()
         .filter(|line| {
@@ -766,6 +780,43 @@ mod tests {
         assert!(plist.contains("<string>--background</string>"));
         assert!(plist.contains("B&amp;L&apos;s &lt;app&gt;.app"), "{plist}");
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+    }
+
+    #[test]
+    fn an_older_installs_engine_login_is_found_under_its_new_name() {
+        let dir = std::env::temp_dir().join(format!("latch-repair-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("sunshine.conf");
+        let old_login = dir.join("brolink-web.json");
+        fs::write(&old_login, "{}").unwrap();
+        fs::write(
+            &conf,
+            format!(
+                "origin_web_ui_allowed = pc\ncredentials_file = {}\nlog_path = /old/share/brolink/sunshine.log\n",
+                old_login.display()
+            ),
+        )
+        .unwrap();
+        repair_conf(&conf, "/old/share/brolink", "/new/share/latch");
+        let fixed = fs::read_to_string(&conf).unwrap();
+        assert!(
+            fixed.contains(&format!(
+                "credentials_file = {}",
+                dir.join("latch-web.json").display()
+            )),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("log_path = /new/share/latch/sunshine.log"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("origin_web_ui_allowed = pc"), "{fixed}");
+        assert!(dir.join("latch-web.json").exists() && !old_login.exists());
+        // A second pass changes nothing.
+        repair_conf(&conf, "/old/share/brolink", "/new/share/latch");
+        assert_eq!(fs::read_to_string(&conf).unwrap(), fixed);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
