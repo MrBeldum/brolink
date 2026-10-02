@@ -48,6 +48,17 @@ if [[ -z "${LATCH_SKIP_ROOT:-}" ]]; then
 	sudo rm -f /usr/local/libexec/brolink-wait-engine.py
 fi
 
+# Sunshine's own config, which latch-host does not manage here, names the engine
+# login file after the old product.
+conf="$HOME/.config/sunshine/sunshine.conf"
+if [[ -f "$conf" ]] && grep -q 'brolink-web\.json' "$conf"; then
+	echo "==> engine login file"
+	if [[ -f "$HOME/.config/sunshine/brolink-web.json" && ! -e "$HOME/.config/sunshine/latch-web.json" ]]; then
+		mv "$HOME/.config/sunshine/brolink-web.json" "$HOME/.config/sunshine/latch-web.json"
+	fi
+	sed -i 's/brolink-web\.json/latch-web.json/g' "$conf"
+fi
+
 echo "==> starting Latch"
 systemctl --user daemon-reload
 systemctl --user enable latch-display.service latch-desktop.service latch-engine.service
