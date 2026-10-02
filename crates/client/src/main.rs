@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! The viewer on its own, for development: `cargo run -p brolink-client`.
-//! What ships is `brolink-host`, which is this window plus sharing.
+//! The viewer on its own, for development: `cargo run -p latch-client`.
+//! What ships is `latch-host`, which is this window plus sharing.
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -12,9 +12,9 @@ fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
     eframe::run_native(
-        "BroLink",
-        brolink_client::native_options(),
-        Box::new(|cc| Ok(Box::new(brolink_client::app::ClientApp::new(cc)))),
+        "Latch",
+        latch_client::native_options(),
+        Box::new(|cc| Ok(Box::new(latch_client::app::ClientApp::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }

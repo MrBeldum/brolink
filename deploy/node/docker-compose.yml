@@ -1,5 +1,5 @@
-# BroLink node — a virtual desktop on this VPS (or any Docker host) that
-# other BroLink machines on your Tailscale account can open.
+# Latch node — a virtual desktop on this VPS (or any Docker host) that
+# other Latch machines on your Tailscale account can open.
 #
 # From the repository root:
 #   cp deploy/node/env.example deploy/node/.env
@@ -9,15 +9,15 @@
 # Repeat with a different project name / TS_HOSTNAME for another container
 # on the same host; each one is its own tailnet machine.
 
-name: brolink-node
+name: latch-node
 
 services:
   node:
     build:
       context: ../..
       dockerfile: deploy/node/Dockerfile
-    image: ${BROLINK_IMAGE:-brolink-node:local}
-    container_name: ${BROLINK_CONTAINER:-brolink-node}
+    image: ${LATCH_IMAGE:-latch-node:local}
+    container_name: ${LATCH_CONTAINER:-latch-node}
     restart: unless-stopped
     init: true
     env_file:

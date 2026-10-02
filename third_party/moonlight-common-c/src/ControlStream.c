@@ -1833,8 +1833,8 @@ int startControlStream(void) {
         // The 3DS can take a bit longer to set up when starting fresh
         enet_peer_timeout(peer, 2, 60000, 60000);
 #else
-        // BroLink change (was: enet_peer_timeout(peer, 2, 10000, 10000)).
-        // Every BroLink stream is relayed over a Tailscale peer relay across a
+        // Latch change (was: enet_peer_timeout(peer, 2, 10000, 10000)).
+        // Every Latch stream is relayed over a Tailscale peer relay across a
         // long, sometimes trans-Pacific path where a burst of loss can silence
         // the reliable control channel (ENet, UDP 47999) for several seconds.
         // Upstream's 10 s peer timeout then declares the peer dead and the

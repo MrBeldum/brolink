@@ -1,11 +1,11 @@
 //! The engine's executables carry the name and icon they were built with,
 //! and Task Manager, the volume mixer and a firewall prompt show exactly
-//! that. Setup runs `brolink-host --brand-engine <dir>` elevated, with the
+//! that. Setup runs `latch-host --brand-engine <dir>` elevated, with the
 //! engine stopped, and this module rewrites two resources in each file in
-//! place. The version block gets BroLink's description and product name,
+//! place. The version block gets Latch's description and product name,
 //! and every other string it carried (copyright, licence, version numbers)
 //! is read out first and written back unchanged. The first icon group is
-//! replaced by BroLink's own, copied out of this executable. Nothing else
+//! replaced by Latch's own, copied out of this executable. Nothing else
 //! in the files changes, and the archive they came from is never touched.
 
 use anyhow::Result;
@@ -14,8 +14,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// What the engine process is called once branded.
-pub const DESCRIPTION: &str = "BroLink Streaming";
-pub const SERVICE_DESCRIPTION: &str = "BroLink Streaming Service";
+pub const DESCRIPTION: &str = "Latch Streaming";
+pub const SERVICE_DESCRIPTION: &str = "Latch Streaming Service";
 
 /// Files under the engine directory and the description each gets.
 pub const TARGETS: [(&str, &str); 2] = [
@@ -23,13 +23,15 @@ pub const TARGETS: [(&str, &str); 2] = [
     (r"tools\sunshinesvc.exe", SERVICE_DESCRIPTION),
 ];
 
-/// True when the engine in `dir` already presents itself as BroLink.
+/// True when the engine in `dir` already presents itself as Latch.
 pub fn is_branded(dir: &Path) -> bool {
     description(&dir.join(TARGETS[0].0)).as_deref() == Some(DESCRIPTION)
 }
 
 /// [`is_branded`], re-read at most every ten seconds: the status is polled
-/// often and the answer changes only when setup runs.
+/// often and the answer changes only when setup runs. An engine that an
+/// earlier version branded counts: it shows Latch's name under the old
+/// spelling, and setup rewrites it the next time it runs.
 pub fn is_branded_cached(dir: &Path) -> bool {
     static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
     let mut c = CACHE.lock();
@@ -38,7 +40,9 @@ pub fn is_branded_cached(dir: &Path) -> bool {
             return v;
         }
     }
-    let v = is_branded(dir);
+    let v = is_branded(dir)
+        || description(&dir.join(TARGETS[0].0)).as_deref()
+            == Some(crate::legacy::ENGINE_DESCRIPTION);
     *c = Some((Instant::now(), v));
     v
 }
@@ -220,7 +224,7 @@ mod win {
         }
     }
 
-    /// BroLink's icon out of this executable: each group entry's header
+    /// Latch's icon out of this executable: each group entry's header
     /// with its image.
     fn own_icon() -> Result<Vec<([u8; 12], Vec<u8>)>> {
         let me = unsafe { GetModuleHandleW(PCWSTR::null()) }.context("this executable's module")?;

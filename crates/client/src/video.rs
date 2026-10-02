@@ -1,8 +1,8 @@
 //! Drawing decoded frames with wgpu inside an egui rect: two textures (Y and
 //! interleaved UV) and a shader that does the BT.709 conversion.
 
-use brolink_stream::FrameSlot;
 use egui_wgpu::wgpu;
+use latch_stream::FrameSlot;
 use std::sync::Arc;
 
 const SHADER: &str = r#"
@@ -104,7 +104,7 @@ pub struct Resources {
 impl Resources {
     pub fn new(device: &wgpu::Device, target: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("brolink video"),
+            label: Some("latch video"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
@@ -118,7 +118,7 @@ impl Resources {
             count: None,
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("brolink video"),
+            label: Some("latch video"),
             entries: &[
                 texture_entry(0),
                 texture_entry(1),
@@ -141,12 +141,12 @@ impl Resources {
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("brolink video"),
+            label: Some("latch video"),
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("brolink video"),
+            label: Some("latch video"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -171,7 +171,7 @@ impl Resources {
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("brolink video"),
+            label: Some("latch video"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -179,7 +179,7 @@ impl Resources {
             ..Default::default()
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("brolink video"),
+            label: Some("latch video"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -216,15 +216,15 @@ impl Resources {
                     view_formats: &[],
                 })
             };
-            let y = make(width, height, wgpu::TextureFormat::R8Unorm, "brolink y");
+            let y = make(width, height, wgpu::TextureFormat::R8Unorm, "latch y");
             let uv = make(
                 width.div_ceil(2),
                 height.div_ceil(2),
                 wgpu::TextureFormat::Rg8Unorm,
-                "brolink uv",
+                "latch uv",
             );
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("brolink video"),
+                label: Some("latch video"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -377,7 +377,7 @@ mod tests {
             }
         }
         let frames = Arc::new(FrameSlot::default());
-        frames.publish(brolink_stream::Frame {
+        frames.publish(latch_stream::Frame {
             width: 64,
             height: 64,
             y: (0..64)

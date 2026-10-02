@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("brolink-logfile-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("latch-logfile-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -175,8 +175,8 @@ mod tests {
     #[test]
     fn the_previous_generation_sits_beside_the_log() {
         assert_eq!(
-            rotated_path(Path::new("/var/brolink/panel.log")),
-            PathBuf::from("/var/brolink/panel.log.1")
+            rotated_path(Path::new("/var/latch/panel.log")),
+            PathBuf::from("/var/latch/panel.log.1")
         );
     }
 }

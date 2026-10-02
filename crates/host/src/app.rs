@@ -6,11 +6,11 @@
 use crate::config::{self, HostConfig};
 use crate::setup;
 use crate::streamer::Api;
-use brolink_core::api::Status;
-use brolink_core::http;
-use brolink_core::CONTROL_PORT;
-use brolink_ui::{self as ui, space, Kv, Tone};
 use eframe::egui;
+use latch_core::api::Status;
+use latch_core::http;
+use latch_core::CONTROL_PORT;
+use latch_ui::{self as ui, space, Kv, Tone};
 use parking_lot::Mutex;
 use semver::Version;
 use std::cmp::Ordering;
@@ -205,7 +205,7 @@ impl HostApp {
             return;
         }
         if !self.cfg.has_creds() && !migrate {
-            self.cfg.sunshine_user = "brolink".into();
+            self.cfg.sunshine_user = "latch".into();
             self.cfg.sunshine_pass = config::random_password();
             if let Err(e) = self.cfg.save() {
                 tracing::warn!("could not save engine login: {e:#}");
@@ -265,7 +265,7 @@ impl HostApp {
                 tracing::warn!("autostart: {e:#}");
                 self.note = Some((
                     Tone::Danger,
-                    format!("Couldn't change whether BroLink starts at login: {e}."),
+                    format!("Couldn't change whether Latch starts at login: {e}."),
                     Instant::now(),
                 ));
             }
@@ -306,7 +306,7 @@ impl HostApp {
         if !self.live {
             return;
         }
-        let Ok(dir) = brolink_core::config::data_dir() else {
+        let Ok(dir) = latch_core::config::data_dir() else {
             return;
         };
         let opener = match self.os {
@@ -372,7 +372,7 @@ impl HostApp {
                 ui,
                 Tone::Neutral,
                 &format!(
-                    "The background service runs BroLink {} and this window {}; BroLink is restarting the older one.",
+                    "The background service runs Latch {} and this window {}; Latch is restarting the older one.",
                     s.version,
                     env!("CARGO_PKG_VERSION")
                 ),
@@ -482,11 +482,11 @@ impl HostApp {
             ),
             Os::Mac => (
                 "Share this Mac",
-                "BroLink installs the streaming engine for you. macOS then asks once to let it record the screen.",
+                "Latch installs the streaming engine for you. macOS then asks once to let it record the screen.",
             ),
             Os::Linux => (
                 "Share this machine",
-                "BroLink installs the streaming engine for this user and keeps it running.",
+                "Latch installs the streaming engine for this user and keeps it running.",
             ),
         };
         let title = if done { "Sharing is set up" } else { title };
@@ -552,7 +552,7 @@ impl HostApp {
                         Some("Keeps this PC's pairings and web login.")
                     } else if !s.streamer.installed {
                         Some(match (self.os, self.bundled_engine) {
-                            (Os::Windows, true) => "Installs the engine that ships with BroLink.",
+                            (Os::Windows, true) => "Installs the engine that ships with Latch.",
                             _ => "Downloads the streaming engine and installs it.",
                         })
                     } else {
@@ -622,7 +622,7 @@ impl HostApp {
         } else if !s.streamer.api_ok {
             (
                 Tone::Warning,
-                "Running, but BroLink can't sign in to it".to_string(),
+                "Running, but Latch can't sign in to it".to_string(),
             )
         } else {
             let encoder = match s.streamer.encoder.as_str() {
@@ -832,7 +832,7 @@ impl HostApp {
             if ui::toggle_row(
                 ui,
                 &mut auto,
-                "Start BroLink when you log in",
+                "Start Latch when you log in",
                 Some(&format!(
                     "So others can connect after this {noun} restarts, with nobody at the keyboard."
                 )),
@@ -899,8 +899,8 @@ impl HostApp {
 
 /// What this machine's NAT means for the others, in a sentence that names
 /// the right kind of machine (the service log's version says "a Mac").
-fn network_sentence(n: &brolink_core::api::NatReport, noun: &str) -> String {
-    let city = brolink_core::tailscale::derp_city(&n.derp);
+fn network_sentence(n: &latch_core::api::NatReport, noun: &str) -> String {
+    let city = latch_core::tailscale::derp_city(&n.derp);
     if !n.udp {
         format!("UDP is blocked here, so other machines reach this {noun} only through a Tailscale relay.")
     } else if n.hard == Some(true) && !n.portmap {
@@ -1177,7 +1177,7 @@ mod tests {
 /// The Sharing page inside the unified window, rendered without a PC:
 ///
 /// ```text
-/// cargo test -p brolink-host snapshots -- --ignored
+/// cargo test -p latch-host snapshots -- --ignored
 /// ```
 ///
 /// Nothing here reads or writes real settings or reaches the service: the
@@ -1186,9 +1186,9 @@ mod tests {
 mod snapshots {
     use super::*;
     use crate::product::NodeApp;
-    use brolink_client::app::Page;
-    use brolink_core::api::Streamer;
     use egui_kittest::kittest::Queryable;
+    use latch_client::app::Page;
+    use latch_core::api::Streamer;
 
     const MIN: egui::Vec2 = egui::vec2(640.0, 420.0);
     const TYPICAL: egui::Vec2 = egui::vec2(1280.0, 800.0);
@@ -1209,7 +1209,7 @@ mod snapshots {
 
     fn ready_status(os: &str) -> Status {
         Status {
-            app: "brolink".into(),
+            app: latch_core::APP_ID.into(),
             version: env!("CARGO_PKG_VERSION").into(),
             name: if os == "windows" {
                 "GAMING-PC".into()
@@ -1227,7 +1227,7 @@ mod snapshots {
             wake_packet_age_secs: Some(42),
             fast_startup: Some(false),
             streamer: Streamer {
-                kind: "BroLink".into(),
+                kind: latch_core::STREAMER_KIND.into(),
                 installed: true,
                 running: true,
                 api_ok: true,
@@ -1239,7 +1239,7 @@ mod snapshots {
                 audio_problem: String::new(),
             },
             power_allowed: true,
-            nat: Some(brolink_core::api::NatReport {
+            nat: Some(latch_core::api::NatReport {
                 udp: true,
                 ipv4: true,
                 ipv6: false,
@@ -1249,10 +1249,10 @@ mod snapshots {
             }),
             setup: vec![],
             log: vec![
-                "BroLink 4.0.2 listening on TCP 47850".into(),
+                "Latch 4.1.0 listening on TCP 47850".into(),
                 "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
-                "the streaming engine is running and BroLink is signed in".into(),
+                "the streaming engine is running and Latch is signed in".into(),
                 "Wake-on-LAN ready on Ethernet (02:00:00:00:00:01)".into(),
                 "paired \"MacBook-Pro\"".into(),
             ],
@@ -1299,9 +1299,9 @@ mod snapshots {
         ];
         Shared {
             status: Some(st),
-            setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\BroLink\\setup.log)".into())),
+            setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\Latch\\setup.log)".into())),
             setup_log: vec![
-                "[14:02:11] BroLink setup started".into(),
+                "[14:02:11] Latch setup started".into(),
                 "[14:02:11] Downloading the streaming engine".into(),
                 "  engine: curl: (6) Could not resolve host: api.github.com".into(),
             ],

@@ -1,12 +1,20 @@
-# BroLink
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-knockout.svg">
+  <img src="docs/brand/logo.svg" alt="Latch" width="64" height="64">
+</picture>
+
+# Latch
+
+Latch is made by [Bardbro](https://bardbro.com), a personal project for
+cloud gaming.
 
 Your machines, on any of your machines: stream a desktop full screen over
-Tailscale. Mac, Windows, Linux, and a VPS container all run the same BroLink
+Tailscale. Mac, Windows, Linux, and a VPS container all run the same Latch
 app. Each one lists the others and can Connect; each one can share its own
 desktop.
 
 On a Mac, frames are decoded with VideoToolbox. On Windows and Linux the
-viewer uses OpenH264. Sharing uses the streaming engine BroLink installs
+viewer uses OpenH264. Sharing uses the streaming engine Latch installs
 (Sunshine): bundled in the Windows zip, downloaded on first Mac setup, and
 shipped in the Docker node image for a VPS.
 
@@ -15,11 +23,11 @@ machine answers only peers signed in to the same Tailscale account.
 
 ## How a session goes
 
-1. Open BroLink. **Machines** lists every machine on your Tailscale
+1. Open Latch. **Machines** lists every machine on your Tailscale
    account, with a dot and a line for what it can do right now. The
    **Sharing** tab sets up the streaming engine so others can Connect here.
-2. Click **Connect**. If a Windows PC is asleep, BroLink wakes it and waits.
-   The first time, it pairs by itself: the PIN goes to BroLink on that
+2. Click **Connect**. If a Windows PC is asleep, Latch wakes it and waits.
+   The first time, it pairs by itself: the PIN goes to Latch on that
    machine over Tailscale, which enters it for you.
 3. The desktop appears, full screen by default, and nothing else: the
    mouse is captured the moment you click the picture, as in a game, so
@@ -43,18 +51,18 @@ machine answers only peers signed in to the same Tailscale account.
 
 1. Install [Tailscale](https://tailscale.com/download/windows) and sign in
    with the account you use on the Mac.
-2. Download `brolink-windows-x64.zip` from the
-   [latest release](https://github.com/MrBeldum/brolink/releases/latest)
-   and unzip it. Run `brolink-host.exe`, or `install-host.ps1` for
+2. Download `latch-windows-x64.zip` from the
+   [latest release](https://github.com/MrBeldum/latch/releases/latest)
+   and unzip it. Run `latch-host.exe`, or `install-host.ps1` for
    shortcuts and start-at-logon.
 3. On the **Sharing** tab, click **Set up as administrator**. One administrator prompt installs the bundled
    streaming engine as a Windows service (if none is installed), gives
-   BroLink a login to it, opens the control port to your tailnet only,
+   Latch a login to it, opens the control port to your tailnet only,
    turns Fast Startup off and arms the network card for Wake-on-LAN.
    The same window lists every other machine on the account; **Connect**
    opens their desktop.
 
-Advanced engine settings are not exposed; BroLink configures the engine
+Advanced engine settings are not exposed; Latch configures the engine
 itself. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Mac (Apple Silicon)
@@ -64,20 +72,20 @@ command downloads the app, clears the quarantine flag and copies it to
 `/Applications`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MrBeldum/latch/main/scripts/install-macos-release.sh | bash
 ```
 
-Or download `brolink-macos-arm64.tar.gz` from the
-[latest release](https://github.com/MrBeldum/brolink/releases/latest) and
+Or download `latch-macos-arm64.tar.gz` from the
+[latest release](https://github.com/MrBeldum/latch/releases/latest) and
 
 ```bash
-tar xzf brolink-macos-arm64.tar.gz
-xattr -dr com.apple.quarantine BroLink.app
-open BroLink.app
+tar xzf latch-macos-arm64.tar.gz
+xattr -dr com.apple.quarantine Latch.app
+open Latch.app
 ```
 
 The `xattr` step is needed for a browser download because the app is
-ad-hoc signed rather than Developer-ID signed. Open BroLink and set up
+ad-hoc signed rather than Developer-ID signed. Open Latch and set up
 sharing on the **Sharing** tab so a Windows PC (or another Mac) can Connect here;
 macOS will ask for Screen Recording the first time. Details, including the
 toolbar and keyboard behaviour, in [docs/MACOS.md](docs/MACOS.md).
@@ -85,7 +93,7 @@ toolbar and keyboard behaviour, in [docs/MACOS.md](docs/MACOS.md).
 ### Linux / VPS (Docker)
 
 A container that shares a virtual desktop on the tailnet, so Mac and
-Windows BroLink can Connect to it. Several copies on one host are several
+Windows Latch can Connect to it. Several copies on one host are several
 machines. See [deploy/node/NODE.md](deploy/node/NODE.md).
 
 ```bash
@@ -99,16 +107,35 @@ relay, as this project's own VPS does: [deploy/native/README.md](deploy/native/R
 The packet relay (when two NATs cannot punch through) is a separate kit:
 [deploy/relay/RELAY.md](deploy/relay/RELAY.md).
 
+## Coming from BroLink
+
+Latch was called BroLink until 4.1.0. An installed BroLink updates itself
+to Latch and keeps its settings, its pairing and its streaming engine, and
+every machine that updates can still talk to one that has not yet.
+
+- **Mac:** the app moves from `BroLink.app` to `Latch.app` the first time
+  it runs, and its login item with it.
+- **Windows:** the host updates in place and keeps working. To move it to
+  the new folder and names (`%LOCALAPPDATA%\Latch`, `latch-host.exe`, the
+  `LatchStream` service), run `install-host.ps1` from the new zip, then
+  **Set up as administrator** once on the **Sharing** tab.
+- **Linux:** the first start registers `latch.service` and retires
+  `brolink.service`. The files in `deploy/native/` have new names; see
+  [deploy/native/README.md](deploy/native/README.md).
+
+The environment variables beginning `BROLINK_` are now `LATCH_`; for
+`LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` the old names still work.
+
 ## Updates
 
-BroLink keeps itself current. Every few hours the Mac app asks GitHub for
+Latch keeps itself current. Every few hours the Mac app asks GitHub for
 the latest release. A newer app is downloaded, checked against the digest
 GitHub publishes and its own code signature, swapped into `/Applications`
-once no stream is running, and relaunched. A newer BroLink Host is sent
+once no stream is running, and relaunched. A newer Latch Host is sent
 from the Mac to every PC whose host reports an older version, over the same
 Tailscale-authenticated control API that can put the PC to sleep; the host
 verifies the digest, replaces its executable and restarts. That path
-updates only `brolink-host.exe`. The Windows zip on GitHub also contains
+updates only `latch-host.exe`. The Windows zip on GitHub also contains
 the pinned engine archive for first-time setup; a host update
 does not install or migrate the engine. A PC that is asleep gets the host
 update the next time the Mac sees it. Nothing is downloaded on the PC, and
@@ -116,7 +143,7 @@ no GitHub login is needed there.
 
 Public releases need no GitHub login. If the repository is private, the Mac
 uses the GitHub token git has stored for github.com,
-`BROLINK_GITHUB_TOKEN`, or `github_token` in `client.toml`. Settings has the
+`LATCH_GITHUB_TOKEN`, or `github_token` in `client.toml`. Settings has the
 switch and a **Check now** button. Hosts installed before 3.1 do not have the
 update route: install that release on the PC once (through the stream works),
 after which updates are automatic.
@@ -124,14 +151,14 @@ after which updates are automatic.
 ## Staying reachable
 
 A PC nobody can get to in person stays reachable when three things hold.
-BroLink Host starts with Windows by default and turns this back on at every
+Latch Host starts with Windows by default and turns this back on at every
 start unless the owner switches it off in the host window. The streaming
 engine runs as a Windows service, so streaming works even before anyone
 logs in. And the
 PC's Tailscale node key must not expire: Tailscale keys expire after 180
 days unless key expiry is disabled for that machine in the
 [admin console](https://login.tailscale.com/admin/machines), and an expired
-key needs a sign-in at the PC. BroLink shows the expiry of every machine it
+key needs a sign-in at the PC. Latch shows the expiry of every machine it
 lists, this Mac included, until expiry is disabled. Pairing and the PC's
 addresses are saved on the Mac, so PCs stay listed even while Tailscale on
 the Mac is off.
@@ -140,7 +167,7 @@ the Mac is off.
 
 A wake packet has to reach the PC's network card on the PC's own network.
 Tailscale cannot deliver it, because the sleeping PC's Tailscale is asleep
-too. BroLink sends the packet to the LAN broadcast, to the PC's LAN address
+too. Latch sends the packet to the LAN broadcast, to the PC's LAN address
 and to the PC's public address.
 
 | Where the Mac is | Asleep | Shut down |
@@ -149,7 +176,7 @@ and to the PC's public address.
 | Elsewhere | needs the PC's router to forward UDP 9 to the PC, or a Tailscale subnet router on that network | same, and the firmware condition |
 
 **Test waking it from this network** in a machine's **…** menu settles it for the network you are
-on: it sends the packet while the PC is awake and asks BroLink there whether
+on: it sends the packet while the PC is awake and asks Latch there whether
 it arrived. Setup on the PC takes care of Windows' side (Fast Startup off,
 the adapter's wake keywords, wake allowed in power management). Wired
 Ethernet is strongly preferred; most Wi-Fi adapters cannot wake a PC.
@@ -165,9 +192,9 @@ Ethernet is strongly preferred; most Wi-Fi adapters cannot wake a PC.
   firewall rule setup adds is scoped to `100.64.0.0/10`.
 - The stream is the GameStream protocol (moonlight-common-c on the viewer,
   Sunshine on the host), encrypted, inside Tailscale (WireGuard), with
-  certificate pairing on top; BroLink pins the PC's certificate after the
+  certificate pairing on top; Latch pins the PC's certificate after the
   first pairing.
-- No BroLink account or password exists. The engine login BroLink
+- No Latch account or password exists. The engine login Latch
   generates stays on the PC.
 - Remote power actions can be turned off in the host window.
 
@@ -177,7 +204,7 @@ Needs Rust, a C compiler (MSVC Build Tools or Xcode command line tools) and
 CMake (for the Opus decoder).
 
 ```powershell
-cargo build --release -p brolink-host          # Windows
+cargo build --release -p latch-host          # Windows
 ```
 
 ```bash
@@ -200,7 +227,7 @@ crates/stream   the stream client: pairing, launch, protocol, decode, audio
 crates/host     node: control service, engine setup, unified window (view + share)
 crates/client   viewer UI: machine list, wake, pair, stream window and toolbar
 crates/ui       theme and widgets shared by both windows
-deploy/node/    Docker kit: virtual desktop + engine + BroLink on a VPS
+deploy/node/    Docker kit: virtual desktop + engine + Latch on a VPS
 deploy/native/  systemd user units for the same desktop without Docker
 deploy/relay/   Docker kit: Tailscale peer relay
 third_party/    moonlight-common-c (GPL-3.0), vendored; VERSION says what and why
@@ -210,8 +237,8 @@ scripts/        installers and the macOS bundle
 
 ## License
 
-GPL-3.0-or-later; see [LICENSE](LICENSE). BroLink compiles in
+GPL-3.0-or-later; see [LICENSE](LICENSE). Latch compiles in
 moonlight-common-c (GPL-3.0) and ships Sunshine's Windows lite archive
 (GPL-3.0) unmodified; on the PC, setup gives the unpacked executables
-BroLink's name and icon and keeps their copyright and licence strings.
+Latch's name and icon and keeps their copyright and licence strings.
 Third-party notices are in [NOTICE](NOTICE).

@@ -22,10 +22,10 @@ pub const OLD_CONFIG: &[&str] = &[
     r"C:\Program Files\Apollo\config",
 ];
 
-/// Restart-Service match after a creds write; includes the BroLink service.
-pub const SERVICE_MATCH: &str = "Sunshine|Apollo|BroLinkStream";
+/// Restart-Service match after a creds write; includes the Latch service.
+pub const SERVICE_MATCH: &str = "Sunshine|Apollo|LatchStream";
 
-/// Stop+disable only the upstream engines, never BroLinkStream.
+/// Stop+disable only the upstream engines, never LatchStream.
 pub const OLD_SERVICE_MATCH: &str = "Sunshine|Apollo";
 
 pub fn uses_old_engine(kind: &str) -> bool {
@@ -38,7 +38,7 @@ fn ps_rel(parts: &[&str]) -> String {
 
 pub fn stop_old_ps() -> String {
     format!(
-        r#"Step "Stopping the old streaming service so only BroLink listens"
+        r#"Step "Stopping the old streaming service so only Latch listens"
 Get-Service | Where-Object {{ $_.Name -match '{OLD_SERVICE_MATCH}' }} | ForEach-Object {{
     Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue
     Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue
@@ -64,7 +64,7 @@ pub fn copy_ps(engine_dir: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        r#"Step "Copying streaming state into BroLink"
+        r#"Step "Copying streaming state into Latch"
 $src = @({sources}) | Where-Object {{ Test-Path (Join-Path $_ 'sunshine_state.json') }} | Select-Object -First 1
 if (-not $src) {{ throw "no previous engine state to migrate" }}
 $dest = Join-Path '{engine}' 'config'
@@ -134,7 +134,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $oldRoot 'sunshine.exe'))) {{
     }}
 }}
 "#,
-        port = brolink_core::SUNSHINE_PORT,
+        port = latch_core::SUNSHINE_PORT,
         code = PRODUCT_CODE,
     )
 }
@@ -147,7 +147,7 @@ mod tests {
     fn only_upstream_engines_need_migration() {
         assert!(uses_old_engine("Sunshine"));
         assert!(uses_old_engine("Apollo"));
-        assert!(!uses_old_engine("BroLink"));
+        assert!(!uses_old_engine("Latch"));
         assert!(!uses_old_engine(""));
     }
 
@@ -180,13 +180,13 @@ mod tests {
                 "{line}"
             );
         }
-        assert!(!s.contains("BroLink\\engine"), "{s}");
+        assert!(!s.contains("Latch\\engine"), "{s}");
         assert!(after_start_ps(true).is_empty());
     }
 
     #[test]
     fn copy_ps_names_the_live_inventory() {
-        let s = copy_ps(r"C:\Program Files\BroLink\engine");
+        let s = copy_ps(r"C:\Program Files\Latch\engine");
         assert!(s.contains("sunshine_state.json"), "{s}");
         assert!(s.contains(r"credentials\cacert.pem"), "{s}");
         assert!(s.contains(r"credentials\cakey.pem"), "{s}");

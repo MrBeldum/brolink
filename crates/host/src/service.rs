@@ -15,13 +15,13 @@ use crate::streamer::{self, Api, Install};
 use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
-use brolink_core::api::{
+use latch_core::api::{
     Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerRequest, Status, Streamer,
     CLIPBOARD_PATH, UPDATE_PATH,
 };
-use brolink_core::http::{self, Request, Response};
-use brolink_core::tailscale::{self, is_tailnet_ip};
-use brolink_core::CONTROL_PORT;
+use latch_core::http::{self, Request, Response};
+use latch_core::tailscale::{self, is_tailnet_ip};
+use latch_core::CONTROL_PORT;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -68,7 +68,7 @@ impl Service {
     pub fn new() -> Self {
         Self {
             cfg: Mutex::new(HostConfig::load()),
-            name: Mutex::new(brolink_core::config::machine_name()),
+            name: Mutex::new(latch_core::config::machine_name()),
             tailscale: Mutex::new(Err("not checked yet".into())),
             wake: Mutex::new(WakeInfo::default()),
             wake_seen: Mutex::new(None),
@@ -129,7 +129,7 @@ impl Service {
                     // restarts on failure then leaves the running one alone
                     // instead of respawning this one every few seconds.
                     self.log(format!(
-                        "another BroLink service already answers on TCP {CONTROL_PORT}; this copy exits ({e})"
+                        "another Latch service already answers on TCP {CONTROL_PORT}; this copy exits ({e})"
                     ));
                     return Ok(());
                 }
@@ -137,7 +137,7 @@ impl Service {
             }
         };
         self.log(format!(
-            "BroLink Host {} listening on TCP {CONTROL_PORT}",
+            "Latch Host {} listening on TCP {CONTROL_PORT}",
             env!("CARGO_PKG_VERSION")
         ));
         if let Ok(exe) = std::env::current_exe() {
@@ -235,10 +235,10 @@ impl Service {
         } else {
             running && self.streamer.lock().api_ok
         };
-        // Apply the streaming profile on any engine BroLink can log into,
+        // Apply the streaming profile on any engine Latch can log into,
         // after any old app has ended. The marker survives panel/config saves.
         if tick.is_multiple_of(6) && api_ok && install.is_some() {
-            if let Ok(dir) = brolink_core::config::data_dir() {
+            if let Ok(dir) = latch_core::config::data_dir() {
                 let marker = dir.join("stream-profile-v3");
                 if !marker.exists() {
                     let api = Api {
@@ -292,11 +292,11 @@ impl Service {
             if (cur.installed, cur.running, cur.api_ok) != (st.installed, st.running, st.api_ok) {
                 self.log(match (&st.installed, &st.running, &st.api_ok) {
                     (false, _, _) => "the streaming engine is not installed".to_string(),
-                    (true, false, _) => "BroLink is installed but not sharing yet".to_string(),
+                    (true, false, _) => "Latch is installed but not sharing yet".to_string(),
                     (true, true, false) => {
-                        "BroLink is running; the streaming engine has no working login yet".into()
+                        "Latch is running; the streaming engine has no working login yet".into()
                     }
-                    (true, true, true) => "BroLink is sharing this machine".to_string(),
+                    (true, true, true) => "Latch is sharing this machine".to_string(),
                 });
             }
             if cur.encoder != st.encoder && !st.encoder.is_empty() {
@@ -334,7 +334,7 @@ impl Service {
         }
 
         if tick.is_multiple_of(12) {
-            *self.name.lock() = brolink_core::config::machine_name();
+            *self.name.lock() = latch_core::config::machine_name();
             let w = wake::probe();
             let mut cur = self.wake.lock();
             if *cur != w {
@@ -385,7 +385,7 @@ impl Service {
     }
 
     /// A magic packet arrived while awake: remember when, for the status.
-    fn wake_packet(&self, mac: brolink_core::wake::MacAddr, from: SocketAddr) {
+    fn wake_packet(&self, mac: latch_core::wake::MacAddr, from: SocketAddr) {
         let own = self.wake.lock().mac.clone();
         if own.as_deref() != Some(mac.to_string().as_str()) {
             return;
@@ -411,10 +411,11 @@ impl Service {
         } else if !streamer.running {
             setup.push("The streaming engine is installed but not running.".into());
         } else if !streamer.api_ok {
-            setup.push("BroLink has no working login for the streaming engine.".into());
+            setup.push("Latch has no working login for the streaming engine.".into());
         } else if cfg!(windows)
-            && streamer.kind == "BroLink"
-            && !crate::brand::is_branded_cached(std::path::Path::new(crate::streamer::ENGINE_DIR))
+            && latch_core::legacy::is_own_streamer_kind(&streamer.kind)
+            && !crate::streamer::find()
+                .is_some_and(|install| crate::brand::is_branded_cached(&install.dir))
         {
             setup.push(
                 "The streaming engine still shows its upstream name and icon in Task Manager."
@@ -433,7 +434,7 @@ impl Service {
             );
         }
         Status {
-            app: "brolink".into(),
+            app: latch_core::APP_ID.into(),
             version: env!("CARGO_PKG_VERSION").into(),
             name: self.name.lock().clone(),
             os: ts
@@ -570,14 +571,14 @@ impl Service {
         // A web page open in a browser on an authorised machine (this PC,
         // or the Mac) can POST here without asking: a cross-origin form
         // post needs no preflight, and sleep, quit or a clipboard write
-        // happen whether or not the page can read the reply. BroLink's own
+        // happen whether or not the page can read the reply. Latch's own
         // callers send JSON or an executable, neither of which a browser
         // can send cross-origin without a preflight that nothing here
         // answers.
-        if req.method == "POST" && !sent_by_brolink(req) {
+        if req.method == "POST" && !sent_by_latch(req) {
             return Response::json(
                 403,
-                &Ack::err("a BroLink request carries JSON or an executable"),
+                &Ack::err("a Latch request carries JSON or an executable"),
             );
         }
         let local = peer.ip().is_loopback();
@@ -611,7 +612,7 @@ impl Service {
         }
     }
 
-    /// A newer `brolink-host.exe` from the Mac: stage it, answer, then swap
+    /// A newer `latch-host.exe` from the Mac: stage it, answer, then swap
     /// it in and hand over. See [`crate::update`].
     fn update(&self, from: IpAddr, req: &Request) -> Response {
         if !cfg!(windows) {
@@ -620,7 +621,9 @@ impl Service {
             // fail to start and be retried.
             return Response::json(
                 400,
-                &Ack::err("only a Windows PC takes a pushed brolink-host.exe; this machine updates itself"),
+                &Ack::err(
+                    "only a Windows PC takes a pushed latch-host.exe; this machine updates itself",
+                ),
             );
         }
         if self.update_running.swap(true, Ordering::AcqRel) {
@@ -645,7 +648,7 @@ impl Service {
         match update::stage(req, &exe) {
             Ok(version) => {
                 self.log(format!(
-                    "updating to {version}: {from} sent the new BroLink Host"
+                    "updating to {version}: {from} sent the new Latch Host"
                 ));
                 let running = self.update_running.clone();
                 let log = self.log.clone();
@@ -684,7 +687,7 @@ impl Service {
             return Response::json(
                 502,
                 &Ack::err(
-                    "BroLink cannot log in to the streaming engine on this PC; run setup there",
+                    "Latch cannot log in to the streaming engine on this PC; run setup there",
                 ),
             );
         }
@@ -909,10 +912,10 @@ pub fn ensure_service_running() {
     }
 }
 
-/// The `Content-Type` BroLink's own callers send: JSON, or the executable
+/// The `Content-Type` Latch's own callers send: JSON, or the executable
 /// on the update route. A browser cannot send either cross-origin without
 /// a CORS preflight, so this keeps web pages from driving the service.
-fn sent_by_brolink(req: &Request) -> bool {
+fn sent_by_latch(req: &Request) -> bool {
     let ct = req
         .header("content-type")
         .unwrap_or("")
@@ -1050,7 +1053,7 @@ mod tests {
             headers: vec![("content-type".into(), "application/json-not-really".into())],
             ..Default::default()
         };
-        assert!(!sent_by_brolink(&req));
+        assert!(!sent_by_latch(&req));
     }
 
     #[test]
@@ -1074,7 +1077,7 @@ mod tests {
     #[test]
     fn wake_evidence_requires_a_known_matching_adapter() {
         let svc = Service::new();
-        let mac = brolink_core::wake::MacAddr::parse("02:00:00:00:00:01").unwrap();
+        let mac = latch_core::wake::MacAddr::parse("02:00:00:00:00:01").unwrap();
         let from = "192.168.1.2:9".parse().unwrap();
         svc.wake_packet(mac, from);
         assert!(svc.wake_seen.lock().is_none());
@@ -1099,7 +1102,7 @@ mod tests {
         let r = svc.handle("127.0.0.1:5".parse().unwrap(), &req);
         assert_eq!(r.status, 200);
         let st: Status = r.parse().unwrap();
-        assert_eq!(st.app, "brolink");
+        assert_eq!(st.app, "latch");
         assert!(!st.name.is_empty());
     }
 
@@ -1140,7 +1143,7 @@ mod tests {
                 method: "POST".into(),
                 path: UPDATE_PATH.into(),
                 headers: vec![
-                    ("x-brolink-version".into(), "0.0.1".into()),
+                    ("x-latch-version".into(), "0.0.1".into()),
                     ("content-type".into(), "application/octet-stream".into()),
                 ],
                 body: b"MZ".to_vec(),
@@ -1191,7 +1194,7 @@ mod tests {
                 assert_eq!(r.status, 403, "{path} with {ct:?}: {}", r.body);
             }
         }
-        // BroLink's own callers are unaffected, whatever the case of the header.
+        // Latch's own callers are unaffected, whatever the case of the header.
         let r = svc.handle(
             local,
             &Request {

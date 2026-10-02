@@ -4,12 +4,36 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## Unreleased
+## 4.1.0 (2026-10-02)
 
+- **BroLink is now Latch, by Bardbro.** The app, the repository
+  (`github.com/MrBeldum/latch`), the release files (`latch-macos-arm64.tar.gz`,
+  `latch-windows-x64.zip`), the executables (`Latch.app`, `latch-host.exe`),
+  the services and login items, the environment variables (`LATCH_*`) and
+  bardbro.com all carry the new name, with a new logo: a square with a
+  corner cut away, and a blue square in the cut. Bardbro is the
+  project behind it, for cloud gaming.
+- An installed BroLink updates itself to Latch. Settings, the pairing
+  identity, paired devices and the streaming engine carry over. On a Mac
+  the app moves from `BroLink.app` to `Latch.app` the first time it runs
+  and its login item with it; on Linux `latch.service` replaces
+  `brolink.service`; on Windows the host keeps working in place, and
+  `install-host.ps1` followed by **Set up as administrator** moves it to
+  `%LOCALAPPDATA%\Latch`, the `LatchStream` service and the new firewall
+  rule names. Machines on either name still find each other, and a 4.1 Mac
+  can still update a 4.0 PC. The release also carries
+  `brolink-macos-arm64.tar.gz` and `brolink-windows-x64.zip`, which are the
+  same builds under the old file names, because a 4.0 updater looks for
+  nothing else. Everything that still says BroLink is in
+  `crates/core/src/legacy.rs` and `crates/host/src/legacy.rs`.
+- `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` replace the `BROLINK_` names,
+  which still work. The Docker node and relay read `LATCH_*`.
+- The About page names Bardbro and links to bardbro.com. The accent
+  colour for focus and progress is the logo's blue, where it was violet.
 - The window is redesigned around one design system, in the product
   site's black, white and hairlines, set in Geist and Geist Mono. Colour
   now means something: green for ready, amber for needs attention, red
-  for broken, and the logo's violet only for keyboard focus and
+  for broken, and the logo's blue only for keyboard focus and
   progress. Every text colour meets WCAG AA on every surface it sits on;
   the old footer and captions did not.
 - Tabs across the top: **Machines**, **Sharing** and **Settings**
@@ -65,7 +89,7 @@ GitHub release notes, so each version gets a heading of the form
   Tailscale account. Since 4.0.0 it answered any machine Tailscale could
   name, so a machine shared in from someone else's tailnet could pair with
   the PC, sleep or restart it, read and write its clipboard, and push it a
-  new `brolink-host.exe`. A tagged server such as the relay VPS belongs to
+  new `latch-host.exe`. A tagged server such as the relay VPS belongs to
   no account, so it answers the members of its own tailnet, which keeps a
   Mac able to open the VPS desktop.
 - Text copied on a Mac or Linux machine you are streaming from now reaches
@@ -77,15 +101,15 @@ GitHub release notes, so each version gets a heading of the form
 - A Windows PC whose pushed update crashes on start keeps the version it
   had. The service used to exit as soon as the new executable had been
   launched, so a replacement that died straight away left the PC with no
-  BroLink service until someone logged in again. It now waits two seconds,
+  Latch service until someone logged in again. It now waits two seconds,
   and puts the previous executable back if the new one has already exited.
   The PC's log says so, and the Mac warns once instead of sending the same
   release again every three minutes.
 - Update downloads try each of a server's addresses in turn. Only the first
   one the name resolved to was ever tried, so one unreachable address (an
   IPv6 one on a network without IPv6, say) failed the whole update check.
-- `brolink-host.exe`'s version details (Explorer's Details tab) named the
-  wrong licence, MIT; they now say GPL-3.0-or-later, the licence BroLink
+- `latch-host.exe`'s version details (Explorer's Details tab) named the
+  wrong licence, MIT; they now say GPL-3.0-or-later, the licence Latch
   and moonlight-common-c are under.
 - Windows setup no longer breaks on a network adapter whose name holds a
   `"` or a `$`. The name was written into a double-quoted PowerShell
@@ -100,7 +124,7 @@ GitHub release notes, so each version gets a heading of the form
   would try to send other Windows PCs their update with a Mac-only unzip,
   failing every few minutes. Its settings now say that updates arrive
   from the Mac.
-- Installing BroLink Host through the stream (for a PC on 3.0) can finish
+- Installing Latch Host through the stream (for a PC on 3.0) can finish
   on a Mac. The Mac served the file from a socket that macOS left
   non-blocking, so sending the executable stopped as soon as the network
   buffer filled and the PC rejected the truncated download.
@@ -117,10 +141,10 @@ GitHub release notes, so each version gets a heading of the form
   and the network line only when the NAT itself changes.
 - When the Mac's sound output changes mid-stream (AirPods connect, say),
   the stream's stats name the device the sound moved to. macOS already
-  moved it; BroLink kept naming the old one and logged a warning.
+  moved it; Latch kept naming the old one and logged a warning.
 - A host update that lands is no longer reported as a failure. A PC can
   take the new executable and restart before its reply reaches the Mac;
-  the Mac then retried, heard "this PC already runs BroLink Host 4.0.2",
+  the Mac then retried, heard "this PC already runs Latch Host 4.0.2",
   and showed "Could not update" in red. It now asks the PC which version
   it runs before calling a push failed.
 - Cancel stops a connection attempt straight away while the PC is not
@@ -176,11 +200,11 @@ GitHub release notes, so each version gets a heading of the form
   duplicate every ten seconds for the rest of the session and a service
   launchd started at login is no longer killed by its own registration.
   Turning the login item off in the panel leaves the running service alone.
-- Only a Windows PC accepts a pushed `brolink-host.exe`; a Mac or a
+- Only a Windows PC accepts a pushed `latch-host.exe`; a Mac or a
   container answers 400 instead of trying to swap it in, and the Mac only
   sends one to Windows machines.
 - Elevated Windows setup approved with another administrator's password
-  reads and writes the launching user's BroLink folder, so the engine login
+  reads and writes the launching user's Latch folder, so the engine login
   it configures is that user's.
 - The updater takes the window's locks in the window's order; the reverse
   could hang the app when an update was ready just as a stream ended.
@@ -206,15 +230,15 @@ GitHub release notes, so each version gets a heading of the form
   packets, no extra 500 kbps tax, and the bitrate is sent at launch as
   well as over RTSP.
 - The streaming engine is not a second app. Status, logs, the Dock and
-  the app list say BroLink; only Desktop is launched.
+  the app list say Latch; only Desktop is launched.
 
-- BroLink is a mesh. Every install lists every other machine on the
+- Latch is a mesh. Every install lists every other machine on the
   Tailscale account — Windows, Mac, Linux, a VPS container — and Connect
   opens that desktop. The same app shares this machine: Mac and Linux
   install the streaming engine; Windows still does. There is no designated
   host or client role.
 - `deploy/node/` is a Docker kit for a VPS or any container: a virtual
-  desktop, the streaming engine, BroLink's control service, and optional
+  desktop, the streaming engine, Latch's control service, and optional
   Tailscale userspace so the container is its own machine. Several copies
   on one host are several machines. The packet relay stays `deploy/relay/`.
 - Stream bitrate holds the target instead of swinging with the scene.
@@ -245,7 +269,7 @@ GitHub release notes, so each version gets a heading of the form
 - Every Tailscale CLI call is bounded (10 s; the per-request `whois` 2 s),
   and its output is drained while it runs, so a slow or chatty CLI cannot
   hang the window or the control service.
-- Host setup runs `brolink-host --setup-elevated` after UAC, writes its
+- Host setup runs `latch-host --setup-elevated` after UAC, writes its
   script under `%SystemRoot%\Temp` (administrators only) and passes the
   engine take-over helper as an encoded command, instead of running a
   user-writable `setup.ps1`. Repair setup registers the engine service when
@@ -254,7 +278,7 @@ GitHub release notes, so each version gets a heading of the form
   username is not expanded. The logon task for the take-over helper runs
   with limited rights.
 - The engine login is written as the engine's own hashed credentials file
-  (`brolink-web.json`, `credentials_file =` in `sunshine.conf`) instead of
+  (`latch-web.json`, `credentials_file =` in `sunshine.conf`) instead of
   `sunshine --creds` on a command line, and the engine's web API is called
   with the password on stdin (`curl --config -`), so neither the setup log
   nor the process list shows it. The Docker node does the same through
@@ -268,7 +292,7 @@ GitHub release notes, so each version gets a heading of the form
   until moonlight's detached termination thread has nowhere to call; a
   decode unit whose buffer list overruns its declared length is refused.
 - The migration check reads the installed engine's real kind instead of
-  labelling every install "BroLink". The macOS launch agent and Linux user
+  labelling every install "Latch". The macOS launch agent and Linux user
   unit escape the executable path, and a failure to register them is
   reported instead of ignored. Spawned engine and service processes are
   reaped. A settings save failure shows in the window.
@@ -300,7 +324,7 @@ GitHub release notes, so each version gets a heading of the form
 - The Dock icon is the bundle icns, in macOS's rounded app-icon shape.
   eframe was replacing it at runtime with a 64-pixel square of the logo,
   and the icns had been pre-masked with transparent corners, which macOS
-  26 draws as a square plate. `scripts/make-macos-icon.py` now fills the
+  26 draws as a square plate. `scripts/make-icons.py` now fills the
   canvas and lets the system apply the shape.
 - The Windows host icon (Explorer, taskbar, Alt-Tab, the window, and the
   in-app header) is the same filled tile. The logo's outer pad had left a
@@ -320,7 +344,7 @@ GitHub release notes, so each version gets a heading of the form
   your relay or through Tailscale's; a long round trip adds delay, not a
   bitrate or frame-rate cap. The engine's own bitrate ceiling is cleared
   and it is asked to keep frames flowing while the desktop is still. A PC set up
-  by an earlier BroLink gets the same profile applied once by the service,
+  by an earlier Latch gets the same profile applied once by the service,
   between sessions. The quick profiles are now Smooth (1080p · 60 fps ·
   12 Mbps), Balanced (match screen · 60 · 35) and Sharp (match screen ·
   60 · 65).
@@ -349,7 +373,7 @@ GitHub release notes, so each version gets a heading of the form
 - A private Tailscale peer relay you run yourself. `deploy/relay/` is a
   Docker kit for a VPS (UDP 40000, iptables above the cloud REJECT, state
   volume, wait-for-Running before `tailscale set`). Tailscale's own DERP
-  stays the fallback; BroLink adds no relay protocol of its own. Settings
+  stays the fallback; Latch adds no relay protocol of its own. Settings
   shows a Relay card with the exact state: no relay on this network, a
   relay that this device is not granted, or ready. Needs Tailscale 1.86 or
   later on every device.
@@ -357,14 +381,14 @@ GitHub release notes, so each version gets a heading of the form
   goes up to 1440p60 at 40 Mbps by round trip; the DERP and direct tiers are
   unchanged. Tagged relay nodes never appear in the PC list.
 - The Windows streaming engine now unpacks from the pinned lite archive to
-  `C:\Program Files\BroLink\engine` as the "BroLink Streaming" service:
+  `C:\Program Files\Latch\engine` as the "Latch Streaming" service:
   no Apps & Features entry, Start Menu shortcut, tray icon or web-UI link.
-  Firewall rules are named "BroLink". An engine installed earlier by an
+  Firewall rules are named "Latch". An engine installed earlier by an
   MSI is migrated in order — copy state, verify, start, prove it listens,
   then uninstall the MSI — and keeps its pairing and web login; a
   `config.bak` is left beside it and the old install folder is removed
-  once the MSI is gone. The engine's processes appear as "BroLink
-  Streaming" with BroLink's icon in Task Manager, the volume mixer and
+  once the MSI is gone. The engine's processes appear as "Latch
+  Streaming" with Latch's icon in Task Manager, the volume mixer and
   firewall prompts: setup rewrites their version block and icon in place
   and keeps their copyright and licence strings. The host offers
   **Update this PC** after
@@ -420,7 +444,7 @@ GitHub release notes, so each version gets a heading of the form
 
 A hardening release: both apps parse the network more strictly, update
 themselves more carefully, and the stream validates what the PC sends
-before acting on it. Nothing changes in how you use BroLink.
+before acting on it. Nothing changes in how you use Latch.
 
 ### Control API
 
@@ -428,7 +452,7 @@ before acting on it. Nothing changes in how you use BroLink.
   proper HTTP line endings and versions, and are refused when they carry
   chunked encoding, duplicate framing headers or a malformed
   `Content-Length`. Bodies grow only as bytes arrive.
-- BroLink Host checks who is asking before it reads a single header,
+- Latch Host checks who is asking before it reads a single header,
   keeps at most sixteen connections open, and turns away browser
   requests (including ones a rebound hostname makes look local).
 
@@ -438,10 +462,10 @@ before acting on it. Nothing changes in how you use BroLink.
   publishes before installing it, stages the new app on the same volume
   so a failed copy cannot leave a half-installed app, and no longer
   passes its own path through a shell when relaunching.
-- BroLink Host accepts only a 64-bit Windows executable image, installs
+- Latch Host accepts only a 64-bit Windows executable image, installs
   one update at a time, and puts the previous executable back if the new
   one fails to start.
-- BroLink Host no longer rewrites the Windows power plan every few
+- Latch Host no longer rewrites the Windows power plan every few
   seconds; **Keep this PC awake while plugged in** now does exactly that.
 
 ### Stream
@@ -473,15 +497,15 @@ you across.
 - The Mac checks GitHub about every six hours and twenty seconds after it
   starts (Settings has the switch and **Check now**). A newer app is
   downloaded, checked against the SHA-256 GitHub publishes and against its
-  own code signature, moved over `/Applications/BroLink.app` once no
+  own code signature, moved over `/Applications/Latch.app` once no
   stream is running, and relaunched.
-- The Mac sends the new `brolink-host.exe` to every PC whose BroLink Host
+- The Mac sends the new `latch-host.exe` to every PC whose Latch Host
   reports an older version, over the same Tailscale-authenticated control
   API that can put the PC to sleep (`POST /v1/update`). The host verifies
   the digest, that the bytes are a Windows executable and a newer version,
   swaps the file in beside itself and restarts; a running stream is not
   interrupted. A PC that is asleep gets it the next time the Mac sees it.
-- A PC still on 3.0 has no update route. **PC → Update BroLink Host…** in
+- A PC still on 3.0 has no update route. **PC → Update Latch Host…** in
   the stream toolbar installs 3.1 through the stream: the Mac serves the
   executable on its own Tailscale address to that PC only, presses Win+R,
   types one PowerShell line and presses Enter; the script checks the
@@ -504,12 +528,12 @@ you across.
   HEVC reference-frame invalidation, so a lost packet costs a repair frame
   rather than a keyframe. An explicit HEVC choice no longer falls back to
   H.264. Stats show packet loss, path and quality.
-- BroLink Host reads which encoder Sunshine settled on from its log; the
+- Latch Host reads which encoder Sunshine settled on from its log; the
   lobby and the host window warn when it is software encoding.
 
 ### Clipboard
 
-- BroLink Host serves `/v1/clipboard` (text only, up to 32 KB). While
+- Latch Host serves `/v1/clipboard` (text only, up to 32 KB). While
   streaming, text copied on the PC is in the Mac's clipboard within a
   second, and ⌘V on the PC first sends the Mac's text across, then
   presses Ctrl+V there. Notices under the toolbar say when something
@@ -524,7 +548,7 @@ you across.
 
 ### Staying reachable
 
-- BroLink Host starts with Windows by default and sets that again at every
+- Latch Host starts with Windows by default and sets that again at every
   service start unless the owner turned it off. It holds the PC awake
   while plugged in (a new setting, on by default; setup also zeroes the AC
   sleep timers). The Mac's offer to sleep the PC after a session is off by
@@ -539,7 +563,7 @@ you across.
   format (48 kHz stereo f32 that the DAC refused was silence, with the
   reason only in the log). A short pre-roll avoids a click on the first
   packet; stats and a toast say where sound goes, or why it does not.
-- BroLink Host reads Sunshine's log for a failed audio capture (no
+- Latch Host reads Sunshine's log for a failed audio capture (no
   speakers, a missing sink). The lobby and the host window say so, with
   how to add a virtual device.
 
@@ -564,7 +588,7 @@ you across.
   held.
 - VideoToolbox recreates its session after sleep/wake or a GPU reset
   instead of staying on a black picture until reconnect.
-- An old BroLink Host window no longer kills a just-updated service in a
+- An old Latch Host window no longer kills a just-updated service in a
   loop; it relaunches itself from the new exe.
 - Setup scripts are UTF-8 with a BOM, so a Korean Windows username or
   adapter name is not mangled, and the Sunshine installer path is quoted
@@ -593,7 +617,7 @@ you across.
 
 ## 2.0.0 (2026-09-05)
 
-- Built on Sunshine, Moonlight and Tailscale; BroLink keeps wake, pairing
+- Built on Sunshine, Moonlight and Tailscale; Latch keeps wake, pairing
   and power.
 
 ## 1.2.0 (2026-09-05)

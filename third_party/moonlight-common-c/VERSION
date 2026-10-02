@@ -1,6 +1,6 @@
 874ac9548f1bd6f095ef2b435c42cdde460e7821 2026-08-18
 
-moonlight-common-c: the GameStream protocol engine BroLink's viewer links
+moonlight-common-c: the GameStream protocol engine Latch's viewer links
 (RTSP handshake, control and input channels, RTP video/audio reassembly with
 FEC). crates/stream/build.rs compiles the files listed in its SOURCES array
 and nothing else. GPL-3.0-or-later (LICENSE.txt); ENet and nanors keep their
@@ -21,7 +21,7 @@ Trimmed (not present here)
   - src/PlatformCrypto.c: crates/stream/src/crypto.rs implements the same
     Plt* functions in Rust, so no OpenSSL or mbedTLS is linked.
   - src/ConnectionTester.c (LiTestClientConnectivity) and src/SimpleStun.c
-    (LiFindExternalAddressIP4): public helpers BroLink never calls.
+    (LiFindExternalAddressIP4): public helpers Latch never calls.
     Limelight.h still declares them; nothing may call them.
   - src/RecorderCallbacks.c: only used when LC_DEBUG_RECORD_MODE is defined.
   - enet/compress.c: ENet's range coder; moonlight never enables compression.
@@ -30,13 +30,13 @@ Trimmed (not present here)
 
 Local patches
   1. src/ControlStream.c: enet_peer_timeout(peer, 2, 10000, 10000) becomes
-     enet_peer_timeout(peer, 3, 15000, 30000). BroLink streams often cross
+     enet_peer_timeout(peer, 3, 15000, 30000). Latch streams often cross
      a Tailscale peer relay on a long path, where a burst of loss silences
      the reliable control channel for seconds; upstream's 10 s limit then
      declared the PC dead and ended long sessions with "Connection lost
      (code -1)". A dead PC is still noticed within 30 s.
   2. src/SdpGenerator.c: the video bitrate latch is capped at 150000 kbps
-     instead of GFE's 100000. Sunshine has no 100 Mbps limit and BroLink's
+     instead of GFE's 100000. Sunshine has no 100 Mbps limit and Latch's
      bitrate setting goes to 150 Mbps.
 
 Re-vendoring
@@ -45,4 +45,4 @@ Re-vendoring
   oblas_lite}.[ch], nanors/deps/obl/gf2_8_*.h and nanors/LICENSE, drop the
   files listed above, re-apply both patches, update SOURCES in build.rs if
   upstream added or removed files, and update the commits here. Then run
-  `cargo test -p brolink-stream` and a live stream_real test.
+  `cargo test -p latch-stream` and a live stream_real test.

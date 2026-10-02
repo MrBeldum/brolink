@@ -2,7 +2,7 @@
 //! a listener that notices wake packets while the PC is awake.
 
 use anyhow::{Context, Result};
-use brolink_core::wake::{magic_target, MacAddr, WOL_PORTS};
+use latch_core::wake::{magic_target, MacAddr, WOL_PORTS};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
@@ -76,7 +76,7 @@ fn parse_probe(line: &str) -> WakeInfo {
     let mut f = line.trim().split('|').map(str::trim);
     let mac = f
         .next()
-        .and_then(brolink_core::wake::MacAddr::parse)
+        .and_then(latch_core::wake::MacAddr::parse)
         .map(|m| m.to_string());
     let adapter = f.next().unwrap_or("").to_string();
     let description = f.next().unwrap_or("").to_string();

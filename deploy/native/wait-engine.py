@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Wait until the systemd-managed engine is listening before starting BroLink."""
+"""Wait until the systemd-managed engine is listening before starting Latch."""
 import socket
 import time
 
@@ -10,4 +10,4 @@ for _ in range(100):
     except OSError:
         time.sleep(0.2)
 else:
-    raise SystemExit("BroLink streaming engine did not start listening")
+    raise SystemExit("Latch streaming engine did not start listening")

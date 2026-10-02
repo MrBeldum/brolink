@@ -27,9 +27,9 @@ class BootstrapTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             host, creds = Path(tmp) / 'host.toml', Path(tmp) / 'web.json'
             password = 'a"b\\c\n$123'
-            configure(host, creds, {'BROLINK_PASS': password})
+            configure(host, creds, {'LATCH_PASS': password})
             self.assertEqual(tomllib.loads(host.read_text())['sunshine_pass'], password)
-            configure(host, creds, {'BROLINK_PASS': 'new'})
+            configure(host, creds, {'LATCH_PASS': 'new'})
             self.assertEqual(tomllib.loads(host.read_text())['sunshine_pass'], 'new')
 
     def test_corruption_is_not_overwritten(self):

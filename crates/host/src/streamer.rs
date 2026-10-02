@@ -1,23 +1,26 @@
 //! Sunshine (or Apollo, its fork) on this PC: where it is, whether it is up,
-//! and the two web-API calls BroLink needs. The API is HTTPS with a
+//! and the two web-API calls Latch needs. The API is HTTPS with a
 //! self-signed certificate on localhost, so calls go through `curl.exe -k`
 //! rather than a TLS stack of our own.
 
 use anyhow::{bail, Context, Result};
-use brolink_core::{SUNSHINE_PORT, SUNSHINE_WEB_PORT};
+use latch_core::{SUNSHINE_PORT, SUNSHINE_WEB_PORT};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-/// Where BroLink unpacks its own copy of the streaming engine. Setup
+/// Where Latch unpacks its own copy of the streaming engine. Setup
 /// installs here; an engine installed by someone else stays where it is.
-pub const ENGINE_DIR: &str = r"C:\Program Files\BroLink\engine";
+pub const ENGINE_DIR: &str = r"C:\Program Files\Latch\engine";
 
 /// Install directories, in the order they are preferred when several
-/// exist. BroLink's own engine wins: it is the one setup configured.
-pub const INSTALL_DIRS: [(&str, &str); 3] = [
-    ("BroLink", ENGINE_DIR),
+/// exist. Latch's own engine wins: it is the one setup configured. The
+/// folder an earlier version used comes next: it is Latch's engine until
+/// setup moves it.
+pub const INSTALL_DIRS: [(&str, &str); 4] = [
+    ("Latch", ENGINE_DIR),
+    ("Latch", crate::legacy::WINDOWS_ENGINE_DIR),
     ("Sunshine", r"C:\Program Files\Sunshine"),
     ("Apollo", r"C:\Program Files\Apollo"),
 ];
@@ -560,16 +563,20 @@ mod tests {
     }
 
     #[test]
-    fn discovery_prefers_the_brolink_engine_over_sunshine() {
-        assert_eq!(INSTALL_DIRS[0], ("BroLink", ENGINE_DIR));
-        assert_eq!(INSTALL_DIRS[1].0, "Sunshine");
-        assert_eq!(INSTALL_DIRS[2].0, "Apollo");
+    fn discovery_prefers_the_latch_engine_over_sunshine() {
+        assert_eq!(INSTALL_DIRS[0], ("Latch", ENGINE_DIR));
+        assert_eq!(
+            INSTALL_DIRS[1],
+            ("Latch", crate::legacy::WINDOWS_ENGINE_DIR)
+        );
+        assert_eq!(INSTALL_DIRS[2].0, "Sunshine");
+        assert_eq!(INSTALL_DIRS[3].0, "Apollo");
         let existing = [ENGINE_DIR, r"C:\Program Files\Sunshine"];
         let winner = INSTALL_DIRS
             .iter()
             .find(|(_, d)| existing.contains(d))
             .expect("both exist");
-        assert_eq!(*winner, ("BroLink", ENGINE_DIR));
+        assert_eq!(*winner, ("Latch", ENGINE_DIR));
         let _ = SUNSHINE_PORT;
     }
 

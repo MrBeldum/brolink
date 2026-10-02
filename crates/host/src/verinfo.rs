@@ -1,7 +1,7 @@
 //! VS_VERSIONINFO, the block Task Manager, the volume mixer and Explorer's
 //! Details tab read a program's name from. Built by hand because Windows
 //! offers no call that changes one string in an existing block: setup gives
-//! the streaming engine's executables BroLink's description and icon, and
+//! the streaming engine's executables Latch's description and icon, and
 //! everything else they carried - copyright, licence, version numbers - is
 //! read out first and written back unchanged.
 //!
@@ -219,15 +219,12 @@ mod tests {
         fixed[8..12].copy_from_slice(&0x0000_07E2u32.to_le_bytes()); // some file version
         let given = vec![
             ("CompanyName".to_string(), "LizardByte".to_string()),
-            (
-                "FileDescription".to_string(),
-                "BroLink Streaming".to_string(),
-            ),
+            ("FileDescription".to_string(), "Latch Streaming".to_string()),
             (
                 "LegalCopyright".to_string(),
                 "https://example/LICENSE".to_string(),
             ),
-            ("ProductName".to_string(), "BroLink Streaming".to_string()),
+            ("ProductName".to_string(), "Latch Streaming".to_string()),
             ("ProductVersion".to_string(), "2026.906.222525".to_string()),
         ];
         let b = build(&fixed, &given, LANG, CODEPAGE);
@@ -278,29 +275,26 @@ mod tests {
         let m = merged(
             &theirs,
             &[
-                ("FileDescription", "BroLink Streaming"),
-                ("ProductName", "BroLink Streaming"),
+                ("FileDescription", "Latch Streaming"),
+                ("ProductName", "Latch Streaming"),
             ],
         );
         assert_eq!(
             m,
             vec![
                 ("CompanyName".to_string(), "LizardByte".to_string()),
-                (
-                    "FileDescription".to_string(),
-                    "BroLink Streaming".to_string()
-                ),
+                ("FileDescription".to_string(), "Latch Streaming".to_string()),
                 ("LegalCopyright".to_string(), "their licence".to_string()),
-                ("ProductName".to_string(), "BroLink Streaming".to_string()),
+                ("ProductName".to_string(), "Latch Streaming".to_string()),
                 ("Custom".to_string(), "kept".to_string()),
             ]
         );
-        // A file with no block at all gets only what BroLink says.
+        // A file with no block at all gets only what Latch says.
         assert_eq!(
-            merged(&[], &[("FileDescription", "BroLink Streaming Service")]),
+            merged(&[], &[("FileDescription", "Latch Streaming Service")]),
             vec![(
                 "FileDescription".to_string(),
-                "BroLink Streaming Service".to_string()
+                "Latch Streaming Service".to_string()
             )]
         );
     }

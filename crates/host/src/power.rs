@@ -1,9 +1,9 @@
 //! Remote power actions, and keeping the PC from idle-sleeping.
 
 use anyhow::Result;
-use brolink_core::api::PowerAction;
+use latch_core::api::PowerAction;
 
-/// Prevent Windows from idle-sleeping while BroLink Host is running, so
+/// Prevent Windows from idle-sleeping while Latch Host is running, so
 /// Tailscale stays up. User-initiated Sleep (Start menu or the Mac) still
 /// works. Call this from the background service, not the control panel:
 /// the execution state is per-thread, and `refresh_loop` is the one caller.

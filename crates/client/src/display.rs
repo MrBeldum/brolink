@@ -6,8 +6,8 @@
 //! sentence a person can act on rather than a dump of display settings.
 
 use anyhow::Result;
-use brolink_core::api::DisplayRequest;
-use brolink_core::{http, CONTROL_PORT};
+use latch_core::api::DisplayRequest;
+use latch_core::{http, CONTROL_PORT};
 use serde_json::Value;
 use std::net::Ipv4Addr;
 use std::time::Duration;

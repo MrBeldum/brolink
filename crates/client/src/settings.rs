@@ -2,7 +2,7 @@
 //! two cannot drift apart. Rows only: the caller supplies the group.
 
 use crate::config::{Codec, Preset, Quality, Resolution, StreamSettings};
-use brolink_ui::{self as ui, space};
+use latch_ui::{self as ui, space};
 
 /// The one-line choice at the top: a named profile, or the values as set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

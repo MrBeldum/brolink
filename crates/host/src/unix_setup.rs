@@ -1,12 +1,12 @@
 //! Install and start the streaming engine on macOS and Linux.
 //!
 //! Windows still uses the elevated PowerShell script. Here there is no UAC
-//! prompt: BroLink unpacks Sunshine next to its own data, writes the same
+//! prompt: Latch unpacks Sunshine next to its own data, writes the same
 //! conf keys, and keeps the process up from the background service.
 
 use anyhow::{bail, Context, Result};
 #[cfg(target_os = "macos")]
-use brolink_core::update::sha256_hex;
+use latch_core::update::sha256_hex;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -24,7 +24,7 @@ pub const MAC_DMG_SHA256: &str = "b630d35a184d8eaff39c5104f3c6a0c40e91ddc447ccf7
 fn write_engine_login(path: &Path, user: &str, password: &str) -> Result<()> {
     use std::io::Write;
     let salt = crate::config::random_password();
-    let hash = brolink_core::update::sha256_hex(format!("{password}{salt}").as_bytes());
+    let hash = latch_core::update::sha256_hex(format!("{password}{salt}").as_bytes());
     let hash: String = hash
         .as_bytes()
         .as_chunks::<2>()
@@ -59,28 +59,79 @@ fn write_engine_login(path: &Path, user: &str, password: &str) -> Result<()> {
 }
 
 pub fn engine_dir() -> Result<PathBuf> {
-    Ok(brolink_core::config::data_dir()?.join("engine"))
+    Ok(latch_core::config::data_dir()?.join("engine"))
 }
 
 pub fn conf_path() -> Result<PathBuf> {
     Ok(engine_dir()?.join("config").join("sunshine.conf"))
 }
 
-/// Candidate engine installs, BroLink's copy first.
+/// The engine login file an earlier version wrote, and what it is called now.
+const OLD_LOGIN_FILE: &str = "brolink-web.json";
+const LOGIN_FILE: &str = "latch-web.json";
+
+/// An install that an older version set up has two things in the engine's
+/// `sunshine.conf` that name it: the path of the engine login file, which is
+/// called `brolink-web.json` and sits wherever setup put it, and any path
+/// under the old data folder, which this copy has moved. Point both at what
+/// is there now, and rename the login file, so the engine finds the login
+/// it was set up with. Nothing happens on an install that was never moved.
+pub fn repair_adopted_engine_config() {
+    let (Ok(conf), Ok(data), Some(old)) = (
+        conf_path(),
+        latch_core::config::data_dir(),
+        latch_core::legacy::data_dir(),
+    ) else {
+        return;
+    };
+    repair_conf(
+        &conf,
+        &old.display().to_string(),
+        &data.display().to_string(),
+    );
+}
+
+/// [`repair_adopted_engine_config`] for the conf at `conf`, with the old and
+/// the new data folder as strings.
+fn repair_conf(conf: &Path, old: &str, data: &str) {
+    let Ok(text) = fs::read_to_string(conf) else {
+        return;
+    };
+    let fixed: Vec<String> = text
+        .lines()
+        .map(|line| match line.split_once('=') {
+            Some((key, value)) if key.trim() == "credentials_file" => {
+                let path = PathBuf::from(value.trim().replace(old, data));
+                if path.file_name().is_some_and(|n| n == OLD_LOGIN_FILE) {
+                    let renamed = path.with_file_name(LOGIN_FILE);
+                    if path.exists() && !renamed.exists() {
+                        let _ = fs::rename(&path, &renamed);
+                    }
+                    return format!("credentials_file = {}", renamed.display());
+                }
+                format!("credentials_file = {}", path.display())
+            }
+            _ => line.replace(old, data),
+        })
+        .collect();
+    let fixed = fixed.join("\n") + "\n";
+    if fixed != text {
+        let _ = fs::write(conf, fixed);
+    }
+}
+
+/// Candidate engine installs, Latch's copy first.
 pub fn candidates() -> Vec<Install> {
     let mut v = Vec::new();
     if let Ok(dir) = engine_dir() {
-        v.push(Install {
-            kind: "BroLink",
-            dir,
-        });
+        v.push(Install { kind: "Latch", dir });
     }
     #[cfg(target_os = "linux")]
     {
-        // BroLink's renamed engine binary, then the distro package we wrap.
+        // Latch's renamed engine binary, then the distro package we wrap.
         for p in ["/usr/local/bin", "/usr/bin"] {
             v.push(Install {
-                kind: "BroLink",
+                kind: "Latch",
                 dir: PathBuf::from(p),
             });
         }
@@ -88,8 +139,17 @@ pub fn candidates() -> Vec<Install> {
     v
 }
 
+/// The names the engine's program may have, Latch's first, an earlier
+/// version's after it, and Sunshine's own last.
+fn engine_exe_names() -> impl Iterator<Item = &'static str> {
+    ["LatchStreaming", "latch-engine"]
+        .into_iter()
+        .chain(crate::legacy::ENGINE_EXE_NAMES)
+        .chain(std::iter::once("sunshine"))
+}
+
 pub fn exe_in(dir: &Path) -> PathBuf {
-    for name in ["BroLinkStreaming", "brolink-engine", "sunshine"] {
+    for name in engine_exe_names() {
         let app = dir.join("Contents/MacOS").join(name);
         if app.exists() {
             return app;
@@ -103,12 +163,12 @@ pub fn exe_in(dir: &Path) -> PathBuf {
             return bin;
         }
     }
-    dir.join("brolink-engine")
+    dir.join("latch-engine")
 }
 
 pub fn run(p: &Plan<'_>) -> Result<()> {
     let log =
-        crate::setup::log_path().unwrap_or_else(|| std::env::temp_dir().join("brolink-setup.log"));
+        crate::setup::log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
     let mut lines = Vec::new();
     let result = run_inner(p, &mut lines);
     let body = lines.join("\n") + "\n";
@@ -134,7 +194,7 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
     stop_engine();
     let conf = conf_path()?;
     let existing = fs::read_to_string(&conf).unwrap_or_default();
-    let credentials = conf.with_file_name("brolink-web.json");
+    let credentials = conf.with_file_name(LOGIN_FILE);
     let profile = conceal_conf(&existing)
         .lines()
         .filter(|line| {
@@ -173,7 +233,7 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
 
     if let Ok(exe) = std::env::current_exe() {
         set_autostart(true, &exe)?;
-        step(log, "BroLink starts at login so others can connect");
+        step(log, "Latch starts at login so others can connect");
     }
     Ok(())
 }
@@ -189,12 +249,12 @@ fn install_engine(dir: &Path, log: &mut Vec<String>) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        if which("brolink-engine").is_some() || which("sunshine").is_some() {
+        if engine_exe_names().any(|n| which(n).is_some()) {
             log.push("using the system streaming engine".into());
             return Ok(());
         }
         bail!(
-            "the streaming engine is not installed. On this VPS use the BroLink node Docker image, or run setup again."
+            "the streaming engine is not installed. On this VPS use the Latch node Docker image, or run setup again."
         );
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -208,9 +268,9 @@ fn install_engine(dir: &Path, log: &mut Vec<String>) -> Result<()> {
 /// or Activity Monitor. The on-disk `.app` folder keeps its upstream name
 /// because the engine looks up resources next to that bundle.
 pub fn conceal_info_plist(xml: &str) -> String {
-    let mut xml = set_plist_string(xml, "CFBundleName", "BroLink");
-    xml = set_plist_string(&xml, "CFBundleDisplayName", "BroLink");
-    xml = set_plist_string(&xml, "CFBundleExecutable", "BroLinkStreaming");
+    let mut xml = set_plist_string(xml, "CFBundleName", "Latch");
+    xml = set_plist_string(&xml, "CFBundleDisplayName", "Latch");
+    xml = set_plist_string(&xml, "CFBundleExecutable", "LatchStreaming");
     if xml.contains("LSUIElement") {
         xml
     } else {
@@ -239,9 +299,7 @@ fn set_plist_string(xml: &str, key: &str, value: &str) -> String {
 #[cfg(target_os = "macos")]
 fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
     let dest = dir.join("Sunshine.app");
-    if dest.join("Contents/MacOS/BroLinkStreaming").exists()
-        || dest.join("Contents/MacOS/sunshine").exists()
-    {
+    if engine_exe_names().any(|n| dest.join("Contents/MacOS").join(n).exists()) {
         conceal_engine_bundle(&dest)?;
         log.push("streaming engine already unpacked".into());
         return Ok(());
@@ -253,7 +311,7 @@ fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
     );
     log.push("downloading the streaming engine".into());
     let status = Command::new("curl")
-        .args(["-fsSL", "-A", "brolink", "-o"])
+        .args(["-fsSL", "-A", "latch", "-o"])
         .arg(&dmg)
         .arg(&url)
         .status()
@@ -265,7 +323,7 @@ fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
         got.eq_ignore_ascii_case(MAC_DMG_SHA256),
         "streaming engine digest mismatch: expected {MAC_DMG_SHA256}, got {got}"
     );
-    let mount = std::env::temp_dir().join(format!("brolink-engine-{}", std::process::id()));
+    let mount = std::env::temp_dir().join(format!("latch-engine-{}", std::process::id()));
     let _ = fs::create_dir_all(&mount);
     let attach = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
@@ -294,17 +352,20 @@ fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
     let _ = fs::remove_file(&dmg);
     copied?;
     conceal_engine_bundle(&dest)?;
-    log.push("streaming engine unpacked into BroLink's data folder".into());
+    log.push("streaming engine unpacked into Latch's data folder".into());
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn conceal_engine_bundle(app: &Path) -> Result<()> {
     let macos = app.join("Contents/MacOS");
-    let src = macos.join("sunshine");
-    let dest = macos.join("BroLinkStreaming");
-    if src.exists() && !dest.exists() {
-        fs::rename(&src, &dest).context("rename engine binary")?;
+    let dest = macos.join("LatchStreaming");
+    // Upstream's name, or the name an earlier version gave it.
+    for from in ["sunshine", "BroLinkStreaming"] {
+        let src = macos.join(from);
+        if src.exists() && !dest.exists() {
+            fs::rename(&src, &dest).context("rename engine binary")?;
+        }
     }
     let plist = app.join("Contents/Info.plist");
     if plist.exists() {
@@ -327,7 +388,7 @@ fn which(name: &str) -> Option<PathBuf> {
 }
 
 pub fn stop_engine() {
-    for name in ["brolink-engine", "BroLinkStreaming", "sunshine"] {
+    for name in engine_exe_names() {
         let _ = Command::new("pkill")
             .args(["-x", name])
             .stdout(Stdio::null())
@@ -363,16 +424,19 @@ pub fn set_autostart(enable: bool, exe: &Path) -> Result<()> {
 pub fn register_autostart(exe: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        write_launch_agent(exe).map(|_| ())
+        write_launch_agent(exe)?;
+        retire_legacy_launch_agent();
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
         write_user_unit(exe)?;
         // Links the unit into default.target; without `--now` nothing starts.
         anyhow::ensure!(
-            systemctl_user(&["enable", "brolink.service"])?,
-            "could not enable BroLink service"
+            systemctl_user(&["enable", "latch.service"])?,
+            "could not enable Latch service"
         );
+        retire_legacy_user_unit();
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -386,10 +450,12 @@ pub fn autostart_enabled() -> bool {
     #[cfg(target_os = "macos")]
     {
         launch_agent_path().is_ok_and(|p| p.exists())
+            || legacy_launch_agent_path().is_ok_and(|p| p.exists())
     }
     #[cfg(target_os = "linux")]
     {
         user_unit_path().is_ok_and(|p| p.exists())
+            || legacy_user_unit_path().is_ok_and(|p| p.exists())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -398,12 +464,116 @@ pub fn autostart_enabled() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-const LAUNCH_AGENT_LABEL: &str = "dev.brolink.node";
+const LAUNCH_AGENT_LABEL: &str = "com.bardbro.latch.node";
 
 #[cfg(target_os = "macos")]
 fn launch_agent_path() -> Result<PathBuf> {
     let home = dirs_home()?;
     Ok(home.join(format!("Library/LaunchAgents/{LAUNCH_AGENT_LABEL}.plist")))
+}
+
+/// The launch agent file 4.0 and older wrote.
+#[cfg(target_os = "macos")]
+fn legacy_launch_agent_path() -> Result<PathBuf> {
+    let home = dirs_home()?;
+    Ok(home.join(format!(
+        "Library/LaunchAgents/{}.plist",
+        crate::legacy::MAC_LAUNCH_AGENT
+    )))
+}
+
+/// Stop launchd starting the old agent at login, by removing its file. The
+/// job launchd already has loaded is left alone: it may be the process that
+/// is calling this.
+#[cfg(target_os = "macos")]
+fn retire_legacy_launch_agent() {
+    if let Ok(old) = legacy_launch_agent_path() {
+        if old.exists() {
+            let _ = fs::remove_file(&old);
+        }
+    }
+}
+
+/// A copy running from the app folder 4.0 and older used, `BroLink.app`,
+/// moves into `Latch.app` beside it and carries on from there. The release
+/// publishes the new app under the old name as well, because a 4.0 updater
+/// installs only a folder of that name, and the first run lands here.
+///
+/// The login item goes with it: the new launch agent is written (only if
+/// the old one was there, so a Mac that never started at login does not
+/// begin to), the old file removed, the old job unloaded and the new one
+/// loaded. Run from the window, that is done before the window starts;
+/// run by launchd under the old label, it only re-registers, because
+/// unloading the label would end this very process, and `exec`s the new
+/// path under the old label for this session. Returns only when there was
+/// nothing to adopt or something failed, in which case the copy runs on
+/// where it is.
+#[cfg(target_os = "macos")]
+pub fn adopt_legacy_bundle(background: bool) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let Some(old) = latch_client::update::bundle_path().filter(|b| {
+        b.file_name()
+            .is_some_and(|n| n == crate::legacy::MAC_BUNDLE)
+    }) else {
+        return Ok(());
+    };
+    let new = old.with_file_name("Latch.app");
+    if new.exists() {
+        tracing::warn!(
+            "{} is here as well as {}; leaving both",
+            new.display(),
+            old.display()
+        );
+        return Ok(());
+    }
+    fs::rename(&old, &new).with_context(|| format!("rename {}", old.display()))?;
+    tracing::info!("moved {} to {}", old.display(), new.display());
+    let exe = new.join("Contents/MacOS/Latch");
+    let had_agent = legacy_launch_agent_path().is_ok_and(|p| p.exists())
+        || launch_agent_path().is_ok_and(|p| p.exists());
+    if had_agent {
+        write_launch_agent(&exe)?;
+    }
+    retire_legacy_launch_agent();
+    if !background {
+        let uid = Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        // The old job, which launchd runs from the path that no longer exists.
+        let _ = Command::new("launchctl")
+            .args([
+                "bootout",
+                &format!("gui/{uid}/{}", crate::legacy::MAC_LAUNCH_AGENT),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // A service nobody supervised, started by an earlier window.
+        let _ = latch_core::http::request(
+            ("127.0.0.1", latch_core::CONTROL_PORT),
+            "POST",
+            "/v1/quit",
+            None,
+            Duration::from_secs(2),
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        if had_agent {
+            if let Ok(plist) = launch_agent_path() {
+                let _ = Command::new("launchctl")
+                    .args(["bootstrap", &format!("gui/{uid}")])
+                    .arg(&plist)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+    }
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let error = Command::new(&exe).args(args).exec();
+    bail!("could not start {}: {error}", exe.display())
 }
 
 /// The launch agent: start at login, and restart only after a failure. A
@@ -425,7 +595,7 @@ fn launch_agent_plist(exe: &Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>dev.brolink.node</string>
+  <key>Label</key><string>com.bardbro.latch.node</string>
   <key>ProgramArguments</key>
   <array>
     <string>{exe}</string>
@@ -479,9 +649,11 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
         if path.exists() {
             fs::remove_file(&path)?;
         }
+        retire_legacy_launch_agent();
         return Ok(());
     }
     write_launch_agent(exe)?;
+    retire_legacy_launch_agent();
     if launch_agent_loaded() {
         return Ok(());
     }
@@ -493,15 +665,39 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("load BroLink launch agent")?;
-    anyhow::ensure!(loaded.success(), "could not load BroLink launch agent");
+        .context("load Latch launch agent")?;
+    anyhow::ensure!(loaded.success(), "could not load Latch launch agent");
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn user_unit_path() -> Result<PathBuf> {
     let home = dirs_home()?;
-    Ok(home.join(".config/systemd/user/brolink.service"))
+    Ok(home.join(".config/systemd/user/latch.service"))
+}
+
+/// The user unit 4.0 and older wrote.
+#[cfg(target_os = "linux")]
+fn legacy_user_unit_path() -> Result<PathBuf> {
+    let home = dirs_home()?;
+    Ok(home.join(format!(
+        ".config/systemd/user/{}",
+        crate::legacy::LINUX_USER_UNIT
+    )))
+}
+
+/// Stop systemd starting the old unit at login: disabled and its file
+/// removed. It is not stopped, because it may be the one running this.
+#[cfg(target_os = "linux")]
+fn retire_legacy_user_unit() {
+    let Ok(old) = legacy_user_unit_path() else {
+        return;
+    };
+    if old.exists() {
+        let _ = systemctl_user(&["disable", crate::legacy::LINUX_USER_UNIT]);
+        let _ = fs::remove_file(&old);
+        let _ = systemctl_user(&["daemon-reload"]);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -525,7 +721,7 @@ fn write_user_unit(exe: &Path) -> Result<()> {
         fs::create_dir_all(dir)?;
     }
     let unit = format!(
-        "[Unit]\nDescription=BroLink\nAfter=network.target\n\n[Service]\nExecStart=\"{}\" --background\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Latch\nAfter=network.target\n\n[Service]\nExecStart=\"{}\" --background\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
         exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
             .replace('%', "%%").replace('$', "$$").replace('\n', "\\n").replace('\r', "\\r")
     );
@@ -544,17 +740,19 @@ fn write_user_unit(exe: &Path) -> Result<()> {
 fn linux_user_unit(enable: bool, exe: &Path) -> Result<()> {
     let path = user_unit_path()?;
     if !enable {
-        let _ = systemctl_user(&["disable", "brolink.service"]);
+        let _ = systemctl_user(&["disable", "latch.service"]);
         if path.exists() {
             fs::remove_file(&path)?;
         }
+        retire_legacy_user_unit();
         let _ = systemctl_user(&["daemon-reload"]);
         return Ok(());
     }
     write_user_unit(exe)?;
+    retire_legacy_user_unit();
     anyhow::ensure!(
-        systemctl_user(&["enable", "--now", "brolink.service"])?,
-        "could not enable BroLink service"
+        systemctl_user(&["enable", "--now", "latch.service"])?,
+        "could not enable Latch service"
     );
     Ok(())
 }
@@ -572,7 +770,7 @@ mod tests {
     #[test]
     fn launch_agent_restarts_only_after_a_failure_and_escapes_the_path() {
         let plist = launch_agent_plist(Path::new(
-            "/Applications/B&L's <app>.app/Contents/MacOS/BroLink",
+            "/Applications/B&L's <app>.app/Contents/MacOS/Latch",
         ));
         assert!(
             plist.contains("<key>SuccessfulExit</key><false/>"),
@@ -585,11 +783,46 @@ mod tests {
     }
 
     #[test]
+    fn an_older_installs_engine_login_is_found_under_its_new_name() {
+        let dir = std::env::temp_dir().join(format!("latch-repair-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("sunshine.conf");
+        let old_login = dir.join("brolink-web.json");
+        fs::write(&old_login, "{}").unwrap();
+        fs::write(
+            &conf,
+            format!(
+                "origin_web_ui_allowed = pc\ncredentials_file = {}\nlog_path = /old/share/brolink/sunshine.log\n",
+                old_login.display()
+            ),
+        )
+        .unwrap();
+        repair_conf(&conf, "/old/share/brolink", "/new/share/latch");
+        let fixed = fs::read_to_string(&conf).unwrap();
+        assert!(
+            fixed.contains(&format!(
+                "credentials_file = {}",
+                dir.join("latch-web.json").display()
+            )),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("log_path = /new/share/latch/sunshine.log"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("origin_web_ui_allowed = pc"), "{fixed}");
+        assert!(dir.join("latch-web.json").exists() && !old_login.exists());
+        // A second pass changes nothing.
+        repair_conf(&conf, "/old/share/brolink", "/new/share/latch");
+        assert_eq!(fs::read_to_string(&conf).unwrap(), fixed);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn engine_login_uses_sunshine_hash_format_without_plaintext() {
-        let dir = std::env::temp_dir().join(format!(
-            "brolink-login-{}",
-            crate::config::random_password()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("latch-login-{}", crate::config::random_password()));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("login.json");
         write_engine_login(&path, "user", "secret").unwrap();
@@ -597,7 +830,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(!text.contains("secret"));
         assert_eq!(value["username"], "user");
-        let expected = brolink_core::update::sha256_hex(
+        let expected = latch_core::update::sha256_hex(
             format!("secret{}", value["salt"].as_str().unwrap()).as_bytes(),
         );
         let stored = value["password"].as_str().unwrap();
@@ -639,17 +872,13 @@ mod tests {
 
     #[test]
     fn exe_in_prefers_app_bundle_then_bare_binary() {
-        let tmp = std::env::temp_dir().join(format!("brolink-exe-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("latch-exe-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("Sunshine.app/Contents/MacOS")).unwrap();
         fs::write(tmp.join("Sunshine.app/Contents/MacOS/sunshine"), b"").unwrap();
         assert!(exe_in(&tmp).ends_with("Contents/MacOS/sunshine"));
-        fs::write(
-            tmp.join("Sunshine.app/Contents/MacOS/BroLinkStreaming"),
-            b"",
-        )
-        .unwrap();
-        assert!(exe_in(&tmp).ends_with("Contents/MacOS/BroLinkStreaming"));
+        fs::write(tmp.join("Sunshine.app/Contents/MacOS/LatchStreaming"), b"").unwrap();
+        assert!(exe_in(&tmp).ends_with("Contents/MacOS/LatchStreaming"));
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -668,8 +897,8 @@ mod tests {
 </dict>
 "#;
         let got = conceal_info_plist(xml);
-        assert!(got.contains("<string>BroLink</string>"), "{got}");
-        assert!(got.contains("<string>BroLinkStreaming</string>"), "{got}");
+        assert!(got.contains("<string>Latch</string>"), "{got}");
+        assert!(got.contains("<string>LatchStreaming</string>"), "{got}");
         assert!(got.contains("LSUIElement"), "{got}");
         assert!(
             got.contains("dev.lizardbyte.sunshine"),

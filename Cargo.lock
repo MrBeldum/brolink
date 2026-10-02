@@ -689,103 +689,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brolink-client"
-version = "4.0.2"
-dependencies = [
- "anyhow",
- "brolink-core",
- "brolink-stream",
- "brolink-ui",
- "eframe",
- "egui",
- "egui-wgpu",
- "egui_kittest",
- "image",
- "parking_lot",
- "rand",
- "semver",
- "serde",
- "serde_json",
- "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "brolink-core"
-version = "4.0.2"
-dependencies = [
- "anyhow",
- "directories",
- "if-addrs",
- "image",
- "rustls",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "toml 0.8.23",
- "tracing",
- "webpki-roots",
-]
-
-[[package]]
-name = "brolink-host"
-version = "4.0.2"
-dependencies = [
- "anyhow",
- "arboard",
- "brolink-client",
- "brolink-core",
- "brolink-ui",
- "clap",
- "eframe",
- "egui_kittest",
- "image",
- "parking_lot",
- "rand",
- "semver",
- "serde",
- "serde_json",
- "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
- "windows 0.58.0",
- "winresource",
-]
-
-[[package]]
-name = "brolink-stream"
-version = "4.0.2"
-dependencies = [
- "aes",
- "aes-gcm",
- "anyhow",
- "audiopus_sys",
- "brolink-core",
- "cbc",
- "cc",
- "cpal",
- "openh264",
- "parking_lot",
- "rand",
- "rcgen",
- "rsa",
- "rustls",
- "sha2",
- "tracing",
- "x509-parser",
-]
-
-[[package]]
-name = "brolink-ui"
-version = "4.0.2"
-dependencies = [
- "brolink-core",
- "egui",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2207,6 +2110,103 @@ dependencies = [
  "accesskit",
  "accesskit_consumer 0.25.0",
  "parking_lot",
+]
+
+[[package]]
+name = "latch-client"
+version = "4.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "egui_kittest",
+ "image",
+ "latch-core",
+ "latch-stream",
+ "latch-ui",
+ "parking_lot",
+ "rand",
+ "semver",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "latch-core"
+version = "4.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "if-addrs",
+ "image",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.8.23",
+ "tracing",
+ "webpki-roots",
+]
+
+[[package]]
+name = "latch-host"
+version = "4.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "clap",
+ "eframe",
+ "egui_kittest",
+ "image",
+ "latch-client",
+ "latch-core",
+ "latch-ui",
+ "parking_lot",
+ "rand",
+ "semver",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "windows 0.58.0",
+ "winresource",
+]
+
+[[package]]
+name = "latch-stream"
+version = "4.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "anyhow",
+ "audiopus_sys",
+ "cbc",
+ "cc",
+ "cpal",
+ "latch-core",
+ "openh264",
+ "parking_lot",
+ "rand",
+ "rcgen",
+ "rsa",
+ "rustls",
+ "sha2",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
+name = "latch-ui"
+version = "4.1.0"
+dependencies = [
+ "egui",
+ "latch-core",
 ]
 
 [[package]]

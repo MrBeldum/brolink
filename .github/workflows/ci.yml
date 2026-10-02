@@ -31,17 +31,17 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:BROLINK_DUMP_EXE = "C:\Users\O'Brien `$lab\AppData\Local\BroLink\brolink-host.exe"
-          $env:BROLINK_DUMP_ADAPTER = "Ethernet 'Realtek' `"2`" `$(x)"
-          $env:BROLINK_DUMP_ADAPTER_DESC = "Realtek PCIe GbE (`"x`")"
+          $env:LATCH_DUMP_EXE = "C:\Users\O'Brien `$lab\AppData\Local\Latch\latch-host.exe"
+          $env:LATCH_DUMP_ADAPTER = "Ethernet 'Realtek' `"2`" `$(x)"
+          $env:LATCH_DUMP_ADAPTER_DESC = "Realtek PCIe GbE (`"x`")"
           $files = @('scripts\install-host.ps1', 'crates\host\windows\take-over-engine.ps1')
           foreach ($migrate in '0', '1') {
             foreach ($dry in '0', '1') {
               $out = Join-Path $env:RUNNER_TEMP "setup-$migrate$dry.ps1"
-              $env:BROLINK_DUMP_SETUP_SCRIPT = $out
-              $env:BROLINK_DUMP_MIGRATE = $migrate
-              $env:BROLINK_DUMP_DRY_RUN = $dry
-              cargo test -q -p brolink-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
+              $env:LATCH_DUMP_SETUP_SCRIPT = $out
+              $env:LATCH_DUMP_MIGRATE = $migrate
+              $env:LATCH_DUMP_DRY_RUN = $dry
+              cargo test -q -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
               if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
               $files += $out
             }
@@ -56,8 +56,8 @@ jobs:
         run: cargo build --workspace --release
       - uses: actions/upload-artifact@v4
         with:
-          name: brolink-host-windows
-          path: target/release/brolink-host.exe
+          name: latch-host-windows
+          path: target/release/latch-host.exe
           if-no-files-found: error
 
   test-macos:
@@ -74,7 +74,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: release app
-        run: cargo build --release -p brolink-host --target aarch64-apple-darwin
+        run: cargo build --release -p latch-host --target aarch64-apple-darwin
       - name: bundle
         run: bash scripts/bundle-macos.sh
 
@@ -93,7 +93,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: release host
-        run: cargo build --release -p brolink-host
+        run: cargo build --release -p latch-host
 
   deploy-selftest:
     runs-on: ubuntu-latest

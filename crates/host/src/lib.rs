@@ -1,4 +1,4 @@
-//! BroLink node: control service, streaming engine setup, and the unified
+//! Latch node: control service, streaming engine setup, and the unified
 //! window that both views other machines and shares this one.
 
 pub mod app;
@@ -7,6 +7,7 @@ pub mod brand;
 pub mod clipboard;
 pub mod config;
 pub mod display;
+pub mod legacy;
 pub mod logfile;
 pub mod migrate;
 pub mod power;

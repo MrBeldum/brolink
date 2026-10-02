@@ -1,4 +1,4 @@
-//! BroLink. One executable, two jobs:
+//! Latch. One executable, two jobs:
 //!
 //! * `--background`: the control service other machines talk to.
 //! * no flags: the window — a list of machines to connect to, and setup
@@ -9,18 +9,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
-use brolink_core::config::data_dir;
-use brolink_host::brand;
-use brolink_host::logfile::RotatingLog;
-use brolink_host::product::NodeApp;
-use brolink_host::service::{self, Service};
 use clap::Parser;
+use latch_core::config::data_dir;
+use latch_host::brand;
+use latch_host::logfile::RotatingLog;
+use latch_host::product::NodeApp;
+use latch_host::service::{self, Service};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "brolink-host",
+    name = "latch-host",
     version,
-    about = "BroLink: your machines, on any of your machines"
+    about = "Latch: your machines, on any of your machines"
 )]
 struct Args {
     /// Run the control service with no window.
@@ -29,7 +29,7 @@ struct Args {
     /// Started by an update: wait for this process to give up the port.
     #[arg(long, requires = "background")]
     replaces: Option<u32>,
-    /// Give the streaming engine in DIR BroLink's name and icon. Run by
+    /// Give the streaming engine in DIR Latch's name and icon. Run by
     /// setup, elevated, with the engine stopped; exits non-zero with the
     /// reason on stderr.
     #[arg(long, value_name = "DIR", conflicts_with = "background")]
@@ -45,7 +45,7 @@ struct Args {
     setup_elevated: bool,
     /// The launching user's %LOCALAPPDATA%, so an elevated setup approved
     /// with another administrator's password still uses that user's
-    /// BroLink folder (host.toml, setup.log).
+    /// Latch folder (host.toml, setup.log).
     #[arg(long, value_name = "DIR", requires = "setup_elevated")]
     local_app_data: Option<std::path::PathBuf>,
 }
@@ -63,6 +63,16 @@ fn main() -> Result<()> {
     } else {
         "panel.log"
     });
+    // init_logging has just called data_dir(), which takes over an older
+    // install's folder; the engine's config inside still names the old one.
+    #[cfg(not(windows))]
+    latch_host::unix_setup::repair_adopted_engine_config();
+    #[cfg(target_os = "macos")]
+    if let Err(e) = latch_host::unix_setup::adopt_legacy_bundle(args.background) {
+        // Only returns when there was nothing to move or the move failed;
+        // either way this copy runs from where it is.
+        tracing::warn!("could not move into Latch.app: {e:#}");
+    }
     if args.background {
         return Service::new().run_arc(args.replaces.is_some());
     }
@@ -70,7 +80,7 @@ fn main() -> Result<()> {
         return run_setup();
     }
     if args.setup_elevated {
-        return brolink_host::setup::run_as_admin();
+        return latch_host::setup::run_as_admin();
     }
     if let Some(dir) = &args.brand_engine {
         return brand::brand(dir).map_err(|e| {
@@ -80,22 +90,22 @@ fn main() -> Result<()> {
     }
     service::ensure_service_running();
     eframe::run_native(
-        "BroLink",
-        brolink_client::native_options(),
+        "Latch",
+        latch_client::native_options(),
         Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn run_setup() -> Result<()> {
-    let mut cfg = brolink_host::config::HostConfig::load();
+    let mut cfg = latch_host::config::HostConfig::load();
     if !cfg.has_creds() {
-        cfg.sunshine_user = "brolink".into();
-        cfg.sunshine_pass = brolink_host::config::random_password();
+        cfg.sunshine_user = "latch".into();
+        cfg.sunshine_pass = latch_host::config::random_password();
         cfg.save()?;
     }
     let exe = std::env::current_exe()?;
-    brolink_host::setup::run(&brolink_host::setup::Plan {
+    latch_host::setup::run(&latch_host::setup::Plan {
         exe: &exe,
         install_engine: true,
         migrate: false,
@@ -113,7 +123,7 @@ fn run_setup() -> Result<()> {
 /// swapchain reports suboptimal (`wgpu-hal`, `vulkan/mod.rs`). On Hermes
 /// that is every frame the window draws, and it was **every line** of a
 /// 32 MB `panel.log` — the condition is normal and wgpu recreates the
-/// swapchain itself, so there is nothing to act on. BroLink stays at info
+/// swapchain itself, so there is nothing to act on. Latch stays at info
 /// and that one target is heard from only when it is an error.
 const DEFAULT_LOG: &str = "info,wgpu_hal=error";
 

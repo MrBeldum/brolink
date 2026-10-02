@@ -2,7 +2,7 @@
 //!
 //! Everything that needs elevation is done by a single PowerShell script
 //! behind a single UAC prompt: install the bundled Sunshine if none is
-//! present, give it the login BroLink will use, open the control port to the
+//! present, give it the login Latch will use, open the control port to the
 //! tailnet, list the Mac screen sizes on the virtual display, turn Fast
 //! Startup off and arm the network card for Wake-on-LAN.
 //! Each step logs and carries on, so one failure does not undo the others;
@@ -12,8 +12,8 @@
 #[cfg(windows)]
 use anyhow::Context;
 use anyhow::Result;
-use brolink_core::config::data_dir;
-use brolink_core::CONTROL_PORT;
+use latch_core::config::data_dir;
+use latch_core::CONTROL_PORT;
 use std::path::{Path, PathBuf};
 
 pub struct Plan<'a> {
@@ -36,9 +36,9 @@ pub fn log_path() -> Option<PathBuf> {
     data_dir().ok().map(|d| d.join("setup.log"))
 }
 
-/// The engine archive shipped beside `brolink-host.exe`. The lite archive
+/// The engine archive shipped beside `latch-host.exe`. The lite archive
 /// is a plain zip: no Add/Remove Programs entry, no Start Menu shortcut and
-/// no service or firewall rule of its own, so BroLink names all three.
+/// no service or firewall rule of its own, so Latch names all three.
 pub const ENGINE_ZIP: &str = "Sunshine-Windows-AMD64-lite.zip";
 
 /// The upstream release the engine is pinned to, and the SHA-256 GitHub
@@ -55,18 +55,18 @@ pub const ENGINE_ZIP_ROOT: &str = "Sunshine";
 /// the copy in `ENGINE_DIR`, because the copy is what the service points at.
 pub const ENGINE_REQUIRED: [&str; 2] = ["sunshine.exe", r"tools\sunshinesvc.exe"];
 
-/// The service BroLink registers, and the name it shows under. The engine's
+/// The service Latch registers, and the name it shows under. The engine's
 /// service wrapper is `SERVICE_WIN32_OWN_PROCESS`, for which Windows ignores
 /// the name the process passes to `StartServiceCtrlDispatcher`, so the SCM
-/// name is BroLink's to pick. `UPSTREAM_SERVICE` is the name that wrapper
+/// name is Latch's to pick. `UPSTREAM_SERVICE` is the name that wrapper
 /// was compiled with, kept only as the name the script falls back *to*
 /// after proving `SERVICE` will not start.
-pub const SERVICE: &str = "BroLinkStream";
-pub const SERVICE_DISPLAY: &str = "BroLink Streaming";
+pub const SERVICE: &str = "LatchStream";
+pub const SERVICE_DISPLAY: &str = "Latch Streaming";
 pub const UPSTREAM_SERVICE: &str = "SunshineService";
 
-pub const TCP_RULE: &str = "BroLink Streaming TCP";
-pub const UDP_RULE: &str = "BroLink Streaming UDP";
+pub const TCP_RULE: &str = "Latch Streaming TCP";
+pub const UDP_RULE: &str = "Latch Streaming UDP";
 
 /// Keys written into `config\sunshine.conf` before the engine first starts.
 /// From Sunshine v2026.906.222525 (`cb72dff`): `system_tray` is the tray
@@ -105,7 +105,7 @@ pub const ENGINE_CONF: &[(&str, &str)] = &[
     ("vt_realtime", "enabled"),
 ];
 
-/// The only streamable app BroLink launches. Upstream ships extra entries
+/// The only streamable app Latch launches. Upstream ships extra entries
 /// (Steam, a low-res desktop) that would show as a second product.
 pub const DESKTOP_APPS_JSON: &str = r#"{
   "apps": [
@@ -229,8 +229,12 @@ fn win_dir(path: &Path) -> String {
 pub fn script(p: &Plan<'_>) -> String {
     let q = |s: &str| s.replace('\'', "''");
     let exe_dir = win_dir(p.exe);
+    // The folder an earlier version used is left out: the retire step has
+    // moved it to ENGINE_DIR by now, and an engine that could not be moved
+    // must not be mistaken for one to keep, with its pairing state missing.
     let dirs = crate::streamer::INSTALL_DIRS
         .iter()
+        .filter(|(_, d)| *d != crate::legacy::WINDOWS_ENGINE_DIR)
         .map(|(_, d)| format!("'{d}'"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -271,19 +275,19 @@ if ($needFiles -or -not $svcUp) {{
     # (LocalSystem's TEMP is C:\Windows\Temp) would let one run delete another
     # run's staging, and -Recurse -Force on a guessable shared path is a
     # footgun even when nothing else is running.
-    $staging = Join-Path $env:TEMP ('brolink-engine-' + [guid]::NewGuid().ToString('N'))
+    $staging = Join-Path $env:TEMP ('latch-engine-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     $zip = Join-Path '{exe_dir}' '{zip}'
     if (Test-Path $zip) {{
-        Step "Installing the streaming engine that ships with BroLink"
+        Step "Installing the streaming engine that ships with Latch"
     }} else {{
         Step "Downloading the streaming engine {tag}"
-        $json = curl.exe -sSL -A brolink https://api.github.com/repos/{repo}/releases/tags/{tag}
+        $json = curl.exe -sSL -A latch https://api.github.com/repos/{repo}/releases/tags/{tag}
         if ($LASTEXITCODE -ne 0) {{ throw "could not reach GitHub for engine release {tag} (curl exit $LASTEXITCODE)" }}
         $asset = ($json | ConvertFrom-Json).assets | Where-Object {{ $_.name -like '*lite.zip' }} | Select-Object -First 1
         if (-not $asset) {{ throw "no lite archive in engine release {tag}" }}
         $zip = Join-Path $staging 'engine.zip'
-        curl.exe -sSL -A brolink -o $zip $asset.browser_download_url
+        curl.exe -sSL -A latch -o $zip $asset.browser_download_url
         if ($LASTEXITCODE -ne 0) {{ throw "downloading the engine archive failed (curl exit $LASTEXITCODE)" }}
     }}
     if (-not (Test-Path $zip)) {{ throw "the engine archive is missing: $zip" }}
@@ -318,7 +322,7 @@ if ($needFiles -or -not $svcUp) {{
     # should dispatch fine. That is proven here rather than assumed: if the
     # service will not reach Running it is removed and re-registered under
     # '{upstream}', the name the wrapper was built with, still displayed as
-    # "{display}". An existing '{upstream}' belongs to an engine BroLink did
+    # "{display}". An existing '{upstream}' belongs to an engine Latch did
     # not install and is never touched - migrating that one is a later step.
     $svcBin = '"' + (Join-Path $dir 'tools\sunshinesvc.exe') + '"'
     $svc = '{service}'
@@ -329,7 +333,7 @@ if ($needFiles -or -not $svcUp) {{
         $deadline = (Get-Date).AddSeconds(15)
         while ((Get-Service -Name $svc -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 400 }}
     }}
-    New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to BroLink.' | Out-Null
+    New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to Latch.' | Out-Null
     Start-Service -Name $svc -ErrorAction SilentlyContinue
     if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).Status -ne 'Running') {{
         Step "  '{service}' would not start; re-registering under the engine's own service name"
@@ -339,7 +343,7 @@ if ($needFiles -or -not $svcUp) {{
         while ((Get-Service -Name $svc -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 400 }}
         if (Get-Service -Name '{upstream}' -ErrorAction SilentlyContinue) {{ throw "'{service}' would not start and '{upstream}' already exists; leaving that engine alone" }}
         $svc = '{upstream}'
-        New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to BroLink.' | Out-Null
+        New-Service -Name $svc -BinaryPathName $svcBin -DisplayName '{display}' -StartupType Automatic -Description 'Streams this PC to Latch.' | Out-Null
         Start-Service -Name $svc -ErrorAction SilentlyContinue
     }}
     if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).Status -ne 'Running') {{ throw "the {display} service did not start" }}
@@ -368,7 +372,7 @@ if ($needFiles -or -not $svcUp) {{
     } else {
         String::new()
     };
-    // Only the engine BroLink installed is ever branded: an engine someone
+    // Only the engine Latch installed is ever branded: an engine someone
     // else put in Program Files is theirs. A dry run changes no files.
     let brand_existing = if p.dry_run {
         String::new()
@@ -419,7 +423,7 @@ try {{ powercfg /deviceenablewake $wakeDevice | Out-Null }} catch {{ Write-Outpu
         "        Step \"Keeping the migrated web login\"\n".to_string()
     } else {
         format!(
-            r#"        Step "Setting the engine login BroLink uses"
+            r#"        Step "Setting the engine login Latch uses"
         Push-Location $dir
         & (Join-Path $dir 'sunshine.exe') --creds '{user}' '{pass}' 2>&1 | Out-Null
         Pop-Location
@@ -432,12 +436,12 @@ try {{ powercfg /deviceenablewake $wakeDevice | Out-Null }} catch {{ Write-Outpu
         )
     };
     format!(
-        r#"# BroLink setup. Generated; re-run "Set up this PC" in BroLink Host rather than editing.
+        r#"# Latch setup. Generated; re-run "Set up this PC" in Latch Host rather than editing.
 $ErrorActionPreference = 'Continue'
 function Step($m) {{ Write-Output "[$(Get-Date -Format HH:mm:ss)] $m" }}
 function Brand-Engine($d) {{
     # Task Manager, the volume mixer and a firewall prompt show a program's
-    # version block and icon. The engine's executables get BroLink's, in
+    # version block and icon. The engine's executables get Latch's, in
     # place, with their copyright and licence strings kept; the archive they
     # were unpacked from is untouched. The engine has to be stopped for the
     # rewrite, so only services whose binary is inside this directory are
@@ -445,12 +449,12 @@ function Brand-Engine($d) {{
     # cosmetic: streaming works either way, so it is reported, not thrown.
     $exe = Join-Path $d 'sunshine.exe'
     if ((Get-Item -LiteralPath $exe -ErrorAction SilentlyContinue).VersionInfo.FileDescription -eq '{description}') {{ return }}
-    Step "Giving the engine BroLink's name and icon"
+    Step "Giving the engine Latch's name and icon"
     $held = @()
     try {{
         $held = @(Get-CimInstance Win32_Service | Where-Object {{ $_.State -eq 'Running' -and $_.PathName -like ('*' + $d + '*') }} | ForEach-Object {{ $_.Name }})
         foreach ($s in $held) {{ Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }}
-        $errFile = Join-Path $env:TEMP ('brolink-brand-' + [guid]::NewGuid().ToString('N') + '.txt')
+        $errFile = Join-Path $env:TEMP ('latch-brand-' + [guid]::NewGuid().ToString('N') + '.txt')
         $p = Start-Process -FilePath '{host_exe}' -ArgumentList @('--brand-engine', ('"' + $d + '"')) -Wait -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
         if ($p.ExitCode -ne 0) {{
             $why = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
@@ -464,9 +468,9 @@ function Brand-Engine($d) {{
     }}
 }}
 {conceal}
-Step "BroLink setup started"
+Step "Latch setup started"
 $migrate = {migrate_flag}
-$dir = @({dirs}) | Where-Object {{ Test-Path (Join-Path $_ 'sunshine.exe') }} | Select-Object -First 1
+{retire}$dir = @({dirs}) | Where-Object {{ Test-Path (Join-Path $_ 'sunshine.exe') }} | Select-Object -First 1
 # Set when the engine step fails. The wake and host-firewall steps below are
 # independent and still run, but the script exits non-zero at the end so the
 # caller does not report a successful setup over a broken engine.
@@ -490,19 +494,19 @@ try {{
     $ErrorActionPreference = $keepEAP
     if ($staging -and (Test-Path $staging)) {{ Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue }}
 }}
-Step "Opening TCP {port} to the tailnet for BroLink Host"
-netsh advfirewall firewall delete rule name="BroLink Host" | Out-Null
-netsh advfirewall firewall add rule name="BroLink Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
+Step "Opening TCP {port} to the tailnet for Latch Host"
+netsh advfirewall firewall delete rule name="Latch Host" | Out-Null
+netsh advfirewall firewall add rule name="Latch Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
 Step "Opening UDP 9 so a Mac can check its wake path while this PC is awake"
-netsh advfirewall firewall delete rule name="BroLink wake" | Out-Null
-netsh advfirewall firewall add rule name="BroLink wake" dir=in action=allow protocol=UDP localport=9 program='{exe}' | Out-Null
+netsh advfirewall firewall delete rule name="Latch wake" | Out-Null
+netsh advfirewall firewall add rule name="Latch wake" dir=in action=allow protocol=UDP localport=9 program='{exe}' | Out-Null
 if ($dir) {{
-    # BroLink names and scopes these itself rather than running the engine's
+    # Latch names and scopes these itself rather than running the engine's
     # own add-firewall-rule script, which opens every TCP and UDP port under
     # the name "Sunshine". The engine web UI port is deliberately absent: it
     # is reachable on loopback only.
     Step "Opening the streaming ports to the tailnet"
-    foreach ($old in 'BroLink Sunshine TCP', 'BroLink Sunshine UDP', '{tcp_rule}', '{udp_rule}') {{
+    foreach ($old in 'Latch Sunshine TCP', 'Latch Sunshine UDP', '{tcp_rule}', '{udp_rule}') {{
         netsh advfirewall firewall delete rule name="$old" | Out-Null
     }}
     $engineExe = Join-Path $dir 'sunshine.exe'
@@ -515,13 +519,14 @@ Step "Never idle-sleep when plugged in, so Tailscale stays up from anywhere"
 powercfg /change standby-timeout-ac 0
 powercfg /change hibernate-timeout-ac 0
 {adapter}if ($engineError) {{
-    Step "BroLink setup FAILED: $engineError"
+    Step "Latch setup FAILED: $engineError"
     exit 1
 }}
-Step "BroLink setup finished"
+Step "Latch setup finished"
 exit 0
 "#,
         dirs = dirs,
+        retire = crate::legacy::retire_windows_ps(crate::streamer::ENGINE_DIR),
         conceal = conceal_ps(),
         description = crate::brand::DESCRIPTION,
         host_exe = q(&p.exe.display().to_string()),
@@ -569,7 +574,7 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         // user, so the unelevated panel installs it.
         let _ = crate::audio::install_helpers();
         let exe = q(&p.exe.display().to_string());
-        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("brolink-setup.log"));
+        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
         // UAC may run the helper as another administrator, whose profile
         // holds no host.toml: pass this user's folder so the engine login
         // and setup.log stay with the account that shares the machine.
@@ -586,7 +591,7 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
             .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
             .creation_flags(0x0800_0000)
             .status()
-            .context("launch elevated BroLink Host")?;
+            .context("launch elevated Latch Host")?;
         anyhow::ensure!(
             status.success(),
             "the administrator prompt was declined or setup failed (see {})",
@@ -704,14 +709,14 @@ pub fn run_as_admin() -> Result<()> {
             .map(|root| PathBuf::from(root).join("Temp"))
             .filter(|dir| dir.is_dir())
             .unwrap_or_else(std::env::temp_dir);
-        let tmp = tmp_dir.join(format!("brolink-setup-{}.ps1", std::process::id()));
+        let tmp = tmp_dir.join(format!("latch-setup-{}.ps1", std::process::id()));
         // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
         // a Korean/Japanese username or adapter name ("이더넷") would be mangled
         // and the firewall rule would point at a path that does not exist.
         let mut bytes = b"\xEF\xBB\xBF".to_vec();
         bytes.extend(script(&plan).as_bytes());
         std::fs::write(&tmp, &bytes)?;
-        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("brolink-setup.log"));
+        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
         let out = std::fs::File::create(&log)?;
         let err = out.try_clone()?;
         let status = std::process::Command::new("powershell")
@@ -736,34 +741,39 @@ pub fn run_as_admin() -> Result<()> {
     anyhow::bail!("setup runs on Windows only")
 }
 
-/// Register or remove `brolink-host.exe --background` under the current
+/// Register or remove `latch-host.exe --background` under the current
 /// user's Run key.
 pub fn set_start_with_windows(enable: bool, exe: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let mut c = std::process::Command::new("reg");
-        if enable {
-            c.args([
+        let reg = |args: &[&str]| {
+            std::process::Command::new("reg")
+                .args(args)
+                .creation_flags(0x0800_0000)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        };
+        // An earlier version's value goes either way: on, it is replaced;
+        // off, it would still start the host.
+        let _ = reg(&["delete", KEY, "/v", crate::legacy::WINDOWS_RUN_VALUE, "/f"]);
+        let status = if enable {
+            reg(&[
                 "add",
                 KEY,
                 "/v",
-                "BroLinkHost",
+                "LatchHost",
                 "/t",
                 "REG_SZ",
                 "/d",
                 &run_value(exe),
                 "/f",
-            ]);
+            ])?
         } else {
-            c.args(["delete", KEY, "/v", "BroLinkHost", "/f"]);
-        }
-        let status = c
-            .creation_flags(0x0800_0000)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
+            reg(&["delete", KEY, "/v", "LatchHost", "/f"])?
+        };
         anyhow::ensure!(
             status.success() || (!enable && !starts_with_windows()),
             "could not update the Run key"
@@ -790,17 +800,21 @@ pub fn starts_with_windows() -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "BroLinkHost",
-            ])
-            .creation_flags(0x0800_0000)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        ["LatchHost", crate::legacy::WINDOWS_RUN_VALUE]
+            .iter()
+            .any(|value| {
+                std::process::Command::new("reg")
+                    .args([
+                        "query",
+                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                        "/v",
+                        value,
+                    ])
+                    .creation_flags(0x0800_0000)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            })
     }
     #[cfg(not(windows))]
     crate::unix_setup::autostart_enabled()
@@ -857,17 +871,17 @@ mod tests {
 
     #[test]
     fn run_value_quotes_the_path_and_asks_for_background() {
-        let p = PathBuf::from(r"C:\Users\Ada\AppData\Local\BroLink\brolink-host.exe");
+        let p = PathBuf::from(r"C:\Users\Ada\AppData\Local\Latch\latch-host.exe");
         assert_eq!(
             run_value(&p),
-            r#""C:\Users\Ada\AppData\Local\BroLink\brolink-host.exe" --background"#
+            r#""C:\Users\Ada\AppData\Local\Latch\latch-host.exe" --background"#
         );
     }
 
     /// Position of `needle` after the preamble's function definitions, so
     /// an ordering test reads the steps as they run, not the helpers.
     fn find_in_body(s: &str, needle: &str) -> Option<usize> {
-        let at = s.find("BroLink setup started")?;
+        let at = s.find("Latch setup started")?;
         s[at..].find(needle).map(|i| i + at)
     }
 
@@ -895,15 +909,15 @@ mod tests {
 
     #[test]
     fn script_escapes_quotes_and_skips_what_is_not_wanted() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&Plan {
-            sunshine_user: "brolink",
+            sunshine_user: "latch",
             sunshine_pass: "p'w",
             adapter: "Ethernet",
             adapter_description: "Realtek PCIe GbE",
             ..plan(&exe, false)
         });
-        assert!(s.contains("--creds 'brolink' 'p''w'"), "{s}");
+        assert!(s.contains("--creds 'latch' 'p''w'"), "{s}");
         assert!(!s.contains("Downloading the streaming engine"));
         assert!(s.contains("$wakeAdapter = 'Ethernet'"), "{s}");
         assert!(s.contains("Set-NetAdapterPowerManagement -Name $wakeAdapter"));
@@ -912,7 +926,7 @@ mod tests {
         assert!(s.contains("HiberbootEnabled -Value 0"));
         assert!(s.contains("powercfg /change standby-timeout-ac 0"));
         assert!(s.contains("powercfg /change hibernate-timeout-ac 0"));
-        assert!(s.contains("protocol=UDP localport=9 program='C:\\x\\brolink-host.exe'"));
+        assert!(s.contains("protocol=UDP localport=9 program='C:\\x\\latch-host.exe'"));
         assert!(s.contains("$wakeDevice = 'Realtek PCIe GbE'"));
         assert!(s.contains("powercfg /deviceenablewake $wakeDevice"));
         // A name only ever appears as a single-quoted literal: in a
@@ -929,12 +943,12 @@ mod tests {
         assert!(named.contains("$wakeDevice = 'NIC $env:TEMP'"), "{named}");
         assert_eq!(named.matches("Stop-Computer").count(), 1, "{named}");
         assert!(
-            s.contains("localport=47850 remoteip=100.64.0.0/10 program='C:\\x\\brolink-host.exe'")
+            s.contains("localport=47850 remoteip=100.64.0.0/10 program='C:\\x\\latch-host.exe'")
         );
-        let dollar = PathBuf::from(r"C:\Users\joe$lab\BroLink\brolink-host.exe");
+        let dollar = PathBuf::from(r"C:\Users\joe$lab\Latch\latch-host.exe");
         let s = script(&plan(&dollar, false));
         assert!(
-            s.contains("program='C:\\Users\\joe$lab\\BroLink\\brolink-host.exe'"),
+            s.contains("program='C:\\Users\\joe$lab\\Latch\\latch-host.exe'"),
             "firewall path must be a single-quoted PowerShell literal:\n{s}"
         );
         assert!(
@@ -950,7 +964,7 @@ mod tests {
 
     #[test]
     fn a_fresh_install_unpacks_the_pinned_lite_archive_and_leaves_no_upstream_traces() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
 
         assert!(s.contains(ENGINE_ZIP), "{s}");
@@ -979,7 +993,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_wrong_archive_throws_before_anything_is_unpacked() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = code(&script(&plan(&exe, true)));
 
         let missing = s
@@ -1014,7 +1028,7 @@ mod tests {
 
     #[test]
     fn a_failed_extract_throws_before_the_service_is_registered() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = code(&script(&plan(&exe, true)));
 
         assert!(
@@ -1043,18 +1057,18 @@ mod tests {
     }
 
     #[test]
-    fn the_service_is_brolinks_and_the_fallback_is_proven_not_assumed() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+    fn the_latch_service_and_the_fallback_are_proven_not_assumed() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
 
-        assert_eq!(SERVICE, "BroLinkStream");
-        assert_eq!(SERVICE_DISPLAY, "BroLink Streaming");
+        assert_eq!(SERVICE, "LatchStream");
+        assert_eq!(SERVICE_DISPLAY, "Latch Streaming");
         assert!(s.contains(&format!("$svc = '{SERVICE}'")), "{s}");
         assert_eq!(
             s.matches(&format!("-DisplayName '{SERVICE_DISPLAY}'"))
                 .count(),
             2,
-            "both registrations show the BroLink name:\n{s}"
+            "both registrations show the Latch name:\n{s}"
         );
         assert!(!code(&s).contains("Sunshine Service"), "{s}");
 
@@ -1084,7 +1098,7 @@ mod tests {
 
     #[test]
     fn the_virtual_display_learns_every_size_a_mac_can_ask_for() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, false));
         let body = code(&s);
         let step = find_in_body(&body, "Listing the sizes a Mac can ask for").expect("step");
@@ -1107,8 +1121,8 @@ mod tests {
     }
 
     #[test]
-    fn firewall_rules_are_named_for_brolink_and_leave_the_web_ui_on_loopback() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+    fn firewall_rules_are_named_for_latch_and_leave_the_web_ui_on_loopback() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, false));
 
         assert!(s.contains(&format!(r#"name="{TCP_RULE}" dir=in action=allow protocol=TCP localport=47984,47989,48010 remoteip=100.64.0.0/10 program="$engineExe""#)), "{s}");
@@ -1124,14 +1138,14 @@ mod tests {
             "the old range included the web UI port:\n{s}"
         );
         assert!(
-            s.contains("'BroLink Sunshine TCP', 'BroLink Sunshine UDP'"),
+            s.contains("'Latch Sunshine TCP', 'Latch Sunshine UDP'"),
             "the rules this replaces are cleaned up:\n{s}"
         );
     }
 
     #[test]
-    fn setup_looks_for_brolinks_own_engine_before_any_other() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+    fn setup_looks_for_the_latch_engine_before_any_other() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, false));
         let line = s
             .lines()
@@ -1148,7 +1162,7 @@ mod tests {
 
     #[test]
     fn a_failed_copy_is_checked_on_the_destination_before_the_service_is_registered() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = code(&script(&plan(&exe, true)));
         let dest = s
             .find(r#"throw "the engine did not copy to"#)
@@ -1169,7 +1183,7 @@ mod tests {
 
     #[test]
     fn engine_failures_are_terminating_and_reported_as_nonzero_exit() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = code(&script(&plan(&exe, true)));
 
         let stop = s
@@ -1200,15 +1214,15 @@ mod tests {
 
     #[test]
     fn staging_is_unique_per_run_and_cleaned_in_finally() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
         assert!(s.contains("[guid]::NewGuid()"), "{s}");
         assert!(
-            !code(&s).contains("brolink-engine-unpack"),
+            !code(&s).contains("latch-engine-unpack"),
             "fixed staging name is gone:\n{s}"
         );
         assert!(
-            !code(&s).contains("brolink-engine.zip"),
+            !code(&s).contains("latch-engine.zip"),
             "fixed download name is gone:\n{s}"
         );
         assert!(
@@ -1219,7 +1233,7 @@ mod tests {
 
     #[test]
     fn native_command_failures_are_checked() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
         assert!(s.contains("if ($LASTEXITCODE -ne 0) { throw \"could not reach GitHub"));
         assert!(
@@ -1270,7 +1284,7 @@ system_tray = enabled
 
     #[test]
     fn the_engine_conf_is_written_before_the_service_starts() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
         for (k, v) in ENGINE_CONF {
             assert!(
@@ -1295,7 +1309,7 @@ system_tray = enabled
 
     #[test]
     fn the_script_does_not_bind_the_engine_to_loopback() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = code(&script(&plan(&exe, true)));
         assert!(
             !s.contains("bind_address"),
@@ -1314,7 +1328,7 @@ system_tray = enabled
 
     #[test]
     fn old_engine_is_disabled_before_the_new_one_starts() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
         let disable = s
             .find("StartupType Disabled")
@@ -1334,13 +1348,13 @@ system_tray = enabled
             .expect("creds restart");
         assert!(
             restart.contains(crate::migrate::SERVICE_MATCH),
-            "creds restart must see BroLinkStream:\n{restart}"
+            "creds restart must see LatchStream:\n{restart}"
         );
     }
 
     #[test]
     fn setup_starts_the_engine_as_the_signed_in_user_after_the_service() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let s = script(&plan(&exe, true));
         let restart = s
             .lines()
@@ -1367,7 +1381,7 @@ system_tray = enabled
 
     #[test]
     fn migrate_skips_creds_and_fresh_install_still_sets_them() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let fresh = script(&plan(&exe, true));
         assert!(fresh.contains("--creds 'u' 'p'"), "{fresh}");
         assert!(fresh.contains("$migrate = $false"), "{fresh}");
@@ -1384,7 +1398,7 @@ system_tray = enabled
 
     #[test]
     fn migrate_uninstalls_only_after_prove_and_dry_run_never_calls_msiexec() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let mig = script(&migrate_plan(&exe, false));
         let copy = mig.find("Copy-EngineState").expect("copy");
         let verify = mig.find("Assert-EngineState").expect("verify");
@@ -1405,7 +1419,7 @@ system_tray = enabled
         assert!(mig.contains("/x"), "{mig}");
         assert!(
             mig.contains("$needFiles = (-not $dir) -or ($dir -ne '"),
-            "Sunshine already installed must still unpack BroLink:\n{mig}"
+            "Sunshine already installed must still unpack Latch:\n{mig}"
         );
         assert!(
             mig.contains("Stop-Service -Name $svc -Force"),
@@ -1426,8 +1440,8 @@ system_tray = enabled
     }
 
     #[test]
-    fn branding_follows_the_copy_touches_only_brolinks_engine_and_skips_dry_runs() {
-        let exe = PathBuf::from(r"C:\x\brolink-host.exe");
+    fn branding_follows_the_copy_touches_only_the_latch_engine_and_skips_dry_runs() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
         let fresh = code(&script(&plan(&exe, true)));
         let copied = fresh
             .find("the engine did not copy to")
@@ -1436,16 +1450,15 @@ system_tray = enabled
         let register = fresh.find("Registering the").expect("register");
         assert!(copied < brand && brand < register, "{fresh}");
         assert!(
-            fresh
-                .contains(r"if ($dir -eq 'C:\Program Files\BroLink\engine') { Brand-Engine $dir }"),
+            fresh.contains(r"if ($dir -eq 'C:\Program Files\Latch\engine') { Brand-Engine $dir }"),
             "{fresh}"
         );
         assert!(
-            fresh.contains(".VersionInfo.FileDescription -eq 'BroLink Streaming'"),
+            fresh.contains(".VersionInfo.FileDescription -eq 'Latch Streaming'"),
             "{fresh}"
         );
         assert!(
-            fresh.contains(r"-FilePath 'C:\x\brolink-host.exe'"),
+            fresh.contains(r"-FilePath 'C:\x\latch-host.exe'"),
             "{fresh}"
         );
         assert!(fresh.contains("'--brand-engine'"), "{fresh}");
@@ -1472,22 +1485,22 @@ system_tray = enabled
     /// The seam CI's PowerShell syntax check runs through (see
     /// `.github/workflows/ci.yml`): the generated script is the real
     /// artefact, so it has to be obtainable without running setup.
-    /// `BROLINK_DUMP_SETUP_SCRIPT=/tmp/setup.ps1` writes one; the other
-    /// `BROLINK_DUMP_*` variables pick the plan.
+    /// `LATCH_DUMP_SETUP_SCRIPT=/tmp/setup.ps1` writes one; the other
+    /// `LATCH_DUMP_*` variables pick the plan.
     #[test]
     fn the_generated_script_can_be_dumped_for_a_syntax_check() {
-        let Ok(out) = std::env::var("BROLINK_DUMP_SETUP_SCRIPT") else {
+        let Ok(out) = std::env::var("LATCH_DUMP_SETUP_SCRIPT") else {
             return;
         };
         let var = |k: &str, default: &str| std::env::var(k).unwrap_or_else(|_| default.into());
-        let exe = PathBuf::from(var("BROLINK_DUMP_EXE", r"C:\x\brolink-host.exe"));
-        let user = var("BROLINK_DUMP_USER", "u");
-        let pass = var("BROLINK_DUMP_PASS", "p");
-        let adapter = var("BROLINK_DUMP_ADAPTER", "");
-        let desc = var("BROLINK_DUMP_ADAPTER_DESC", "");
+        let exe = PathBuf::from(var("LATCH_DUMP_EXE", r"C:\x\latch-host.exe"));
+        let user = var("LATCH_DUMP_USER", "u");
+        let pass = var("LATCH_DUMP_PASS", "p");
+        let adapter = var("LATCH_DUMP_ADAPTER", "");
+        let desc = var("LATCH_DUMP_ADAPTER_DESC", "");
         let p = Plan {
-            migrate: var("BROLINK_DUMP_MIGRATE", "0") == "1",
-            dry_run: var("BROLINK_DUMP_DRY_RUN", "0") == "1",
+            migrate: var("LATCH_DUMP_MIGRATE", "0") == "1",
+            dry_run: var("LATCH_DUMP_DRY_RUN", "0") == "1",
             sunshine_user: &user,
             sunshine_pass: &pass,
             adapter: &adapter,

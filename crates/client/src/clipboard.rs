@@ -1,4 +1,4 @@
-//! The clipboard both ways while a stream runs, through BroLink Host's
+//! The clipboard both ways while a stream runs, through Latch Host's
 //! `/v1/clipboard` on the PC.
 //!
 //! The Moonlight protocol carries keys and pictures, not clipboards, so ⌘V
@@ -9,8 +9,8 @@
 //! then presses Ctrl+V there. Hosts before 3.1 have no such route; the
 //! worker notices the 404 and says so once.
 
-use brolink_core::api::{Ack, Clipboard, CLIPBOARD_PATH};
-use brolink_core::{http, CONTROL_PORT};
+use latch_core::api::{Ack, Clipboard, CLIPBOARD_PATH};
+use latch_core::{http, CONTROL_PORT};
 use parking_lot::Mutex;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

@@ -3,9 +3,9 @@
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 # `cargo test` and `cargo run` keep settings, identities and logs under
 # target/ rather than in the real per-user data directory, so a test run
-# never reads or rewrites an installed BroLink's files. A shipped binary
-# does not see this; see `brolink_core::config::data_dir`.
-BROLINK_DATA_DIR = { value = "target/brolink-data", relative = true }
+# never reads or rewrites an installed Latch's files. A shipped binary
+# does not see this; see `latch_core::config::data_dir`.
+LATCH_DATA_DIR = { value = "target/latch-data", relative = true }
 
 # The host is a standalone exe. Without this it needs vcruntime140.dll,
 # which is not inbox on a fresh Windows install.

@@ -13,46 +13,46 @@ newest() {
   done
   printf '%s' "$pick"
 }
-BIN="$(newest "$ROOT/target/aarch64-apple-darwin/release/brolink-host" "$ROOT/target/release/brolink-host")"
+BIN="$(newest "$ROOT/target/aarch64-apple-darwin/release/latch-host" "$ROOT/target/release/latch-host")"
 if [[ -z "$BIN" ]]; then
-  echo "build the app first: cargo build --release -p brolink-host" >&2
+  echo "build the app first: cargo build --release -p latch-host" >&2
   exit 1
 fi
-APP="$ROOT/dist/BroLink.app"
+APP="$ROOT/dist/Latch.app"
 # The workspace version, so the bundle cannot drift from the binary inside it.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # dist/ is a staging copy. Keep Spotlight from listing it next to
-# /Applications/BroLink.app.
+# /Applications/Latch.app.
 touch "$ROOT/dist/.metadata_never_index"
-cp "$BIN" "$APP/Contents/MacOS/BroLink"
-chmod +x "$APP/Contents/MacOS/BroLink"
-# The Finder/Dock icon: the logo tile filling the canvas, built by
-# scripts/make-macos-icon.py. macOS applies the rounded app-icon shape.
-cp "$ROOT/crates/client/BroLink.icns" "$APP/Contents/Resources/BroLink.icns"
+cp "$BIN" "$APP/Contents/MacOS/Latch"
+chmod +x "$APP/Contents/MacOS/Latch"
+# The Finder/Dock icon: the ink tile with the logo knocked out, built by
+# scripts/make-icons.py. macOS applies the rounded app-icon shape.
+cp "$ROOT/crates/client/Latch.icns" "$APP/Contents/Resources/Latch.icns"
 cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>BroLink</string>
-  <key>CFBundleDisplayName</key><string>BroLink</string>
-  <key>CFBundleIdentifier</key><string>dev.brolink.client</string>
+  <key>CFBundleName</key><string>Latch</string>
+  <key>CFBundleDisplayName</key><string>Latch</string>
+  <key>CFBundleIdentifier</key><string>com.bardbro.latch</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-  <key>CFBundleExecutable</key><string>BroLink</string>
-  <key>CFBundleIconFile</key><string>BroLink</string>
+  <key>CFBundleExecutable</key><string>Latch</string>
+  <key>CFBundleIconFile</key><string>Latch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.utilities</string>
   <key>NSHumanReadableCopyright</key>
-  <string>Copyright © 2026 BroLink Contributors</string>
+  <string>Copyright © 2026 Latch Contributors</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>BroLink sends the wake-up packet to your PC over the local network.</string>
+  <string>Latch sends the wake-up packet to your PC over the local network.</string>
 </dict>
 </plist>
 PLIST

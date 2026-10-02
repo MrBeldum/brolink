@@ -1,4 +1,4 @@
-//! BroLink's design system: the tokens and components every window and
+//! Latch's design system: the tokens and components every window and
 //! overlay is built from.
 //!
 //! The apps are small egui programs aimed at people who are not developers.

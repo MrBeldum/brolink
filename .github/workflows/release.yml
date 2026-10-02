@@ -30,7 +30,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: build app
-        run: cargo build --release -p brolink-host --target aarch64-apple-darwin
+        run: cargo build --release -p latch-host --target aarch64-apple-darwin
       # bundle-macos.sh ad-hoc signs and verifies the bundle itself.
       - name: bundle
         run: bash scripts/bundle-macos.sh
@@ -38,11 +38,25 @@ jobs:
         run: |
           cp docs/MACOS.md dist/README-MACOS.md
           cp LICENSE NOTICE dist/
-          cd dist && tar czf brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md LICENSE NOTICE
+          cd dist && tar czf latch-macos-arm64.tar.gz Latch.app README-MACOS.md LICENSE NOTICE
+      # A 4.0 updater downloads brolink-macos-arm64.tar.gz and installs the
+      # BroLink.app inside it. The same app under that folder name is what
+      # lets it update at all; on its first run it moves itself to Latch.app
+      # and takes over the launch agent (crates/host/src/unix_setup.rs,
+      # adopt_legacy_bundle). Nothing in 4.1 or later reads this asset.
+      - name: package for 4.0 updaters
+        run: |
+          mkdir dist/legacy
+          ditto dist/Latch.app dist/legacy/BroLink.app
+          cp docs/MACOS.md dist/legacy/README-MACOS.md
+          cp LICENSE NOTICE dist/legacy/
+          cd dist/legacy && tar czf ../brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md LICENSE NOTICE
       - uses: actions/upload-artifact@v4
         with:
-          name: brolink-macos-arm64
-          path: dist/brolink-macos-arm64.tar.gz
+          name: latch-macos-arm64
+          path: |
+            dist/latch-macos-arm64.tar.gz
+            dist/brolink-macos-arm64.tar.gz
           if-no-files-found: error
 
   windows:
@@ -54,7 +68,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: build
-        run: cargo build --release -p brolink-host
+        run: cargo build --release -p latch-host
       - name: pin matches setup.rs
         shell: pwsh
         run: |
@@ -74,22 +88,36 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\brolink-host.exe dist\
+          Copy-Item target\release\latch-host.exe dist\
           Copy-Item docs\WINDOWS.md dist\README-WINDOWS.md
           Copy-Item scripts\install-host.ps1, LICENSE, NOTICE dist\
           $zip = Join-Path dist $env:ENGINE_ZIP
           $url = "https://github.com/LizardByte/Sunshine/releases/download/$($env:ENGINE_TAG)/$($env:ENGINE_ZIP)"
-          curl.exe -sSL -A brolink -o $zip $url
+          curl.exe -sSL -A latch -o $zip $url
           if ($LASTEXITCODE -ne 0) { throw "downloading $url failed (curl exit $LASTEXITCODE)" }
           $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
           if ($got -ne $env:ENGINE_SHA256) {
             throw "engine archive is not $($env:ENGINE_TAG): expected $($env:ENGINE_SHA256), got $got"
           }
-          Compress-Archive -Path dist\* -DestinationPath brolink-windows-x64.zip
+          Compress-Archive -Path dist\* -DestinationPath latch-windows-x64.zip
+      # A 4.0 Mac takes brolink-host.exe out of brolink-windows-x64.zip and
+      # sends it to each PC. The new program under the old name is what lets
+      # it update the PC; nothing in 4.1 or later reads this asset.
+      - name: package for 4.0 updaters
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force legacy | Out-Null
+          Copy-Item target\release\latch-host.exe legacy\brolink-host.exe
+          Copy-Item docs\WINDOWS.md legacy\README-WINDOWS.md
+          Copy-Item scripts\install-host.ps1, LICENSE, NOTICE legacy\
+          Copy-Item (Join-Path dist $env:ENGINE_ZIP) legacy\
+          Compress-Archive -Path legacy\* -DestinationPath brolink-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: brolink-windows-x64
-          path: brolink-windows-x64.zip
+          name: latch-windows-x64
+          path: |
+            latch-windows-x64.zip
+            brolink-windows-x64.zip
           if-no-files-found: error
 
   publish:
@@ -133,7 +161,7 @@ jobs:
           esac
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "BroLink ${GITHUB_REF_NAME}" \
+            --title "Latch ${GITHUB_REF_NAME}" \
             $NOTES \
             $PRE \
             artifacts/*/*

@@ -1,4 +1,4 @@
-//! The host's few settings, in `%LOCALAPPDATA%\BroLink\host.toml`.
+//! The host's few settings, in `%LOCALAPPDATA%\Latch\host.toml`.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,14 +37,14 @@ impl Default for HostConfig {
 
 impl HostConfig {
     pub fn load() -> Self {
-        brolink_core::config::load(FILE)
+        latch_core::config::load(FILE)
     }
     /// Overlay this copy's settings on the file rather than replacing it:
     /// `--setup` or a container's bootstrap may have written the engine
     /// login since this copy was loaded, and an empty login here never
     /// erases one on disk.
     pub fn save(&self) -> anyhow::Result<()> {
-        brolink_core::config::update(FILE, |disk: &mut Self| {
+        latch_core::config::update(FILE, |disk: &mut Self| {
             disk.power_allowed = self.power_allowed;
             disk.start_with_windows = self.start_with_windows;
             disk.stay_awake = self.stay_awake;

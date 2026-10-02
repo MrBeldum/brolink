@@ -1,6 +1,6 @@
-# BroLink node (Docker)
+# Latch node (Docker)
 
-A container that **shares a desktop** on your Tailscale network. Any BroLink
+A container that **shares a desktop** on your Tailscale network. Any Latch
 app — Mac, Windows, or another node — lists it and can Connect.
 
 Use this for a VPS, or run several copies on one host so each container is
@@ -11,13 +11,13 @@ It is not the packet relay. The relay kit stays in `deploy/relay/`.
 ## What runs inside
 
 - Xvfb + XFCE (a virtual 1920×1080 desktop)
-- Sunshine (the same streaming engine BroLink uses on Windows and macOS)
-- BroLink's control service on TCP 47850
+- Sunshine (the same streaming engine Latch uses on Windows and macOS)
+- Latch's control service on TCP 47850
 - Optional Tailscale in userspace mode (`TS_AUTHKEY`)
 
 ## One node
 
-From the BroLink repository:
+From the Latch repository:
 
 ```bash
 cp deploy/node/env.example deploy/node/.env
@@ -26,7 +26,7 @@ docker compose -f deploy/node/docker-compose.yml up -d --build
 ```
 
 Sign the auth key in at [the admin console](https://login.tailscale.com/admin/machines)
-if it asks. Open BroLink on your Mac or Windows PC: the hostname appears
+if it asks. Open Latch on your Mac or Windows PC: the hostname appears
 under **Your machines**. Click **Connect**.
 
 ## Several containers on one VPS
@@ -34,10 +34,10 @@ under **Your machines**. Click **Connect**.
 Each compose project needs its own name and hostname:
 
 ```bash
-BROLINK_CONTAINER=brolink-node-a TS_HOSTNAME=vps-a \
+LATCH_CONTAINER=latch-node-a TS_HOSTNAME=vps-a \
   docker compose -p node-a -f deploy/node/docker-compose.yml up -d --build
 
-BROLINK_CONTAINER=brolink-node-b TS_HOSTNAME=vps-b \
+LATCH_CONTAINER=latch-node-b TS_HOSTNAME=vps-b \
   docker compose -p node-b -f deploy/node/docker-compose.yml up -d --build
 ```
 
@@ -52,7 +52,7 @@ identity, so it shows up as a machine instead of being hidden as a relay.
 
 ## Build notes
 
-The image compiles `brolink-host` and installs the Ubuntu 24.04 Sunshine
+The image compiles `latch-host` and installs the Ubuntu 24.04 Sunshine
 package pinned to the same tag Windows setup uses (`v2026.906.222525`).
 The VPS in this project is aarch64; the Dockerfile picks the arm64 or
 amd64 `.deb` from `TARGETARCH`.

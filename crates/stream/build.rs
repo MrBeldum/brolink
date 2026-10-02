@@ -45,10 +45,10 @@ fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/moonlight-common-c");
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-changed={}", root.display());
-    println!("cargo:rerun-if-env-changed=BROLINK_SKIP_C");
+    println!("cargo:rerun-if-env-changed=LATCH_SKIP_C");
     // `cargo check --target aarch64-apple-darwin` from a non-Mac has no C
     // toolchain for the target; the Rust side can still be type-checked.
-    if std::env::var_os("BROLINK_SKIP_C").is_some() {
+    if std::env::var_os("LATCH_SKIP_C").is_some() {
         return;
     }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

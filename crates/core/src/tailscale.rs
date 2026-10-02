@@ -1,4 +1,4 @@
-//! Reading Tailscale through its own CLI. The tailnet is BroLink's network
+//! Reading Tailscale through its own CLI. The tailnet is Latch's network
 //! *and* its list of trusted machines, so both apps lean on it entirely.
 
 use anyhow::{bail, Context, Result};
@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// The ACL tag BroLink uses for a tailnet peer-relay node.
+/// The ACL tag Latch uses for a tailnet peer-relay node.
 pub const RELAY_TAG: &str = "tag:relay";
 
 /// Short deadline for the optional relay probe. Other CLI calls are bounded too.
@@ -59,7 +59,7 @@ fn find_cli() -> Option<PathBuf> {
         })
 }
 
-/// `tailscale status --json`, the parts BroLink reads.
+/// `tailscale status --json`, the parts Latch reads.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Status {

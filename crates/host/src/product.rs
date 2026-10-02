@@ -1,12 +1,12 @@
-//! The one BroLink window: the machine list to connect from, this
-//! machine's Sharing page, and settings. The viewer (`brolink-client`)
+//! The one Latch window: the machine list to connect from, this
+//! machine's Sharing page, and settings. The viewer (`latch-client`)
 //! draws the window; the Sharing page is drawn by [`HostApp`] through
 //! [`SharePage`], and a summary of it is handed over for the machine list.
 
 use crate::app::{HostApp, Os, Shared};
-use brolink_client::app::ClientApp;
-use brolink_client::share::{LocalShare, SharePage, Slot};
 use eframe::egui;
+use latch_client::app::ClientApp;
+use latch_client::share::{LocalShare, SharePage, Slot};
 use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -54,7 +54,7 @@ impl NodeApp {
     #[doc(hidden)]
     pub fn headless(
         cc: &eframe::CreationContext<'_>,
-        discovery: brolink_client::session::Discovery,
+        discovery: latch_client::session::Discovery,
         shared: Shared,
         os: Os,
     ) -> Self {
@@ -62,7 +62,7 @@ impl NodeApp {
             cc,
             discovery,
             Default::default(),
-            brolink_client::config::ClientConfig::default(),
+            latch_client::config::ClientConfig::default(),
         );
         let host = HostApp::headless(Arc::new(Mutex::new(shared)), os);
         Self::assemble(client, host)

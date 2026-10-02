@@ -1,4 +1,4 @@
-//! The components every BroLink screen is assembled from.
+//! The components every Latch screen is assembled from.
 //!
 //! Everything here takes its colours, sizes and distances from
 //! [`theme`](crate::theme); nothing carries its own, so the machine list,
@@ -8,10 +8,9 @@
 
 use crate::theme::{self, radius, size, space, stroke, text, PALETTE as P};
 use egui::{
-    collapsing_header::CollapsingState, Align, Align2, Color32, ColorImage, CornerRadius, Frame,
-    Id, InnerResponse, Label, Layout, Margin, Painter, Pos2, Rect, Response, RichText, Sense,
-    Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo,
-    WidgetText, WidgetType,
+    collapsing_header::CollapsingState, Align, Align2, Color32, CornerRadius, Frame, Id,
+    InnerResponse, Label, Layout, Margin, Painter, Pos2, Rect, Response, RichText, Sense, Shape,
+    Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, WidgetText, WidgetType,
 };
 
 /// What a mark, a notice or a status line means.
@@ -300,7 +299,7 @@ pub fn disclosure<R>(
     default_open: bool,
     body: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    let id = Id::new("brolink.disclosure").with(id);
+    let id = Id::new("latch.disclosure").with(id);
     let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
     let galley = ui.painter().layout_no_wrap(
         title.to_owned(),
@@ -665,7 +664,7 @@ pub fn action_row(ui: &mut Ui, gap: f32, add: impl FnOnce(&mut Ui)) {
 }
 
 fn flush_key(row: Id) -> Id {
-    Id::new("brolink.action_row").with(row)
+    Id::new("latch.action_row").with(row)
 }
 
 /// Whether the next widget starts a line of an [`action_row`].
@@ -1137,7 +1136,7 @@ pub fn open_menu_rect(ctx: &egui::Context) -> Option<Rect> {
 }
 
 fn open_menu_key() -> Id {
-    Id::new("brolink.open_menu")
+    Id::new("latch.open_menu")
 }
 
 /// Open a popup menu under `trigger` while it is toggled on. A real egui
@@ -1176,7 +1175,7 @@ fn popup_menu<R>(ui: &mut Ui, trigger: &Response, add: impl FnOnce(&mut Ui) -> R
                     ui.set_min_width(200.0);
                     ui.set_max_width(320.0);
                     let max = (drop.max_height - chrome).max(size::CONTROL_SM);
-                    clipped_scroll(ui, "brolink.menu", max, |ui| {
+                    clipped_scroll(ui, "latch.menu", max, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         ui.spacing_mut().interact_size.y = size::CONTROL_SM;
                         ui.with_layout(Layout::top_down_justified(Align::Min), add)
@@ -1556,7 +1555,7 @@ pub fn select<R>(
             );
         })
         .show_ui(ui, |ui| {
-            let out = clipped_scroll(ui, "brolink.select", height, |ui| {
+            let out = clipped_scroll(ui, "latch.select", height, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.spacing_mut().button_padding = Vec2::new(space::SM, 6.0);
                 add(ui)
@@ -1712,7 +1711,7 @@ pub(crate) fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 /// anything is shown.
 pub fn trailing<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let avail = ui.available_rect_before_wrap();
-    let key = ui.auto_id_with("brolink.trailing");
+    let key = ui.auto_id_with("latch.trailing");
     let known: f32 = ui.data(|d| d.get_temp(key)).unwrap_or(0.0);
     let w = known.min(avail.width()).max(0.0);
     let rect = Rect::from_min_max(Pos2::new(avail.max.x - w, avail.min.y), avail.max);
@@ -2068,29 +2067,19 @@ pub fn shortcut(ui: &mut Ui, keys: &[&str], does: &str) -> Response {
 // Brand
 // ---------------------------------------------------------------------------
 
-/// The app icon as a texture, for the window's top bar.
-pub struct Brand {
-    tex: TextureHandle,
-}
+/// The logo, for the window's top bar.
+pub struct Brand;
 
 impl Brand {
-    pub fn new(ctx: &egui::Context) -> Self {
-        let px = 64;
-        let img =
-            ColorImage::from_rgba_unmultiplied([px, px], &brolink_core::icon::render(px as u32));
-        Self {
-            tex: ctx.load_texture("brolink-brand", img, TextureOptions::LINEAR),
-        }
+    pub fn new(_ctx: &egui::Context) -> Self {
+        Self
     }
 
     /// The mark and the product name, as on the product site.
     pub fn lockup(&self, ui: &mut Ui, name: &str) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = space::SM;
-            ui.add(
-                egui::Image::new((self.tex.id(), Vec2::splat(22.0)))
-                    .corner_radius(CornerRadius::same(5)),
-            );
+            mark(ui, 20.0);
             ui.label(
                 RichText::new(name)
                     .font(theme::semibold(text::TITLE + 1.0))
@@ -2099,6 +2088,33 @@ impl Brand {
             );
         });
     }
+}
+
+/// The logo, `size` points square: a square with its lower right corner
+/// cut away, and a smaller blue square in the cut. Drawn from rectangles
+/// on the logo's own grid (its 72 units run 14 to 86 in `docs/brand`), so
+/// it is sharp at any size and on any screen.
+pub fn mark(ui: &mut Ui, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_mark(ui, rect, P.text, P.accent);
+    }
+    response
+}
+
+fn paint_mark(ui: &Ui, rect: egui::Rect, ink: Color32, accent: Color32) {
+    use egui::emath::GuiRounding;
+    let ppp = ui.ctx().pixels_per_point();
+    let unit = rect.width() / 72.0;
+    let at = |x: f32, y: f32| rect.min + Vec2::new((x - 14.0) * unit, (y - 14.0) * unit);
+    let part = |x0: f32, y0: f32, x1: f32, y1: f32, colour: Color32| {
+        // Edges on whole pixels, so the corners stay crisp at 1x.
+        let r = egui::Rect::from_min_max(at(x0, y0), at(x1, y1)).round_to_pixels(ppp);
+        ui.painter().rect_filled(r, CornerRadius::ZERO, colour);
+    };
+    part(14.0, 14.0, 86.0, 54.0, ink);
+    part(14.0, 54.0, 54.0, 86.0, ink);
+    part(60.0, 60.0, 86.0, 86.0, accent);
 }
 
 /// A paced activity indicator: unlike egui's immediate-repaint spinner this

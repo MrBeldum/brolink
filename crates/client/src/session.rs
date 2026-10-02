@@ -5,10 +5,10 @@ use crate::clipboard;
 use crate::config::{ClientConfig, Codec, KnownPc, StreamSettings};
 use crate::path::{self, Path};
 use anyhow::{anyhow, bail, Result};
-use brolink_core::api::{Ack, NatReport, PinRequest, PowerAction, PowerRequest, Status};
-use brolink_core::{http, tailscale, wake, CONTROL_PORT, SUNSHINE_PORT};
-use brolink_stream::session::Server;
-use brolink_stream::{Client, Event, FrameSlot, Identity, Input, Session, Settings};
+use latch_core::api::{Ack, NatReport, PinRequest, PowerAction, PowerRequest, Status};
+use latch_core::{http, tailscale, wake, CONTROL_PORT, SUNSHINE_PORT};
+use latch_stream::session::Server;
+use latch_stream::{Client, Event, FrameSlot, Identity, Input, Session, Settings};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
@@ -29,7 +29,7 @@ const NETCHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 /// cheap local call; the ACL changes rarely, so 30 s is plenty.
 const PEER_RELAY_EVERY: Duration = Duration::from_secs(30);
 
-/// A machine on the tailnet BroLink can open, as far as this node can tell.
+/// A machine on the tailnet Latch can open, as far as this node can tell.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pc {
     pub node_id: String,
@@ -39,7 +39,7 @@ pub struct Pc {
     pub ip: Option<Ipv4Addr>,
     /// Tailscale's view; lags a wake-up by up to half a minute.
     pub online: bool,
-    /// The BroLink control service answered.
+    /// The Latch control service answered.
     pub host: Option<Status>,
     /// Sunshine's port answered.
     pub sunshine: bool,
@@ -200,7 +200,7 @@ fn learn(scan: &Discovery) {
             }
             if pc.online {
                 // Coarse on purpose: the file is rewritten only when this moves.
-                let now = brolink_core::dates::now_unix();
+                let now = latch_core::dates::now_unix();
                 if entry
                     .last_seen_unix
                     .is_none_or(|t| now.saturating_sub(t) > 600)
@@ -241,10 +241,10 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
     };
     let mut peers = st.machine_peers();
     let local;
-    if std::env::var_os("BROLINK_DEV_LOCAL").is_some() {
+    if std::env::var_os("LATCH_DEV_LOCAL").is_some() {
         local = tailscale::Node {
             id: "local".into(),
-            host_name: format!("{} (this machine)", brolink_core::config::machine_name()),
+            host_name: format!("{} (this machine)", latch_core::config::machine_name()),
             os: std::env::consts::OS.into(),
             tailscale_ips: vec!["127.0.0.1".into()],
             online: true,
@@ -253,7 +253,7 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         peers.push(&local);
     }
     let mut pcs: Vec<Pc> = peers.into_iter().map(|n| probe_peer(cfg, n)).collect();
-    // A tag:relay node that also runs BroLink (a VPS desktop on the same
+    // A tag:relay node that also runs Latch (a VPS desktop on the same
     // box as the packet relay) belongs in the machine list too.
     for n in st.relay_peers() {
         let pc = probe_peer(cfg, n);
@@ -342,7 +342,7 @@ fn probe_peer(cfg: &ClientConfig, n: &tailscale::Node) -> Pc {
 fn host_status(ip: Ipv4Addr, timeout: Duration) -> Option<Status> {
     http::get_json::<Status>((ip, CONTROL_PORT), "/v1/status", timeout)
         .ok()
-        .filter(|s| s.app == "brolink")
+        .filter(|s| latch_core::legacy::is_node_app(&s.app))
 }
 
 fn port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> bool {
@@ -458,7 +458,7 @@ pub struct Live {
     pub settings: StreamSettings,
     /// The path as measured right before connecting.
     pub path: Path,
-    /// Clipboard both ways, through BroLink Host on the PC.
+    /// Clipboard both ways, through Latch Host on the PC.
     pub clipboard: clipboard::Sync,
 }
 
@@ -499,7 +499,7 @@ impl Target {
             public_ip: parse(k.and_then(|k| k.public_ip.as_ref())),
             server_cert: k
                 .and_then(|k| k.server_cert.as_deref())
-                .and_then(brolink_stream::nvhttp::unhex),
+                .and_then(latch_stream::nvhttp::unhex),
             path: pc.path.clone(),
         })
     }
@@ -570,7 +570,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     // 1. Wake it if nothing answers.
     if !t.online && !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1200)) {
         let mac = t.mac.ok_or_else(|| {
-            anyhow!("{} isn't answering, and BroLink doesn't know how to wake it yet. Turn it on once while BroLink runs there, so this machine can learn how.", t.name)
+            anyhow!("{} isn't answering, and Latch doesn't know how to wake it yet. Turn it on once while Latch runs there, so this machine can learn how.", t.name)
         })?;
         let start = Instant::now();
         let mut last_wake = Instant::now() - Duration::from_secs(60);
@@ -594,7 +594,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             }
             if start.elapsed() > Duration::from_secs(120) {
                 bail!(
-                    "{} didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in BroLink shows whether Wake-on-LAN is ready.",
+                    "{} didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in Latch shows whether Wake-on-LAN is ready.",
                     t.name
                 );
             }
@@ -614,7 +614,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         );
         if start.elapsed() > Duration::from_secs(60) {
             bail!(
-                "{} is on, but nothing is streaming from it. Open BroLink there and set up sharing on its Sharing tab.",
+                "{} is on, but nothing is streaming from it. Open Latch there and set up sharing on its Sharing tab.",
                 t.name
             );
         }
@@ -623,11 +623,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
 
     // 3. Pair if this Mac is not known to the PC yet.
     report(Step::Launching, "Checking pairing…".into());
-    let identity = Identity::load_or_create(&brolink_core::config::data_dir()?.join("identity"))?;
+    let identity = Identity::load_or_create(&latch_core::config::data_dir()?.join("identity"))?;
     let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
     let mut info = match client.server_info() {
         Ok(i) => i,
-        Err(e) if brolink_stream::nvhttp::is_pin_mismatch(&e) => {
+        Err(e) if latch_stream::nvhttp::is_pin_mismatch(&e) => {
             // The engine was reinstalled; the saved cert is the old one.
             // Forget it and pair again so the user does not have to edit
             // client.toml.
@@ -645,7 +645,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
-        let der = client.pair_cancellable(&pin, &brolink_core::config::machine_name(), || {
+        let der = client.pair_cancellable(&pin, &latch_core::config::machine_name(), || {
             submit_pin(t.ip, &pin, &c.progress, &c.ctx);
             stale(&c.progress, generation)
         })?;
@@ -781,8 +781,7 @@ fn wants_hevc(codec: Codec, server_codecs: i32) -> bool {
     const SCM_HEVC_MASK: i32 = 0x0F00;
     codec != Codec::H264
         && server_codecs & SCM_HEVC_MASK != 0
-        && brolink_stream::video::supported_formats() & brolink_stream::ffi::VIDEO_FORMAT_MASK_H265
-            != 0
+        && latch_stream::video::supported_formats() & latch_stream::ffi::VIDEO_FORMAT_MASK_H265 != 0
 }
 
 /// `f` until it succeeds, `times` tries at most, giving up early once the
@@ -807,12 +806,12 @@ fn retry<T>(
     Err(last)
 }
 
-/// Hand the PIN to BroLink Host on the PC, which types it into Sunshine. If
-/// there is no BroLink Host, the PIN stays on screen for someone at the PC.
+/// Hand the PIN to Latch Host on the PC, which types it into Sunshine. If
+/// there is no Latch Host, the PIN stays on screen for someone at the PC.
 fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>, ctx: &egui::Context) {
     let req = PinRequest {
         pin: pin.into(),
-        name: brolink_core::config::machine_name(),
+        name: latch_core::config::machine_name(),
     };
     // Pairing draws no spinner, so a new reason has to ask for its frame.
     let show = |detail: String| {
@@ -837,8 +836,8 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>, ctx: &egui::C
                 show(reason);
             }
             Err(e) => {
-                tracing::info!("BroLink Host did not take the PIN: {e}");
-                show("BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.".into());
+                tracing::info!("Latch Host did not take the PIN: {e}");
+                show("Latch on that machine isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, then try again.".into());
             }
         }
         std::thread::sleep(Duration::from_millis(800));
@@ -849,7 +848,7 @@ fn remember_cert(node_id: &str, name: &str, der: &[u8]) {
     if let Err(e) = ClientConfig::update(|cfg| {
         let e = cfg.pcs.entry(node_id.to_string()).or_default();
         e.name = name.to_string();
-        e.server_cert = Some(brolink_stream::nvhttp::hex(der));
+        e.server_cert = Some(latch_stream::nvhttp::hex(der));
     }) {
         tracing::warn!("could not save the PC's certificate: {e:#}");
     }
@@ -870,14 +869,14 @@ pub fn power(ip: Ipv4Addr, action: PowerAction) -> Result<()> {
     }
 }
 
-/// Send the wake packet to a PC that is awake and ask BroLink Host on it
+/// Send the wake packet to a PC that is awake and ask Latch Host on it
 /// whether the packet arrived: the same path a real wake would take.
 pub fn wake_test(pc: &Pc) -> Result<bool> {
     let ip = pc.ip.ok_or_else(|| anyhow!("no address for {}", pc.name))?;
     wake_only(pc)?;
     std::thread::sleep(Duration::from_millis(1500));
     let st = host_status(ip, Duration::from_secs(3))
-        .ok_or_else(|| anyhow!("BroLink on {} isn't answering", pc.name))?;
+        .ok_or_else(|| anyhow!("Latch on {} isn't answering", pc.name))?;
     Ok(st.wake_packet_age_secs.is_some_and(|s| s <= 5))
 }
 
@@ -886,7 +885,7 @@ pub fn wake_only(pc: &Pc) -> Result<usize> {
     let t = Target::from_pc(pc).ok_or_else(|| anyhow!("no address for {}", pc.name))?;
     let mac = t.mac.ok_or_else(|| {
         anyhow!(
-            "BroLink doesn't know how to wake {} yet; turn it on once while BroLink runs there",
+            "Latch doesn't know how to wake {} yet; turn it on once while Latch runs there",
             pc.name
         )
     })?;
@@ -923,10 +922,10 @@ mod tests {
         }
     }
 
-    /// Against BroLink Host running on this machine: the packet goes out on
-    /// the LAN and the host reports it. `cargo test -p brolink-client wake_test_real -- --ignored`
+    /// Against Latch Host running on this machine: the packet goes out on
+    /// the LAN and the host reports it. `cargo test -p latch-client wake_test_real -- --ignored`
     #[test]
-    #[ignore = "needs BroLink Host running on this machine"]
+    #[ignore = "needs Latch Host running on this machine"]
     fn wake_test_real() {
         let ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
         let host = host_status(ip, Duration::from_secs(2)).expect("host status");
@@ -988,7 +987,7 @@ mod tests {
         assert_eq!(t.server_cert, Some(vec![0x30, 0x82]));
     }
 
-    /// `cargo test -p brolink-client scan_real -- --ignored --nocapture`
+    /// `cargo test -p latch-client scan_real -- --ignored --nocapture`
     #[test]
     #[ignore = "needs Tailscale"]
     fn scan_real_tailnet() {

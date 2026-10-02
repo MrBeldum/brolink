@@ -2,7 +2,11 @@
 # device back as the Windows default. The engine's own startup clears the
 # default when Steam Streaming Speakers are the only active device.
 $ErrorActionPreference = "Continue"
-$engineDir = "C:\Program Files\BroLink\engine"
+# The engine's folder is Latch's, or the one an earlier version used until
+# setup moves it; the service is named the same way. Either may be there.
+$engineDir = @("C:\Program Files\Latch\engine", "C:\Program Files\BroLink\engine") |
+    Where-Object { Test-Path (Join-Path $_ "sunshine.exe") } | Select-Object -First 1
+if (-not $engineDir) { Write-Output "NO_ENGINE"; exit 0 }
 $exe = Join-Path $engineDir "sunshine.exe"
 $conf = Join-Path $engineDir "config\sunshine.conf"
 
@@ -59,7 +63,7 @@ internal interface IPolicyConfig {
     [PreserveSig] int SetDefaultEndpoint(string pszDeviceName, int eRole);
     [PreserveSig] int SetEndpointVisibility(string pszDeviceName, bool bVisible);
 }
-public static class BroLinkAudio {
+public static class LatchAudio {
     public static int SetDefault(string id) {
         var cfg = (IPolicyConfig)new PolicyConfigClient();
         int hr = 0;
@@ -75,8 +79,10 @@ public static class BroLinkAudio {
 $me = "$env:USERDOMAIN\$env:USERNAME"
 $sun = Get-EngineOwner
 if (-not $sun -or $sun.User -ine $me) {
-    Set-Service BroLinkStream -StartupType Manual -ErrorAction SilentlyContinue
-    Stop-Service BroLinkStream -Force -ErrorAction SilentlyContinue
+    foreach ($service in "LatchStream", "BroLinkStream") {
+        Set-Service $service -StartupType Manual -ErrorAction SilentlyContinue
+        Stop-Service $service -Force -ErrorAction SilentlyContinue
+    }
     Get-CimInstance -ClassName Win32_Process -Filter "Name='sunshine.exe'" | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
@@ -109,5 +115,5 @@ $devices = @(Get-ActiveRender)
 if ($devices.Count -eq 0) { Write-Output "NO_ACTIVE_RENDER"; exit 0 }
 $pick = $devices | Where-Object { $_.Desc -match "Steam Streaming" -or $_.Friendly -match "Steam Streaming" } | Select-Object -First 1
 if (-not $pick) { $pick = $devices | Select-Object -First 1 }
-$hr = [BroLinkAudio]::SetDefault($pick.Id)
+$hr = [LatchAudio]::SetDefault($pick.Id)
 Write-Output ("OK {0} hr=0x{1:X8}" -f $pick.Id, $hr)

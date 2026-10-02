@@ -3,7 +3,7 @@
 //! Sharing page through [`SharePage`]; the viewer only shows a summary row
 //! in the machine list and hosts the page in its window.
 
-use brolink_core::api::Status;
+use latch_core::api::Status;
 use parking_lot::Mutex;
 use std::sync::Arc;
 

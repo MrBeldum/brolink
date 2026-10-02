@@ -1,5 +1,5 @@
 //! Software H.264 through Cisco's OpenH264. Used on Windows and Linux, where
-//! BroLink is a development and testing client rather than the product.
+//! Latch is a development and testing client rather than the product.
 
 use super::{interleave_uv, Decoder, Frame};
 use anyhow::{bail, Result};

@@ -9,9 +9,9 @@
 //! never turn a high RTT or the presence of a relay into a quality cap.
 
 use crate::config::{Quality, Resolution, StreamSettings};
-use brolink_core::api::NatReport;
-use brolink_core::tailscale::derp_city;
-use brolink_ui::Tone;
+use latch_core::api::NatReport;
+use latch_core::tailscale::derp_city;
+use latch_ui::Tone;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Path {
@@ -151,7 +151,7 @@ pub fn explain(
         }
         (None, Some(m)) => {
             let mut t = format!(
-                "BroLink Host 3.1 on {pc} would report that side of the network and say which router is in the way."
+                "Latch Host 3.1 on {pc} would report that side of the network and say which router is in the way."
             );
             if m.hard == Some(true) && !m.portmap {
                 t.push_str(" This Mac's network is a hard NAT with no UPnP, which is often enough on its own; another network here may connect directly.");
@@ -399,7 +399,7 @@ mod tests {
 
         // An old host reports nothing: say so, and what the Mac knows.
         let t = explain("Gaming-PC", &relayed, None, Some(&mac_hard)).unwrap();
-        assert!(t.contains("BroLink Host 3.1"), "{t}");
+        assert!(t.contains("Latch Host 3.1"), "{t}");
         assert!(t.contains("often enough on its own"), "{t}");
         let t = explain("Gaming-PC", &relayed, None, None).unwrap();
         assert!(t.contains("UPnP"), "{t}");
