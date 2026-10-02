@@ -6,7 +6,7 @@
 use anyhow::{bail, Context, Result};
 use latch_core::{SUNSHINE_PORT, SUNSHINE_WEB_PORT};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -24,6 +24,13 @@ pub const INSTALL_DIRS: [(&str, &str); 4] = [
     ("Sunshine", r"C:\Program Files\Sunshine"),
     ("Apollo", r"C:\Program Files\Apollo"),
 ];
+
+/// Whether `install` is the engine in the folder an earlier version used.
+/// Setup moves it to [`ENGINE_DIR`] and registers the service under its new
+/// name, so it has to run the engine step even though an engine is up.
+pub fn in_old_folder(install: &Install) -> bool {
+    install.dir.as_path() == Path::new(crate::legacy::WINDOWS_ENGINE_DIR)
+}
 
 /// GitHub repository the setup script fetches the engine archive from.
 pub const REPO: &str = "LizardByte/Sunshine";
@@ -578,6 +585,20 @@ mod tests {
             .expect("both exist");
         assert_eq!(*winner, ("Latch", ENGINE_DIR));
         let _ = SUNSHINE_PORT;
+    }
+
+    #[test]
+    fn an_engine_in_the_old_folder_is_recognised_so_setup_moves_it() {
+        let old = Install {
+            kind: "Latch",
+            dir: PathBuf::from(crate::legacy::WINDOWS_ENGINE_DIR),
+        };
+        let new = Install {
+            kind: "Latch",
+            dir: PathBuf::from(ENGINE_DIR),
+        };
+        assert!(in_old_folder(&old));
+        assert!(!in_old_folder(&new));
     }
 
     #[test]

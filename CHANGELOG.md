@@ -4,6 +4,14 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## 4.1.1 (2026-10-02)
+
+- Setting up a Windows PC that an earlier version had set up (when the
+  app was called BroLink) now registers the `LatchStream` service. Setup
+  moved the engine's folder and removed the old service, but treated the
+  running engine as needing nothing more, so the new service was never
+  registered and the engine ran only once someone had signed in.
+
 ## 4.1.0 (2026-10-02)
 
 - **BroLink is now Latch, by Bardbro.** The app, the repository

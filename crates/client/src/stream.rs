@@ -2105,7 +2105,7 @@ pub(crate) mod tests {
                     v
                 },
                 Extra {
-                    handover: Some("Installing Latch Host 4.1.0 on Gaming-PC: waiting for it to fetch the file…".into()),
+                    handover: Some("Installing Latch Host 4.1.1 on Gaming-PC: waiting for it to fetch the file…".into()),
                     ..windows()
                 },
                 None,
