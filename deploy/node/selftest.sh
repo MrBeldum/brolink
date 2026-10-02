@@ -10,16 +10,16 @@ need() {
     fail=1
   fi
 }
-need "$ROOT/Dockerfile" "brolink-host"
+need "$ROOT/Dockerfile" "latch-host"
 need "$ROOT/Dockerfile" "ubuntu:24.04"
 need "$ROOT/Dockerfile" "v2026.906.222525"
-need "$ROOT/entrypoint.sh" "brolink-host --background"
+need "$ROOT/entrypoint.sh" "latch-host --background"
 need "$ROOT/entrypoint.sh" "userspace-networking"
 need "$ROOT/entrypoint.sh" "packetsize = 1184"
 need "$ROOT/entrypoint.sh" "sw_preset = ultrafast"
-need "$ROOT/entrypoint.sh" "brolink-engine"
+need "$ROOT/entrypoint.sh" "latch-engine"
 need "$ROOT/entrypoint.sh" '"name": "Desktop"'
-need "$ROOT/docker-compose.yml" "brolink-node"
+need "$ROOT/docker-compose.yml" "latch-node"
 need "$ROOT/docker-compose.yml" "node-tailscale"
 # Sunshine rejects the entire catalog when its required `env` object is
 # absent, even though its HTTP health endpoints still return success.

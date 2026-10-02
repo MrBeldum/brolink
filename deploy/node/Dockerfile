@@ -1,8 +1,8 @@
-# BroLink node: a virtual desktop plus Sunshine plus the BroLink control
+# Latch node: a virtual desktop plus Sunshine plus the Latch control
 # service, optionally joined to Tailscale as its own machine.
 #
 # Build from the repository root:
-#   docker build -f deploy/node/Dockerfile -t brolink-node .
+#   docker build -f deploy/node/Dockerfile -t latch-node .
 #
 # Ubuntu 24.04 matches the pinned Sunshine .deb.
 
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p brolink-host
+RUN cargo build --release -p latch-host
 
 FROM ubuntu:24.04
 ARG SUNSHINE_TAG=v2026.906.222525
@@ -46,16 +46,16 @@ RUN set -eux; \
 # Optional Tailscale userspace client so this container is its own node.
 COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscale /usr/local/bin/tailscaled /usr/local/bin/
 
-COPY --from=build /src/target/release/brolink-host /usr/local/bin/brolink-host
+COPY --from=build /src/target/release/latch-host /usr/local/bin/latch-host
 COPY deploy/node/entrypoint.sh /entrypoint.sh
-COPY deploy/node/bootstrap.py /opt/brolink/bootstrap.py
+COPY deploy/node/bootstrap.py /opt/latch/bootstrap.py
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /root/.config /var/lib/tailscale
 
 ENV DISPLAY=:1 \
     HOME=/root \
-    BROLINK_USER=brolink \
-    BROLINK_PASS=
+    LATCH_USER=latch \
+    LATCH_PASS=
 
 VOLUME ["/root/.config", "/root/.local", "/var/lib/tailscale"]
 ENTRYPOINT ["/entrypoint.sh"]

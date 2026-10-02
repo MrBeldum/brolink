@@ -11,7 +11,7 @@ mod win {
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const TASK: &str = "BroLinkEngineUser";
+    const TASK: &str = "LatchEngineUser";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     /// The helper scripts, written into the data directory when they are
@@ -21,7 +21,7 @@ mod win {
     /// three files and re-register the task each time.
     pub fn install_helpers() -> Result<PathBuf> {
         static TASK_REGISTERED: AtomicBool = AtomicBool::new(false);
-        let dir = brolink_core::config::data_dir()?;
+        let dir = latch_core::config::data_dir()?;
         let script = dir.join("take-over-engine.ps1");
         write_if_changed(&script, include_str!("../windows/take-over-engine.ps1"))?;
         let launcher = dir.join("take-over-engine.vbs");
@@ -38,6 +38,11 @@ mod win {
             let tr = format!("wscript.exe //B //Nologo \"{}\"", launcher.display());
             if create_logon_task(&tr) {
                 TASK_REGISTERED.store(true, Ordering::Relaxed);
+                // An earlier version's task runs its own copy of the helper
+                // from the old folder, and two would race to start the
+                // engine. One an administrator registered survives this;
+                // setup removes it.
+                delete_logon_task(crate::legacy::WINDOWS_ENGINE_TASK);
             } else {
                 tracing::info!("could not register {TASK}; the host will start the engine itself");
             }
@@ -50,6 +55,15 @@ mod win {
             return Ok(());
         }
         std::fs::write(path, text).with_context(|| path.display().to_string())
+    }
+
+    fn delete_logon_task(name: &str) {
+        let _ = Command::new("schtasks")
+            .args(["/Delete", "/TN", name, "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 
     fn create_logon_task(tr: &str) -> bool {

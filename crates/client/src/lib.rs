@@ -1,4 +1,4 @@
-//! BroLink viewer: machine list, pairing, stream window.
+//! Latch viewer: machine list, pairing, stream window.
 
 pub mod app;
 pub mod clipboard;
@@ -14,17 +14,17 @@ pub mod stream;
 pub mod update;
 pub mod video;
 
-/// How a BroLink window opens: the brolink-host app and the development
+/// How a Latch window opens: the latch-host app and the development
 /// viewer alike.
 pub fn native_options() -> eframe::NativeOptions {
     let icon = if cfg!(target_os = "macos") {
         // eframe calls NSApplication.setApplicationIconImage with this
-        // bitmap, which replaces BroLink.icns in the Dock with an unmasked
+        // bitmap, which replaces Latch.icns in the Dock with an unmasked
         // square. An empty icon leaves the bundle icon in place.
         egui::IconData::default()
     } else {
         egui::IconData {
-            rgba: brolink_core::icon::render(64),
+            rgba: latch_core::icon::render(64),
             width: 64,
             height: 64,
         }
@@ -33,7 +33,7 @@ pub fn native_options() -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 420.0])
-            .with_title("BroLink")
+            .with_title("Latch")
             .with_icon(icon),
         renderer: eframe::Renderer::Wgpu,
         // A decoded frame goes to the screen as soon as it is drawn rather

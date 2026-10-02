@@ -8,14 +8,14 @@ use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// Larger bodies are refused; nothing BroLink sends comes close, except the
+/// Larger bodies are refused; nothing Latch sends comes close, except the
 /// host executable on [`crate::api::UPDATE_PATH`], which has its own limit.
 const MAX_BODY: usize = 64 * 1024;
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_CONNECTIONS: usize = 16;
 /// Time to read headers and a small JSON body, and to write the reply.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Time to read `brolink-host.exe` after the headers. Tailscale plus a
+/// Time to read `latch-host.exe` after the headers. Tailscale plus a
 /// 10–30 MB body does not fit in [`IDLE_TIMEOUT`].
 const UPDATE_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -640,7 +640,7 @@ mod tests {
                     200,
                     &serde_json::json!({
                         "len": req.body.len(),
-                        "ver": req.header("X-BroLink-Version"),
+                        "ver": req.header("X-Latch-Version"),
                         "first": req.body.first(),
                     }),
                 )
@@ -652,7 +652,7 @@ mod tests {
             addr,
             "POST",
             crate::api::UPDATE_PATH,
-            &[("X-BroLink-Version", "3.1.0")],
+            &[("X-Latch-Version", "3.1.0")],
             &body,
             t,
         )

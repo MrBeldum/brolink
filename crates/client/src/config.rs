@@ -1,5 +1,5 @@
 //! Settings and what has been learned about each PC, in
-//! `~/Library/Application Support/dev.brolink.BroLink/client.toml`.
+//! `~/Library/Application Support/com.bardbro.Latch/client.toml`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -18,14 +18,14 @@ pub enum Resolution {
 impl Resolution {
     /// This choice applied to a screen of `native` pixels: the standard
     /// 16:9 sizes are exactly that, and "Match screen" is the screen
-    /// itself. See `brolink_core::screens`.
+    /// itself. See `latch_core::screens`.
     pub fn pixels(self, native: (u32, u32)) -> (u32, u32) {
-        let [p1080, p1440, p2160] = brolink_core::screens::STANDARD;
+        let [p1080, p1440, p2160] = latch_core::screens::STANDARD;
         match self {
             Resolution::P1080 => p1080,
             Resolution::P1440 => p1440,
             Resolution::P2160 => p2160,
-            Resolution::Native => brolink_core::screens::even(native),
+            Resolution::Native => latch_core::screens::even(native),
         }
     }
 
@@ -215,7 +215,7 @@ impl Default for ClientConfig {
 
 impl ClientConfig {
     pub fn load() -> Self {
-        let mut c: Self = brolink_core::config::load(FILE);
+        let mut c: Self = latch_core::config::load(FILE);
         if c.stream.quality == Quality::Auto {
             c.stream.resolution = Resolution::Native;
         }
@@ -256,11 +256,11 @@ impl ClientConfig {
 
     /// One read-modify-write of the file, under the process-wide config lock.
     pub fn update(edit: impl FnOnce(&mut Self)) -> anyhow::Result<()> {
-        brolink_core::config::update(FILE, edit)
+        latch_core::config::update(FILE, edit)
     }
 
     pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
-        if !brolink_stream::nvhttp::is_pin_mismatch(err) {
+        if !latch_stream::nvhttp::is_pin_mismatch(err) {
             return false;
         }
         if let Some(pc) = self.pcs.get_mut(node_id) {
@@ -316,14 +316,14 @@ mod tests {
             Resolution::P1080.describe((3024, 1964)),
             "1080p · 1920 × 1080"
         );
-        let modes = brolink_core::screens::stream_modes();
+        let modes = latch_core::screens::stream_modes();
         for r in [
             Resolution::P1080,
             Resolution::P1440,
             Resolution::P2160,
             Resolution::Native,
         ] {
-            for &screen in brolink_core::screens::SCREENS {
+            for &screen in latch_core::screens::SCREENS {
                 assert!(
                     modes.contains(&r.pixels(screen)),
                     "{r:?} on {screen:?} is a listed mode"
@@ -399,7 +399,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mismatch = anyhow::Error::from(brolink_stream::nvhttp::PinMismatch);
+        let mismatch = anyhow::Error::from(latch_stream::nvhttp::PinMismatch);
         assert!(c.forget_pin_on_mismatch("n", &mismatch));
         assert_eq!(c.pcs["n"].server_cert, None);
 

@@ -6,7 +6,7 @@
 //! hairlines, so the app is too: neutral surfaces a step apart, one text
 //! colour in three strengths, white for the primary action and for "on",
 //! and colour only where it carries meaning — green, amber and red for
-//! status, and the logo's violet for keyboard focus, selection and
+//! status, and the logo's blue for keyboard focus, selection and
 //! progress. Screens take every colour, size and distance from here; a
 //! retune is a change to this file.
 
@@ -58,8 +58,9 @@ pub struct Palette {
     pub primary_pressed: Color32,
     /// Text and marks drawn on `primary`.
     pub on_primary: Color32,
-    /// The logo's violet, lightened to read on the dark surfaces. Keyboard
-    /// focus, text selection, progress. Never a fill behind text.
+    /// The logo's blue, lightened to read on the dark surfaces. Keyboard
+    /// focus, text selection, progress, and the logo's own square. Never a
+    /// fill behind text.
     pub accent: Color32,
     /// Healthy, online, ready.
     pub success: Color32,
@@ -91,7 +92,7 @@ pub const PALETTE: Palette = Palette {
     primary_hover: Color32::from_rgb(0xd4, 0xd4, 0xd4),
     primary_pressed: Color32::from_rgb(0xbd, 0xbd, 0xbd),
     on_primary: Color32::from_rgb(0x0a, 0x0a, 0x0a),
-    accent: Color32::from_rgb(0xa7, 0x8b, 0xfa),
+    accent: Color32::from_rgb(0x4f, 0x8f, 0xe8),
     success: Color32::from_rgb(0x4c, 0xc3, 0x8a),
     warning: Color32::from_rgb(0xf0, 0xb2, 0x49),
     danger: Color32::from_rgb(0xff, 0x63, 0x69),

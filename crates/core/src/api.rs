@@ -1,6 +1,6 @@
 //! The JSON the host serves and the client reads. Plain HTTP over Tailscale:
 //! WireGuard already encrypts it, and `tailscale whois` already says who is
-//! asking, so BroLink adds neither a cipher nor a password of its own.
+//! asking, so Latch adds neither a cipher nor a password of its own.
 //!
 //! Routes (all JSON, all on [`crate::CONTROL_PORT`]):
 //!
@@ -10,7 +10,7 @@
 //! | POST   | /v1/pin     | [`PinRequest`]  | [`Ack`]      |
 //! | POST   | /v1/power   | [`PowerRequest`]| [`Ack`]      |
 //! | POST   | /v1/quit    |                 | [`Ack`] (loopback only) |
-//! | POST   | /v1/update  | `brolink-host.exe` bytes | [`Ack`]     |
+//! | POST   | /v1/update  | `latch-host.exe` bytes | [`Ack`]     |
 //! | GET    | /v1/clipboard |               | [`Clipboard`] |
 //! | POST   | /v1/clipboard | [`Clipboard`] | [`Ack`]      |
 //! | GET    | /v1/display |                 | display report (JSON) |
@@ -32,11 +32,11 @@
 use serde::{Deserialize, Serialize};
 
 pub const UPDATE_PATH: &str = "/v1/update";
-pub const UPDATE_VERSION_HEADER: &str = "x-brolink-version";
-pub const UPDATE_SHA256_HEADER: &str = "x-brolink-sha256";
+pub const UPDATE_VERSION_HEADER: &str = "x-latch-version";
+pub const UPDATE_SHA256_HEADER: &str = "x-latch-sha256";
 /// The largest host executable accepted; the real one is a tenth of this.
 pub const UPDATE_MAX_BYTES: usize = 128 * 1024 * 1024;
-/// Oldest BroLink Host that serves [`UPDATE_PATH`]. Older hosts cap the
+/// Oldest Latch Host that serves [`UPDATE_PATH`]. Older hosts cap the
 /// body at 64 KiB and close; a Mac that POSTs the executable anyway sees
 /// a broken pipe (and on macOS, a socket timeout as EAGAIN).
 pub const FIRST_UPDATE_VERSION: &str = "3.1.0";
@@ -136,11 +136,11 @@ pub struct Status {
     pub log: Vec<String>,
 }
 
-/// The streaming engine BroLink runs on this machine.
+/// The streaming engine Latch runs on this machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Streamer {
-    /// "BroLink" when sharing is set up; empty when no engine is installed.
+    /// "Latch" when sharing is set up; empty when no engine is installed.
     pub kind: String,
     pub installed: bool,
     /// Its GameStream port answers.

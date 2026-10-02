@@ -8,7 +8,7 @@ rendezvous and PIN dialogs. Replaced in 2.0; the git history has it.
 ## v2.0 (retired)
 
 Glue around Sunshine, Moonlight and Tailscale: the Mac app installed
-Moonlight and launched it; BroLink itself did wake, pairing and power.
+Moonlight and launched it; Latch itself did wake, pairing and power.
 
 ## v3.0
 

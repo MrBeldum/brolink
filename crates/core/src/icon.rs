@@ -1,5 +1,5 @@
 //! The application icon: the checked-in logo, decoded once and resized on
-//! demand. Shared by the windows (via `brolink_core::icon`) and by the host
+//! demand. Shared by the windows (via `latch_core::icon`) and by the host
 //! build script, which includes this file by path, so it must not refer to
 //! anything else in this crate.
 
@@ -8,10 +8,11 @@ use std::sync::{Mutex, OnceLock};
 
 use image::{Rgba, RgbaImage};
 
-/// The 1024x1024 logo, a rounded tile on a near-black pad.
+/// The 1024x1024 icon: a full-bleed ink tile with the logo knocked out in
+/// white and its blue square. `scripts/make-icons.py` draws it.
 const LOGO_PNG: &[u8] = include_bytes!("../assets/logo-1024.png");
 
-/// The decoded logo. PNG inflate is the expensive part; a resize is cheap.
+/// The decoded icon. PNG inflate is the expensive part; a resize is cheap.
 fn logo() -> &'static RgbaImage {
     static LOGO: OnceLock<RgbaImage> = OnceLock::new();
     LOGO.get_or_init(|| {
@@ -21,49 +22,11 @@ fn logo() -> &'static RgbaImage {
     })
 }
 
-/// Bounding box of the rounded tile: where the pad colour ends on the
-/// middle row and column.
-fn tile_bounds(im: &RgbaImage) -> (u32, u32, u32, u32) {
-    let pad = *im.get_pixel(0, 0);
-    let mid_x = im.width() / 2;
-    let mid_y = im.height() / 2;
-    let mut x0 = 0;
-    let mut x1 = im.width();
-    for x in 0..im.width() {
-        if *im.get_pixel(x, mid_y) != pad {
-            x0 = x;
-            break;
-        }
-    }
-    for x in (0..im.width()).rev() {
-        if *im.get_pixel(x, mid_y) != pad {
-            x1 = x + 1;
-            break;
-        }
-    }
-    let mut y0 = 0;
-    let mut y1 = im.height();
-    for y in 0..im.height() {
-        if *im.get_pixel(mid_x, y) != pad {
-            y0 = y;
-            break;
-        }
-    }
-    for y in (0..im.height()).rev() {
-        if *im.get_pixel(mid_x, y) != pad {
-            y1 = y + 1;
-            break;
-        }
-    }
-    (x0, y0, x1, y1)
-}
-
 /// Render the icon at `size` pixels square as straight (unpremultiplied) RGBA.
 ///
 /// The tile fills the canvas. Windows (taskbar, Explorer, the window) and
 /// the in-app header all draw this bitmap; macOS 26 also wants a filled
-/// square and applies the rounded app-icon shape itself. Pre-padding left
-/// a square plate around the mark.
+/// square and applies the rounded app-icon shape itself.
 pub fn render(size: u32) -> Vec<u8> {
     // Each window's header and the window icon ask for the same size at
     // startup, before the first frame; the resize is the slow part.
@@ -76,11 +39,8 @@ fn draw(size: u32) -> Vec<u8> {
     if size == 0 {
         return Vec::new();
     }
-    let logo = logo();
-    let (x0, y0, x1, y1) = tile_bounds(logo);
-    let cropped = image::imageops::crop_imm(logo, x0, y0, x1 - x0, y1 - y0).to_image();
     let mut out =
-        image::imageops::resize(&cropped, size, size, image::imageops::FilterType::Lanczos3);
+        image::imageops::resize(logo(), size, size, image::imageops::FilterType::Lanczos3);
     // Opaque fill so the OS, not our alpha, defines the shape.
     for p in out.pixels_mut() {
         let Rgba([r, g, b, a]) = *p;
@@ -106,12 +66,16 @@ mod tests {
         [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
     }
 
-    fn is_brand_violet(p: [u8; 4]) -> bool {
-        p[3] == 255 && p[2] > 140 && p[0] > 80 && p[1] + 40 < p[2]
+    fn is_brand_blue(p: [u8; 4]) -> bool {
+        p[3] == 255 && p[2] > 180 && p[0] < 110 && p[1] > 100 && p[1] < 180
+    }
+
+    fn is_white(p: [u8; 4]) -> bool {
+        p[3] == 255 && p[0] > 240 && p[1] > 240 && p[2] > 240
     }
 
     #[test]
-    fn renders_the_requested_size_with_opaque_corners_and_the_violet_mark() {
+    fn renders_the_requested_size_with_an_ink_tile_and_the_white_and_blue_mark() {
         for size in [16, 256] {
             let rgba = render(size);
             assert_eq!(rgba.len(), (size * size * 4) as usize);
@@ -119,17 +83,15 @@ mod tests {
             // Windows (and the in-app header) are not a transparent hole.
             let [r, g, b, a] = pixel(&rgba, size, 0, 0);
             assert!(
-                r < 16 && g < 16 && b < 20 && a == 255,
+                r < 40 && g < 40 && b < 40 && a == 255,
                 "corner {r},{g},{b},{a}"
             );
-            assert!(
-                rgba.chunks(4)
-                    .any(|p| is_brand_violet([p[0], p[1], p[2], p[3]])),
-                "no violet at {size}"
-            );
+            let any = |f: fn([u8; 4]) -> bool| rgba.chunks(4).any(|p| f([p[0], p[1], p[2], p[3]]));
+            assert!(any(is_brand_blue), "no blue square at {size}");
+            assert!(any(is_white), "no white mark at {size}");
         }
-        // Cropping the pad makes the mark fill the tile: at 256, violet
-        // reaches outside the inner half. The old padded render did not.
+        // The mark fills the tile: at 256 the white square's corner lies
+        // well outside the inner half of the canvas.
         let size = 256u32;
         let rgba = render(size);
         let outside = (0..size)
@@ -139,8 +101,8 @@ mod tests {
                 let dy = y as i32 - 128;
                 dx * dx + dy * dy > 100 * 100
             })
-            .any(|(x, y)| is_brand_violet(pixel(&rgba, size, x, y)));
-        assert!(outside, "mark still sits in a padded hole");
+            .any(|(x, y)| is_white(pixel(&rgba, size, x, y)));
+        assert!(outside, "the mark sits in a padded hole");
     }
 
     #[test]

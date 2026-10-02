@@ -373,14 +373,14 @@ impl Drop for Session {
 ///
 /// Neither side encodes at the number it is given. moonlight-common-c
 /// (`SdpGenerator.c`) keeps 20% of the request for FEC and, on a remote
-/// stream, another 500 kbps for audio and control (BroLink never flags a
+/// stream, another 500 kbps for audio and control (Latch never flags a
 /// stream remote). Sunshine ignores that reduced figure anyway: it takes the
 /// raw request (`x-ml-video.configuredBitrateKbps`,
 /// `rtsp.cpp`) and makes its own deductions, 20% for FEC, then audio
 /// (512 kbps for high-quality stereo, at most a fifth of what is left) and
 /// 500 kbps for packet and control overhead (at most a tenth). A plain
 /// request of 20 Mbps therefore encodes at 15 Mbps, and one padded only for
-/// moonlight's 20% still lands at 18988 kbps. BroLink treats the user's
+/// moonlight's 20% still lands at 18988 kbps. Latch treats the user's
 /// number as the video target, not a total budget, so this inverts the
 /// whole chain: the smallest request that survives every deduction at or
 /// above the target.
@@ -410,7 +410,7 @@ const SUNSHINE_CONTROL_KBPS: u64 = 500;
 
 /// What Sunshine's encoder targets for a moonlight request of `request`
 /// kbps: `rtsp.cpp`'s arithmetic on `configuredBitrateKbps`, FEC at
-/// BroLink's 20% (`fec_percentage` in the engine profile), high-quality
+/// Latch's 20% (`fec_percentage` in the engine profile), high-quality
 /// stereo audio. moonlight's own remote-stream deduction of 500 kbps only
 /// touches the figure Sunshine does not use, so it plays no part.
 fn sunshine_encoder_kbps(request: u64) -> u64 {
@@ -448,7 +448,7 @@ fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: 
         fps: s.fps as c_int,
         bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps) as c_int,
         // moonlight-common-c would cap a remote IPv4 stream at 1024-byte
-        // packets to survive raw-internet fragmentation. BroLink never rides
+        // packets to survive raw-internet fragmentation. Latch never rides
         // raw internet: every stream goes through a Tailscale (WireGuard)
         // tunnel whose path MTU is a guaranteed 1280 bytes, so 1184 fits with
         // room for RTP/UDP/IP headers, the value moonlight itself trusts on a
@@ -914,7 +914,7 @@ mod tests {
 }
 
 /// Stream from the Sunshine on this machine for a few seconds:
-/// `cargo test -p brolink-stream stream_real -- --ignored --nocapture`
+/// `cargo test -p latch-stream stream_real -- --ignored --nocapture`
 /// (run `pair_real` first).
 #[cfg(test)]
 mod real {
@@ -930,25 +930,25 @@ mod real {
                 .map(|value| value.parse::<u32>().expect(name))
                 .unwrap_or(default)
         };
-        let width = number("BROLINK_TEST_WIDTH", 1280);
-        let height = number("BROLINK_TEST_HEIGHT", 720);
-        let fps = number("BROLINK_TEST_FPS", 60);
-        let bitrate_kbps = number("BROLINK_TEST_BITRATE_KBPS", 10_000);
-        let seconds = number("BROLINK_TEST_SECONDS", 12);
+        let width = number("LATCH_TEST_WIDTH", 1280);
+        let height = number("LATCH_TEST_HEIGHT", 720);
+        let fps = number("LATCH_TEST_FPS", 60);
+        let bitrate_kbps = number("LATCH_TEST_BITRATE_KBPS", 10_000);
+        let seconds = number("LATCH_TEST_SECONDS", 12);
         assert!(width > 0 && height > 0 && fps > 0 && bitrate_kbps > 0 && seconds >= 12);
         eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps duration={seconds}s");
-        let dir = std::env::var_os("BROLINK_TEST_DIR")
+        let dir = std::env::var_os("LATCH_TEST_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("brolink-pair-test"));
+            .unwrap_or_else(|| std::env::temp_dir().join("latch-pair-test"));
         let identity = crate::Identity::load_or_create(&dir).unwrap();
-        let ip: std::net::IpAddr = std::env::var("BROLINK_TEST_IP")
+        let ip: std::net::IpAddr = std::env::var("LATCH_TEST_IP")
             .unwrap_or_else(|_| "127.0.0.1".into())
             .parse()
             .unwrap();
         let cert = std::fs::read(dir.join("server.der")).ok();
         let mut client = Client::new(&identity, ip, cert).unwrap();
         let mut info = client.server_info().unwrap();
-        if std::env::var_os("BROLINK_TEST_IP").is_some() {
+        if std::env::var_os("LATCH_TEST_IP").is_some() {
             assert!(
                 info.paired,
                 "a remote PC must be reached without pairing again"
@@ -956,13 +956,13 @@ mod real {
         }
         if !info.paired {
             let der = client
-                .pair("4321", "brolink-test", || {
-                    let _ = brolink_core::http::post_json::<_, brolink_core::api::Ack>(
-                        ("127.0.0.1", brolink_core::CONTROL_PORT),
+                .pair("4321", "latch-test", || {
+                    let _ = latch_core::http::post_json::<_, latch_core::api::Ack>(
+                        ("127.0.0.1", latch_core::CONTROL_PORT),
                         "/v1/pin",
-                        &brolink_core::api::PinRequest {
+                        &latch_core::api::PinRequest {
                             pin: "4321".into(),
-                            name: "brolink-test".into(),
+                            name: "latch-test".into(),
                         },
                         Duration::from_secs(10),
                     );
@@ -1007,7 +1007,7 @@ mod real {
                 height,
                 fps,
                 bitrate_kbps,
-                hevc: std::env::var_os("BROLINK_TEST_HEVC").is_some(),
+                hevc: std::env::var_os("LATCH_TEST_HEVC").is_some(),
             },
             ri_key,
             ri_iv,
@@ -1028,7 +1028,7 @@ mod real {
                     panic!("session ended early: {ev:?}");
                 }
             }
-            if connected && std::env::var_os("BROLINK_TEST_MOUSE_SWEEP").is_some() {
+            if connected && std::env::var_os("LATCH_TEST_MOUSE_SWEEP").is_some() {
                 // Oscillate so the cursor stays on screen while a game reading
                 // raw input sees continuous relative motion. Watch the PC's
                 // cursor (GetCursorPos) to confirm the relative injection lands.

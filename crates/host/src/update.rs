@@ -1,4 +1,4 @@
-//! Taking a new `brolink-host.exe` from a Mac on the tailnet and swapping it
+//! Taking a new `latch-host.exe` from a Mac on the tailnet and swapping it
 //! in.
 //!
 //! The Mac does the fetching (it has the GitHub login; the PC has none) and
@@ -12,9 +12,10 @@
 //! old one put back, still serving.
 
 use anyhow::{Context, Result};
-use brolink_core::api::{UPDATE_MAX_BYTES, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
-use brolink_core::http::Request;
-use brolink_core::update;
+use latch_core::api::{UPDATE_MAX_BYTES, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
+use latch_core::http::Request;
+use latch_core::legacy;
+use latch_core::update;
 use semver::Version;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -50,12 +51,12 @@ impl Rejected {
     }
 }
 
-/// Where the upload waits: `brolink-host.exe.new`.
+/// Where the upload waits: `latch-host.exe.new`.
 pub fn staged(exe: &Path) -> PathBuf {
     with_suffix(exe, ".new")
 }
 
-/// Where the running executable goes during the swap: `brolink-host.exe.old`.
+/// Where the running executable goes during the swap: `latch-host.exe.old`.
 pub fn retired(exe: &Path) -> PathBuf {
     with_suffix(exe, ".old")
 }
@@ -75,17 +76,19 @@ pub fn refuse_self_update(engine_running: bool, session_active: bool) -> bool {
 pub fn stage(req: &Request, exe: &Path) -> Result<Version, Rejected> {
     let version = req
         .header(UPDATE_VERSION_HEADER)
+        .or_else(|| req.header(legacy::UPDATE_VERSION_HEADER))
         .ok_or_else(|| Rejected::Bad(format!("missing {UPDATE_VERSION_HEADER}")))?;
     let version = Version::parse(version.trim())
         .map_err(|_| Rejected::Bad(format!("{version:?} is not a version")))?;
     let current = update::current();
     if version <= current {
         return Err(Rejected::NotNewer(format!(
-            "this PC already runs BroLink Host {current}"
+            "this PC already runs Latch Host {current}"
         )));
     }
     let want = req
         .header(UPDATE_SHA256_HEADER)
+        .or_else(|| req.header(legacy::UPDATE_SHA256_HEADER))
         .ok_or_else(|| Rejected::Bad(format!("missing {UPDATE_SHA256_HEADER}")))?;
     if req.body.len() < MIN_SIZE
         || req.body.len() > UPDATE_MAX_BYTES
@@ -258,7 +261,7 @@ mod tests {
         }
         Request {
             method: "POST".into(),
-            path: brolink_core::api::UPDATE_PATH.into(),
+            path: latch_core::api::UPDATE_PATH.into(),
             headers,
             body,
         }
@@ -302,22 +305,22 @@ mod tests {
 
     #[test]
     fn names_sit_beside_the_executable() {
-        let exe = Path::new(r"C:\Users\Ada\AppData\Local\BroLink\brolink-host.exe");
+        let exe = Path::new(r"C:\Users\Ada\AppData\Local\Latch\latch-host.exe");
         assert_eq!(
             staged(exe),
-            Path::new(r"C:\Users\Ada\AppData\Local\BroLink\brolink-host.exe.new")
+            Path::new(r"C:\Users\Ada\AppData\Local\Latch\latch-host.exe.new")
         );
         assert_eq!(
             retired(exe),
-            Path::new(r"C:\Users\Ada\AppData\Local\BroLink\brolink-host.exe.old")
+            Path::new(r"C:\Users\Ada\AppData\Local\Latch\latch-host.exe.old")
         );
     }
 
     #[test]
     fn uploads_are_checked_before_anything_is_written() {
-        let dir = std::env::temp_dir().join(format!("brolink-upd-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latch-upd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("brolink-host.exe");
+        let exe = dir.join("latch-host.exe");
         let body = fake_exe();
         let sha = update::sha256_hex(&body);
         let newer = format!("{}.0.0", update::current().major + 1);
@@ -332,7 +335,7 @@ mod tests {
         let r = stage(&req(Some(&current), Some(&sha), body.clone()), &exe).unwrap_err();
         assert_eq!(
             r,
-            Rejected::NotNewer(format!("this PC already runs BroLink Host {current}"))
+            Rejected::NotNewer(format!("this PC already runs Latch Host {current}"))
         );
         let r = stage(&req(Some(&newer), None, body.clone()), &exe).unwrap_err();
         assert_eq!(r.status(), 400);
@@ -374,9 +377,9 @@ mod tests {
 
     #[test]
     fn failed_launch_restores_the_previous_executable() {
-        let dir = std::env::temp_dir().join(format!("brolink-swap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latch-swap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("brolink-host.exe");
+        let exe = dir.join("latch-host.exe");
         std::fs::write(&exe, b"old").unwrap();
         assert!(apply(&exe).is_err());
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
@@ -407,10 +410,10 @@ mod tests {
             assert_eq!(std::fs::read(retired(&exe)).unwrap(), b"old");
         }
         std::fs::write(retired(&exe), b"retired").unwrap();
-        std::fs::write(dir.join("brolink-host.exe.old-notes"), b"keep").unwrap();
+        std::fs::write(dir.join("latch-host.exe.old-notes"), b"keep").unwrap();
         tidy(&exe);
         assert!(!retired(&exe).exists());
-        assert!(dir.join("brolink-host.exe.old-notes").exists());
+        assert!(dir.join("latch-host.exe.old-notes").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

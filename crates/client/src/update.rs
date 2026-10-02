@@ -1,11 +1,11 @@
-//! Keeping this app and every BroLink Host it can see on the newest release.
+//! Keeping this app and every Latch Host it can see on the newest release.
 //!
 //! The Mac does the fetching for everyone (with a GitHub login if the
-//! repository is private; see `brolink_core::update`). Every few hours it asks
+//! repository is private; see `latch_core::update`). Every few hours it asks
 //! GitHub for the latest release. A newer app is downloaded, verified against
 //! GitHub's digest and its own code signature, and swapped into place once no
 //! stream is running; the app then relaunches itself. A newer host is
-//! downloaded once, and `brolink-host.exe` is sent to each PC whose host
+//! downloaded once, and `latch-host.exe` is sent to each PC whose host
 //! already speaks `/v1/update` (3.1+) and reports an older version, over
 //! the same Tailscale-authenticated control API that can put the PC to
 //! sleep. A 3.0 host cannot take that (it caps request bodies at 64 KiB
@@ -16,10 +16,10 @@
 use crate::config::ClientConfig;
 use crate::session::{Discovery, Live, Progress};
 use anyhow::{anyhow, bail, Context, Result};
-use brolink_core::api::{Ack, Status, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
-use brolink_core::update::{self, Release, HOST_EXE, MAC_ASSET, WINDOWS_ASSET};
-use brolink_core::{http, CONTROL_PORT};
-use brolink_ui::Tone;
+use latch_core::api::{Ack, Status, UPDATE_PATH, UPDATE_SHA256_HEADER, UPDATE_VERSION_HEADER};
+use latch_core::update::{self, Release, HOST_EXE, MAC_ASSET, WINDOWS_ASSET};
+use latch_core::{http, legacy, CONTROL_PORT};
+use latch_ui::Tone;
 use parking_lot::Mutex;
 use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,7 +79,7 @@ pub fn spawn(
         state.lock().message = if cfg!(windows) {
             "New versions arrive from the Mac on your Tailscale account.".into()
         } else {
-            "BroLink updates itself on a Mac; install new releases here by hand.".into()
+            "Latch updates itself on a Mac; install new releases here by hand.".into()
         };
         return;
     }
@@ -110,7 +110,7 @@ pub fn spawn(
                         st.latest = Some(r.version.clone());
                         st.release = Some(r.clone());
                         st.message = if r.is_newer_than(&update::current()) {
-                            format!("BroLink {} is available.", r.version)
+                            format!("Latch {} is available.", r.version)
                         } else {
                             format!("Up to date (v{}).", update::current())
                         };
@@ -138,19 +138,19 @@ pub fn spawn(
                         st.notice = Some((
                             Tone::Info,
                             format!(
-                                "BroLink {v} is downloaded and installs when no stream is running."
+                                "Latch {v} is downloaded and installs when no stream is running."
                             ),
                         ));
                     }
                     Ok(None) => {
                         state.lock().message = format!(
-                            "BroLink {} is available. This copy is not in an app bundle, so it is not replaced.",
+                            "Latch {} is available. This copy is not in an app bundle, so it is not replaced.",
                             rel.version
                         );
                     }
                     Err(e) => {
                         state.lock().message =
-                            format!("Could not download BroLink {}: {e}.", rel.version);
+                            format!("Could not download Latch {}: {e}.", rel.version);
                         tracing::warn!("self-update: {e:#}");
                         // Try again at the next check rather than every tick.
                         release = None;
@@ -183,7 +183,7 @@ pub fn spawn(
                             let mut st = state.lock();
                             st.ready = None;
                             st.notice = None;
-                            st.message = format!("Could not install BroLink {v}: {e}.");
+                            st.message = format!("Could not install Latch {v}: {e}.");
                             tracing::error!("self-update: {e:#}");
                             progress.lock().updating = false;
                             release = None;
@@ -245,7 +245,7 @@ pub fn spawn(
                         st.rolled_back
                             .insert(pc.node_id.clone(), rel.version.clone());
                         st.message = format!(
-                            "BroLink Host {} did not start on {}, so it kept {v}. It is not sent again until BroLink restarts; its log says why.",
+                            "Latch Host {} did not start on {}, so it kept {v}. It is not sent again until Latch restarts; its log says why.",
                             rel.version, pc.name
                         );
                         st.notice = Some((Tone::Warning, st.message.clone()));
@@ -262,7 +262,7 @@ pub fn spawn(
                     Ok(()) => {
                         st.delivered.insert(pc.node_id.clone(), rel.version.clone());
                         st.message = format!(
-                            "Sent BroLink Host {} to {}; it restarts by itself.",
+                            "Sent Latch Host {} to {}; it restarts by itself.",
                             rel.version, pc.name
                         );
                         st.notice = Some((Tone::Info, st.message.clone()));
@@ -293,7 +293,7 @@ pub fn spawn(
 
 /// Where downloads for `rel` live: `<data dir>/updates/<tag>/`.
 fn updates_dir(rel: &Release) -> Result<PathBuf> {
-    let dir = brolink_core::config::data_dir()?
+    let dir = latch_core::config::data_dir()?
         .join("updates")
         .join(&rel.tag);
     std::fs::create_dir_all(&dir)?;
@@ -346,7 +346,7 @@ fn fetch_asset(rel: &Release, name: &str, token: Option<&str>) -> Result<PathBuf
 /// The `.app` this executable runs from, when it does.
 pub fn bundle_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    // .../BroLink.app/Contents/MacOS/BroLink
+    // .../Latch.app/Contents/MacOS/Latch
     let app = exe.parent()?.parent()?.parent()?;
     (app.extension().is_some_and(|e| e == "app")).then(|| app.to_path_buf())
 }
@@ -373,7 +373,7 @@ fn prepare_self(rel: &Release, token: Option<&str>) -> Result<Option<Version>> {
     }
     let tarball = fetch_asset(rel, MAC_ASSET, token)?;
     let unpacked = updates_dir(rel)?.join("unpacked");
-    let app = unpacked.join("BroLink.app");
+    let app = unpacked.join("Latch.app");
     if !app.exists() {
         let _ = std::fs::remove_dir_all(&unpacked);
         std::fs::create_dir_all(&unpacked)?;
@@ -388,7 +388,7 @@ fn prepare_self(rel: &Release, token: Option<&str>) -> Result<Option<Version>> {
         )?;
     }
     let verified = (|| -> Result<Version> {
-        anyhow::ensure!(app.exists(), "the download holds no BroLink.app");
+        anyhow::ensure!(app.exists(), "the download holds no Latch.app");
         run(
             "/usr/bin/codesign",
             &["--verify", "--deep", "--strict", &app.display().to_string()],
@@ -428,7 +428,7 @@ fn prepare_self(rel: &Release, token: Option<&str>) -> Result<Option<Version>> {
 /// alive across the rename, so the swap is safe while we are still up.
 fn install_self(rel: &Release) -> Result<()> {
     let bundle = bundle_path().ok_or_else(|| anyhow!("not running from an app bundle"))?;
-    let new = updates_dir(rel)?.join("unpacked").join("BroLink.app");
+    let new = updates_dir(rel)?.join("unpacked").join("Latch.app");
     anyhow::ensure!(new.exists(), "nothing is downloaded");
     replace_bundle(&bundle, &new, |new, staged| {
         run(
@@ -456,9 +456,9 @@ fn replace_bundle(
     let parent = bundle
         .parent()
         .ok_or_else(|| anyhow!("app has no parent"))?;
-    let stage = parent.join(format!(".brolink-update-{:016x}", rand::random::<u64>()));
+    let stage = parent.join(format!(".latch-update-{:016x}", rand::random::<u64>()));
     std::fs::create_dir(&stage).context("create update staging directory")?;
-    let staged = stage.join("BroLink.app");
+    let staged = stage.join("Latch.app");
     let parked = stage.join("previous.app");
     let outcome = (|| -> Result<()> {
         copy(new, &staged).context("stage the new app")?;
@@ -499,16 +499,12 @@ fn relaunch_command(bundle: &std::path::Path) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
     // The bundle is an argument, never shell source (paths can contain $, ",
     // backticks and newlines). $0 is a diagnostic command name.
-    command.args([
-        "-c",
-        "sleep 1; exec /usr/bin/open \"$1\"",
-        "brolink-relaunch",
-    ]);
+    command.args(["-c", "sleep 1; exec /usr/bin/open \"$1\"", "latch-relaunch"]);
     command.arg(bundle);
     command
 }
 
-/// Extract `brolink-host.exe` from the verified Windows archive. An extracted
+/// Extract `latch-host.exe` from the verified Windows archive. An extracted
 /// cache has no published digest, so never trust one from an earlier run.
 pub(crate) fn host_exe(rel: &Release, token: Option<&str>) -> Result<Vec<u8>> {
     let zip = fetch_asset(rel, WINDOWS_ASSET, token)?;
@@ -529,7 +525,7 @@ fn should_push(running: &Version, rel: &Release) -> bool {
 
 pub fn old_host_message(name: &str, version: &Version) -> String {
     format!(
-        "{name} runs BroLink Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update BroLink Host in the toolbar: this machine installs the new version through the stream. After that, updates are automatic."
+        "{name} runs Latch Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update Latch Host in the toolbar: this machine installs the new version through the stream. After that, updates are automatic."
     )
 }
 
@@ -602,6 +598,10 @@ fn send_host(ip: Ipv4Addr, version: &str, sha: &str, exe: &[u8]) -> Result<()> {
         &[
             (UPDATE_VERSION_HEADER, version),
             (UPDATE_SHA256_HEADER, sha),
+            // A host older than 4.1 knows only the headers' old names, and
+            // is the one this push is most likely for.
+            (legacy::UPDATE_VERSION_HEADER, version),
+            (legacy::UPDATE_SHA256_HEADER, sha),
             ("Content-Type", "application/octet-stream"),
         ],
         exe,
@@ -650,9 +650,9 @@ mod tests {
 
     #[test]
     fn a_partial_update_copy_preserves_the_working_app() {
-        let dir = std::env::temp_dir().join(format!("brolink-swap-{:016x}", rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!("latch-swap-{:016x}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
-        let bundle = dir.join("BroLink.app");
+        let bundle = dir.join("Latch.app");
         std::fs::create_dir(&bundle).unwrap();
         std::fs::write(bundle.join("version"), "original").unwrap();
         let outcome = replace_bundle(&bundle, &dir.join("download"), |_, staged| {
@@ -671,9 +671,9 @@ mod tests {
 
     #[test]
     fn a_staged_update_replaces_the_app_and_removes_the_backup() {
-        let dir = std::env::temp_dir().join(format!("brolink-swap-{:016x}", rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!("latch-swap-{:016x}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
-        let bundle = dir.join("BroLink.app");
+        let bundle = dir.join("Latch.app");
         std::fs::create_dir(&bundle).unwrap();
         std::fs::write(bundle.join("version"), "original").unwrap();
         replace_bundle(&bundle, &dir.join("download"), |_, staged| {
@@ -731,7 +731,7 @@ mod tests {
         let msg = old_host_message("Gaming-PC", &Version::new(3, 0, 0));
         assert!(msg.contains("Gaming-PC"), "{msg}");
         assert!(msg.contains("3.0.0"), "{msg}");
-        assert!(msg.contains("Update BroLink Host"), "{msg}");
+        assert!(msg.contains("Update Latch Host"), "{msg}");
         assert!(!msg.contains("Broken pipe"), "{msg}");
         assert!(!msg.contains("os error"), "{msg}");
     }
@@ -745,7 +745,7 @@ mod tests {
             for mut s in listener.incoming().flatten() {
                 let mut buf = [0u8; 1024];
                 let _ = s.read(&mut buf);
-                let body = format!(r#"{{"app":"brolink","version":"{version}"}}"#);
+                let body = format!(r#"{{"app":"latch","version":"{version}"}}"#);
                 let _ = write!(
                     s,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

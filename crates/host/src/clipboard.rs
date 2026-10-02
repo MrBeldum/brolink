@@ -6,7 +6,7 @@
 //! handled; an image or a file on the clipboard reads as empty text.
 
 use anyhow::Result;
-use brolink_core::api::Clipboard;
+use latch_core::api::Clipboard;
 
 /// Windows ends lines with CRLF; the Mac with LF. Both directions convert,
 /// so a paste never carries stray carriage returns.

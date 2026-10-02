@@ -1,23 +1,23 @@
 [package]
-name = "brolink-client"
+name = "latch-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "BroLink: view and share machines on your tailnet"
+description = "Latch: view and share machines on your tailnet"
 
 [lib]
-name = "brolink_client"
+name = "latch_client"
 path = "src/lib.rs"
 
 [[bin]]
-name = "brolink-client"
+name = "latch-client"
 path = "src/main.rs"
 
 [dependencies]
-brolink-core.workspace = true
-brolink-stream.workspace = true
-brolink-ui.workspace = true
+latch-core.workspace = true
+latch-stream.workspace = true
+latch-ui.workspace = true
 anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

@@ -1,11 +1,11 @@
 //! Keyboard and mouse translation: egui events in, Moonlight input calls out.
 
-use brolink_stream::ffi::{
+use egui::{Key, Modifiers, PointerButton};
+use latch_stream::ffi::{
     BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_X1, BUTTON_X2, MODIFIER_ALT, MODIFIER_CTRL,
     MODIFIER_META, MODIFIER_SHIFT,
 };
-use brolink_stream::Input;
-use egui::{Key, Modifiers, PointerButton};
+use latch_stream::Input;
 use std::collections::BTreeSet;
 use std::ffi::c_char;
 

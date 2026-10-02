@@ -1,0 +1,11 @@
+[Unit]
+Description=Latch native headless display
+
+[Service]
+ExecStartPre=/bin/sh -c 'umask 077; touch "%t/latch.Xauthority"; /usr/bin/xauth -f "%t/latch.Xauthority" add :1 . "$(/usr/bin/mcookie)"'
+ExecStart=/usr/bin/Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp -auth %t/latch.Xauthority
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

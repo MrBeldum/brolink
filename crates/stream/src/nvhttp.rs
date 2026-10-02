@@ -7,7 +7,7 @@ use crate::identity::{self, Identity};
 use aes::cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use anyhow::{anyhow, bail, Context, Result};
-use brolink_core::http;
+use latch_core::http;
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -678,16 +678,16 @@ mod tests {
     }
 }
 
-/// Against the Sunshine on this machine, with BroLink Host entering the PIN:
-/// `cargo test -p brolink-stream pair_real -- --ignored --nocapture`
+/// Against the Sunshine on this machine, with Latch Host entering the PIN:
+/// `cargo test -p latch-stream pair_real -- --ignored --nocapture`
 #[cfg(test)]
 mod real {
     use super::*;
 
     #[test]
-    #[ignore = "needs Sunshine and BroLink Host on this machine"]
+    #[ignore = "needs Sunshine and Latch Host on this machine"]
     fn pair_real() {
-        let dir = std::env::temp_dir().join("brolink-pair-test");
+        let dir = std::env::temp_dir().join("latch-pair-test");
         let identity = Identity::load_or_create(&dir).unwrap();
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         let mut c = Client::new(&identity, ip, None).unwrap();
@@ -695,14 +695,14 @@ mod real {
         eprintln!("before: {info:?}");
         let pin = "4321";
         let der = c
-            .pair(pin, "brolink-test", || {
+            .pair(pin, "latch-test", || {
                 for _ in 0..20 {
-                    let r: Result<brolink_core::api::Ack> = http::post_json(
-                        ("127.0.0.1", brolink_core::CONTROL_PORT),
+                    let r: Result<latch_core::api::Ack> = http::post_json(
+                        ("127.0.0.1", latch_core::CONTROL_PORT),
                         "/v1/pin",
-                        &brolink_core::api::PinRequest {
+                        &latch_core::api::PinRequest {
                             pin: pin.into(),
-                            name: "brolink-test".into(),
+                            name: "latch-test".into(),
                         },
                         Duration::from_secs(10),
                     );

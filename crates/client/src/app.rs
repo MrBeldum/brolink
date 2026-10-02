@@ -12,29 +12,30 @@ use crate::session::{
 use crate::share;
 use crate::stream::{self, Action, Env};
 use crate::update;
-use brolink_core::api::PowerAction;
-use brolink_core::tailscale;
-use brolink_stream::Event;
-use brolink_ui::{self as ui, column, space, Icon, Tone, PALETTE as P};
 use eframe::egui;
+use latch_core::api::PowerAction;
+use latch_core::tailscale;
+use latch_stream::Event;
+use latch_ui::{self as ui, column, space, Icon, Tone, PALETTE as P};
 use parking_lot::Mutex;
 use semver::Version;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const RELAY_NONE: &str = "When two machines can't reach each other directly, Tailscale's relays carry the stream. For a shorter detour, run your own relay with BroLink's deploy kit.";
+const RELAY_NONE: &str = "When two machines can't reach each other directly, Tailscale's relays carry the stream. For a shorter detour, run your own relay with Latch's deploy kit.";
 const RELAY_READY: &str =
     "Your relay carries streams between machines that can't connect directly.";
 const RELAY_OFFLINE: &str = "Your relay is offline. Until it is back, Tailscale's relays carry streams between machines that can't connect directly.";
-const RELAY_CHECKING: &str = "A relay is on this tailnet, but BroLink couldn't confirm that this device may use it. That does not mean access is denied. Peer relays need Tailscale 1.86 or later on every device.";
+const RELAY_CHECKING: &str = "A relay is on this tailnet, but Latch couldn't confirm that this device may use it. That does not mean access is denied. Peer relays need Tailscale 1.86 or later on every device.";
 const RELAY_UNAVAILABLE: &str = "A relay is on this tailnet but isn't available to this device yet. That does not mean access is denied: check that the relay is configured, and add this grant to the tailnet policy if it is missing.";
 #[cfg(test)]
 const RELAY_UNGRANTED: &str = "A relay node is online but this device is not granted access.";
 const RELAY_GRANT: &str = "{\n  \"src\": [\"autogroup:member\"],\n  \"dst\": [\"tag:relay\"],\n  \"app\": {\n    \"tailscale.com/cap/relay\": []\n  }\n}";
 const RELAY_DOCS: &str = "https://tailscale.com/docs/features/peer-relay";
-const DOWNLOAD_URL: &str = "https://github.com/MrBeldum/brolink/releases/latest";
-const SOURCE_URL: &str = "https://github.com/MrBeldum/brolink";
+const DOWNLOAD_URL: &str = "https://github.com/MrBeldum/latch/releases/latest";
+const SOURCE_URL: &str = "https://github.com/MrBeldum/latch";
+const MAKER_URL: &str = "https://bardbro.com";
 
 /// How long a one-line result stays on the machine list.
 const NOTICE_FOR: Duration = Duration::from_secs(12);
@@ -117,7 +118,7 @@ pub struct ClientApp {
     /// its way. Asked for once per stream, by the thread that answers.
     video_help: Arc<Mutex<Option<crate::display::Help>>>,
     asked_about_video: bool,
-    /// An install of BroLink Host through the stream, while it runs and a
+    /// An install of Latch Host through the stream, while it runs and a
     /// little after.
     handover: Option<Handover>,
     display_at_connect: (u32, u32),
@@ -225,7 +226,7 @@ impl ClientApp {
                 tracing::warn!("could not save settings: {e:#}");
                 self.notice = Some((
                     Tone::Danger,
-                    format!("Couldn't save settings: {e}. They apply until BroLink quits."),
+                    format!("Couldn't save settings: {e}. They apply until Latch quits."),
                     Instant::now(),
                 ));
             }
@@ -420,7 +421,7 @@ impl ClientApp {
                             self.view.toast(
                                 Tone::Warning,
                                 format!(
-                                    "{} has no sound to send: it reports “{problem}”. Its Sharing page in BroLink says more.",
+                                    "{} has no sound to send: it reports “{problem}”. Its Sharing page in Latch says more.",
                                     live.pc
                                 ),
                             );
@@ -665,7 +666,7 @@ impl eframe::App for ClientApp {
         self.shortcuts(ctx);
 
         ui::top_bar(ctx, "top", |ui| {
-            self.brand.lockup(ui, "BroLink");
+            self.brand.lockup(ui, "Latch");
             ui.add_space(space::XL);
             let mut pages = vec![(Page::Machines, "Machines", chord("1"))];
             if self.share_page.is_some() {
@@ -692,7 +693,7 @@ impl eframe::App for ClientApp {
         });
 
         ui::bottom_bar(ctx, "bottom", |ui| {
-            let mut line = format!("BroLink {}", env!("CARGO_PKG_VERSION"));
+            let mut line = format!("Latch {}", env!("CARGO_PKG_VERSION"));
             if !disc.login.is_empty() {
                 line.push_str(&format!("  ·  {}", disc.login));
             }
@@ -782,7 +783,7 @@ impl ClientApp {
                 ui,
                 Tone::Danger,
                 "Tailscale isn't installed",
-                Some("BroLink finds your machines and connects to them through Tailscale. Install it and sign in with the account your other machines use; they appear here within seconds."),
+                Some("Latch finds your machines and connects to them through Tailscale. Install it and sign in with the account your other machines use; they appear here within seconds."),
                 |ui| {
                     if ui::primary_button(ui, "Get Tailscale").clicked() {
                         let url = if cfg!(windows) {
@@ -896,10 +897,10 @@ impl ClientApp {
             ui::strong(ui, "No other machines yet");
             ui::caption(
                 ui,
-                "Install BroLink on another computer and sign in to Tailscale there with the same account. It appears here within a few seconds.",
+                "Install Latch on another computer and sign in to Tailscale there with the same account. It appears here within a few seconds.",
             );
             ui.add_space(space::XS);
-            if ui::link(ui, "Download BroLink").clicked() {
+            if ui::link(ui, "Download Latch").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(DOWNLOAD_URL));
             }
         }
@@ -929,7 +930,7 @@ impl ClientApp {
             ),
             None => (
                 Tone::Neutral,
-                "Starting BroLink's background service…".to_string(),
+                "Starting Latch's background service…".to_string(),
             ),
             Some(_) if running => (Tone::Accent, format!("{noun} · Setting up sharing…")),
             Some(s) if shared && s.setup.is_empty() => (
@@ -1064,14 +1065,14 @@ impl ClientApp {
         });
     }
 
-    /// Start installing the newest BroLink Host on the PC through the
+    /// Start installing the newest Latch Host on the PC through the
     /// stream. See `handover.rs`.
     fn start_handover(
         &mut self,
         ctx: &egui::Context,
         ip: std::net::Ipv4Addr,
         name: &str,
-        input: brolink_stream::Input,
+        input: latch_stream::Input,
         disc: &Discovery,
     ) {
         let Some(mac_ip) = disc.self_ip else {
@@ -1095,7 +1096,7 @@ impl ClientApp {
                 return;
             }
         }
-        let token = brolink_core::update::token(self.cfg.github_token.as_deref());
+        let token = latch_core::update::token(self.cfg.github_token.as_deref());
         self.handover = Some(Handover::start(
             release,
             token,
@@ -1106,7 +1107,7 @@ impl ClientApp {
         ));
         self.view.toast(
             Tone::Neutral,
-            format!("Installing BroLink Host on {name} through the stream…"),
+            format!("Installing Latch Host on {name} through the stream…"),
         );
     }
 
@@ -1125,7 +1126,7 @@ impl ClientApp {
             self.view.toast(
                 Tone::Success,
                 format!(
-                    "{name} now runs BroLink Host {}. Updates arrive by themselves from here on.",
+                    "{name} now runs Latch Host {}. Updates arrive by themselves from here on.",
                     p.version.map(|v| v.to_string()).unwrap_or_default()
                 ),
             );
@@ -1140,8 +1141,8 @@ impl ClientApp {
             ui::banner(
                 ui,
                 Tone::Accent,
-                "Installing a BroLink update",
-                Some("BroLink restarts itself in a moment. New connections wait until it has."),
+                "Installing a Latch update",
+                Some("Latch restarts itself in a moment. New connections wait until it has."),
                 |_| {},
             );
             return;
@@ -1150,7 +1151,7 @@ impl ClientApp {
         let (title, explain) = match &prog.step {
             Step::Waking => (
                 format!("Waking {pc}"),
-                "BroLink sends wake packets every few seconds. A sleeping machine can take up to two minutes to come back.",
+                "Latch sends wake packets every few seconds. A sleeping machine can take up to two minutes to come back.",
             ),
             Step::Waiting => (
                 format!("Waiting for {pc}"),
@@ -1158,7 +1159,7 @@ impl ClientApp {
             ),
             Step::Pairing { .. } => (
                 format!("Pairing with {pc}"),
-                "This happens once per machine. BroLink on that machine enters this PIN by itself; nothing needs typing unless it says otherwise below.",
+                "This happens once per machine. Latch on that machine enters this PIN by itself; nothing needs typing unless it says otherwise below.",
             ),
             _ => (format!("Connecting to {pc}"), ""),
         };
@@ -1370,7 +1371,7 @@ impl ClientApp {
             if ui::toggle_row(
                 ui,
                 &mut self.cfg.auto_update,
-                "Keep BroLink up to date",
+                "Keep Latch up to date",
                 Some("Checks GitHub every few hours, installs new versions of this app, and sends updates to your other machines over Tailscale."),
             ) {
                 self.dirty = true;
@@ -1442,11 +1443,22 @@ impl ClientApp {
         ui::section(ui, "About", |ui| {
             ui::setting_row(
                 ui,
-                &format!("BroLink {}", env!("CARGO_PKG_VERSION")),
+                &format!("Latch {}", env!("CARGO_PKG_VERSION")),
                 Some("Free software under the GNU GPL, version 3 or later. It builds on Moonlight, Sunshine, Opus and the Geist typeface."),
                 |ui| {
                     if ui::link(ui, "Source code").clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(SOURCE_URL));
+                    }
+                },
+            );
+            ui::row_separator(ui);
+            ui::setting_row(
+                ui,
+                "Bardbro",
+                Some("Latch is made by Bardbro, a personal project for cloud gaming."),
+                |ui| {
+                    if ui::link(ui, "bardbro.com").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(MAKER_URL));
                     }
                 },
             );
@@ -1485,7 +1497,7 @@ fn sentence(s: &str) -> String {
     }
 }
 
-/// "This Mac", "This PC": what to call the machine BroLink runs on.
+/// "This Mac", "This PC": what to call the machine Latch runs on.
 fn this_noun(os: &str) -> &'static str {
     let os = if os.is_empty() {
         if cfg!(windows) {
@@ -1652,7 +1664,7 @@ fn describe(pc: &Pc) -> (Tone, String) {
     let os = os_label(&pc.os);
     let at = pc.ip.map(|ip| format!(" · {ip}")).unwrap_or_default();
     // A phone on the tailnet is listed, but it will never share a desktop:
-    // "BroLink isn't installed" would send someone looking for an app.
+    // "Latch isn't installed" would send someone looking for an app.
     let lower = pc.os.to_ascii_lowercase();
     if lower == "ios" || lower == "android" || lower == "ipados" {
         let name = if lower == "android" { "Android" } else { "iOS" };
@@ -1666,7 +1678,7 @@ fn describe(pc: &Pc) -> (Tone, String) {
         return (
             Tone::Neutral,
             match seen {
-                Some(t) => format!("{os} · Last seen {}", brolink_core::dates::ymd(t)),
+                Some(t) => format!("{os} · Last seen {}", latch_core::dates::ymd(t)),
                 None => format!("{os} · Not seen yet"),
             },
         );
@@ -1675,7 +1687,7 @@ fn describe(pc: &Pc) -> (Tone, String) {
         return if pc.can_wake() {
             (
                 Tone::Neutral,
-                format!("{os} · Asleep or off · BroLink can wake it"),
+                format!("{os} · Asleep or off · Latch can wake it"),
             )
         } else {
             (
@@ -1696,8 +1708,8 @@ fn describe(pc: &Pc) -> (Tone, String) {
             format!("{os}{at} · Sharing needs attention there"),
         ),
         (Some(_), false) => (Tone::Neutral, format!("{os}{at} · Not shared yet")),
-        (None, true) => (Tone::Success, format!("{os}{at}{path} · Without BroLink")),
-        (None, false) => (Tone::Neutral, format!("{os}{at} · BroLink isn't installed")),
+        (None, true) => (Tone::Success, format!("{os}{at}{path} · Without Latch")),
+        (None, false) => (Tone::Neutral, format!("{os}{at} · Latch isn't installed")),
     }
 }
 
@@ -1726,7 +1738,7 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
         if let Some(h) = &pc.host {
             if h.streamer.encoder == "software" {
                 out.push(format!(
-                    "{} encodes video in software: it has no GPU encoder BroLink can use, so every CPU core does the work. A still desktop holds the bitrate you set; fast motion may drop frames.",
+                    "{} encodes video in software: it has no GPU encoder Latch can use, so every CPU core does the work. A still desktop holds the bitrate you set; fast motion may drop frames.",
                     pc.name
                 ));
             }
@@ -1737,7 +1749,7 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
                 ));
             }
             if let Ok(v) = Version::parse(&h.version) {
-                if !brolink_core::update::host_can_receive_update(&v) {
+                if !latch_core::update::host_can_receive_update(&v) {
                     out.push(update::old_host_message(&pc.name, &v));
                 }
             }
@@ -1812,12 +1824,12 @@ mod tests {
         assert!(line(&pc).contains("Asleep"));
         assert!(line(&pc).contains("can wake it"));
         pc.online = true;
-        assert!(line(&pc).contains("BroLink isn't installed"));
+        assert!(line(&pc).contains("Latch isn't installed"));
         assert_eq!(describe(&pc).0, Tone::Neutral);
         pc.sunshine = true;
-        assert!(line(&pc).contains("Without BroLink"));
+        assert!(line(&pc).contains("Without Latch"));
         assert!(line(&pc).len() < 80, "{}", line(&pc));
-        pc.host = Some(brolink_core::api::Status::default());
+        pc.host = Some(latch_core::api::Status::default());
         assert_eq!(
             describe(&pc),
             (Tone::Success, "Unknown · 203.0.113.10".to_string())
@@ -1859,9 +1871,9 @@ mod tests {
                 rtt_ms: Some(200),
                 ..Default::default()
             },
-            host: Some(brolink_core::api::Status {
+            host: Some(latch_core::api::Status {
                 version: "3.0.0".into(),
-                streamer: brolink_core::api::Streamer {
+                streamer: latch_core::api::Streamer {
                     encoder: "software".into(),
                     audio_problem:
                         "Unable to initialize audio capture. The stream will not have audio.".into(),
@@ -1884,7 +1896,7 @@ mod tests {
             "{}",
             w[2]
         );
-        assert!(w[3].contains("Update BroLink Host"), "{}", w[3]);
+        assert!(w[3].contains("Update Latch Host"), "{}", w[3]);
         assert_eq!(
             host_audio_problem(&Mutex::new(disc.clone()), &gaming_pc.node_id).as_deref(),
             Some("Unable to initialize audio capture. The stream will not have audio.")
@@ -1939,7 +1951,7 @@ mod tests {
         );
         for s in [RELAY_NONE, RELAY_READY, RELAY_UNAVAILABLE] {
             assert!(!s.to_lowercase().contains("shared"));
-            assert!(!s.contains("BroLink relay"));
+            assert!(!s.contains("Latch relay"));
         }
 
         assert_eq!(
@@ -2077,7 +2089,7 @@ mod tests {
 /// ignored ones write PNGs for review:
 ///
 /// ```text
-/// cargo test -p brolink-client -p brolink-host snapshots -- --ignored
+/// cargo test -p latch-client -p latch-host snapshots -- --ignored
 /// ```
 ///
 /// Files land in `target/ui-snapshots/` as
@@ -2089,8 +2101,8 @@ pub(crate) mod snapshots {
     use super::*;
     use crate::config::KnownPc;
     use crate::session::Relay;
-    use brolink_core::api::{Status, Streamer};
     use egui_kittest::kittest::Queryable;
+    use latch_core::api::{Status, Streamer};
 
     pub const MIN: egui::Vec2 = egui::vec2(640.0, 420.0);
     pub const TYPICAL: egui::Vec2 = egui::vec2(1280.0, 800.0);
@@ -2130,13 +2142,13 @@ pub(crate) mod snapshots {
 
     fn a_status(name: &str, os: &str) -> Status {
         Status {
-            app: "brolink".into(),
+            app: latch_core::APP_ID.into(),
             version: env!("CARGO_PKG_VERSION").into(),
             name: name.into(),
             os: os.into(),
             power_allowed: true,
             streamer: Streamer {
-                kind: "BroLink".into(),
+                kind: latch_core::STREAMER_KIND.into(),
                 installed: true,
                 running: true,
                 api_ok: true,
@@ -2195,7 +2207,7 @@ pub(crate) mod snapshots {
     }
 
     /// The three machines most screens show: one ready and relayed, one
-    /// asleep, one that streams without BroLink.
+    /// asleep, one that streams without Latch.
     pub fn pcs() -> Discovery {
         let mut gaming = ready_pc("n1", "Gaming-PC", "windows", "100.64.0.10", 210, false);
         gaming.key_expiry_days = Some(176);
@@ -2213,7 +2225,7 @@ pub(crate) mod snapshots {
             ..Default::default()
         };
         let mut d = found(vec![gaming, asleep_pc("n2", "Office"), den]);
-        d.self_nat = Some(brolink_core::api::NatReport {
+        d.self_nat = Some(latch_core::api::NatReport {
             udp: true,
             ipv4: true,
             ipv6: false,
@@ -2522,12 +2534,12 @@ pub(crate) mod snapshots {
                 Setup::new(pcs()).step(
                     "Gaming-PC",
                     Step::Pairing { pin: "4821".into() },
-                    "BroLink on that machine isn't answering, so it can't enter the PIN. Open BroLink there and set up sharing, then try again.",
+                    "Latch on that machine isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, then try again.",
                 ),
             ),
             (
                 "failed",
-                failed("Office", "Office didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in BroLink shows whether Wake-on-LAN is ready."),
+                failed("Office", "Office didn't wake up. A wake packet reaches it only from its own network, or through a router that forwards UDP port 9 to it. Its Sharing tab in Latch shows whether Wake-on-LAN is ready."),
             ),
             (
                 "disconnected",
@@ -2561,7 +2573,7 @@ pub(crate) mod snapshots {
                     u.ready = Some(Version::new(4, 1, 0));
                     u.notice = Some((
                         Tone::Info,
-                        "BroLink 4.1.0 is downloaded and installs when no stream is running."
+                        "Latch 4.1.0 is downloaded and installs when no stream is running."
                             .into(),
                     ));
                 }),
@@ -2885,7 +2897,7 @@ pub(crate) mod snapshots {
     }}"#;
 
     fn discovery_from_status(json: &str) -> Discovery {
-        let st = brolink_core::tailscale::parse_status(json).expect("fixture");
+        let st = latch_core::tailscale::parse_status(json).expect("fixture");
         Discovery {
             login: "user@example.com".into(),
             refreshed: Some(Instant::now()),
@@ -3142,7 +3154,7 @@ mod window_fit {
 
 /// Streams from the Sunshine on this machine into the window for a few
 /// seconds and saves what the window shows:
-/// `BROLINK_DEV_LOCAL=1 cargo test -p brolink-client stream_snapshot -- --ignored --nocapture`
+/// `LATCH_DEV_LOCAL=1 cargo test -p latch-client stream_snapshot -- --ignored --nocapture`
 #[cfg(test)]
 mod live_snapshot {
     use super::*;
@@ -3164,28 +3176,28 @@ mod live_snapshot {
                 move |cc| {
                     let mut app = ClientApp::with_shared(cc, disc, prog, ClientConfig::load());
                     app.cfg.stream.fullscreen = false;
-                    if std::env::var_os("BROLINK_TEST_PC").is_none() {
+                    if std::env::var_os("LATCH_TEST_PC").is_none() {
                         app.cfg.stream.resolution = Resolution::P1080;
                         app.cfg.stream.codec = Codec::H264;
                     }
-                    if let Ok(codec) = std::env::var("BROLINK_TEST_CODEC") {
+                    if let Ok(codec) = std::env::var("LATCH_TEST_CODEC") {
                         app.cfg.stream.codec = match codec.as_str() {
                             "h264" => Codec::H264,
                             "hevc" => Codec::Hevc,
-                            _ => panic!("BROLINK_TEST_CODEC must be h264 or hevc"),
+                            _ => panic!("LATCH_TEST_CODEC must be h264 or hevc"),
                         };
                     }
                     app
                 }
             });
         harness.run_steps(2);
-        let pc = if let Ok(name) = std::env::var("BROLINK_TEST_PC") {
+        let pc = if let Ok(name) = std::env::var("LATCH_TEST_PC") {
             let cfg = ClientConfig::load();
             let (id, known) = cfg
                 .pcs
                 .iter()
                 .find(|(id, pc)| **id == name || pc.name == name)
-                .expect("BROLINK_TEST_PC must name a saved PC");
+                .expect("LATCH_TEST_PC must name a saved PC");
             Pc {
                 node_id: id.clone(),
                 name: known.name.clone(),
@@ -3204,10 +3216,10 @@ mod live_snapshot {
                 sunshine: true,
                 known: Some(KnownPc {
                     server_cert: std::fs::read(
-                        std::env::temp_dir().join("brolink-pair-test/server.der"),
+                        std::env::temp_dir().join("latch-pair-test/server.der"),
                     )
                     .ok()
-                    .map(|d| brolink_stream::nvhttp::hex(&d)),
+                    .map(|d| latch_stream::nvhttp::hex(&d)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -3262,7 +3274,7 @@ mod live_snapshot {
             std::thread::sleep(Duration::from_millis(16));
         }
         eprintln!("decoded {decoded} frames");
-        let expect_black = std::env::var_os("BROLINK_TEST_EXPECT_BLACK").is_some();
+        let expect_black = std::env::var_os("LATCH_TEST_EXPECT_BLACK").is_some();
         let mut restarted = !expect_black;
         if expect_black && black == Some(true) {
             use egui_kittest::kittest::Queryable;

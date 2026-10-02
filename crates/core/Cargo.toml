@@ -1,10 +1,10 @@
 [package]
-name = "brolink-core"
+name = "latch-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Shared pieces of BroLink: the control API, Tailscale, wake packets"
+description = "Shared pieces of Latch: the control API, Tailscale, wake packets"
 
 [dependencies]
 anyhow.workspace = true

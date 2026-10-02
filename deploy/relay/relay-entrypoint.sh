@@ -1,5 +1,5 @@
 #!/bin/sh
-# BroLink peer-relay entrypoint.
+# Latch peer-relay entrypoint.
 #
 # The official tailscale image entrypoint (containerboot) exposes no relay setting
 # and does not run a user command, so relay prefs have to be applied with
@@ -17,7 +17,7 @@ RELAY_STATIC_ENDPOINTS="${RELAY_STATIC_ENDPOINTS:-}"
 RELAY_MIN_MAJOR=1
 RELAY_MIN_MINOR=86
 
-log() { echo "brolink-relay: $*" >&2; }
+log() { echo "latch-relay: $*" >&2; }
 
 # 0 if $1 (e.g. "1.102.3") is >= RELAY_MIN_MAJOR.RELAY_MIN_MINOR.
 # Numeric on purpose: a string compare would rank "1.102" below "1.86".
@@ -82,7 +82,7 @@ wait_for_running() {
 		NeedsLogin)
 			# `[ ] && log` would abort this subshell under `set -e` on the false branch.
 			if [ "$((i % 30))" -eq 0 ]; then
-				log "waiting for login (docker logs brolink-relay | grep login.tailscale.com)"
+				log "waiting for login (docker logs latch-relay | grep login.tailscale.com)"
 			fi
 			;;
 		esac
@@ -90,7 +90,7 @@ wait_for_running() {
 		sleep 1
 	done
 	log "BackendState never reached Running within ${RELAY_WAIT_SECS}s (last: ${state:-unknown})."
-	log "Relay prefs NOT applied. Authenticate, then: docker restart brolink-relay"
+	log "Relay prefs NOT applied. Authenticate, then: docker restart latch-relay"
 	return 1
 }
 

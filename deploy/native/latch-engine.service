@@ -1,12 +1,12 @@
 [Unit]
-Description=BroLink native streaming engine
-Requires=brolink-desktop.service
-After=brolink-desktop.service pulseaudio.service
+Description=Latch native streaming engine
+Requires=latch-desktop.service
+After=latch-desktop.service pulseaudio.service
 Wants=pulseaudio.service
 
 [Service]
 Environment=DISPLAY=:1
-Environment=XAUTHORITY=%t/brolink.Xauthority
+Environment=XAUTHORITY=%t/latch.Xauthority
 WorkingDirectory=%h/.config/sunshine
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1'
 ExecStart=/usr/bin/sunshine %h/.config/sunshine/sunshine.conf

@@ -349,7 +349,7 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         }
     }
 
-    // GFE capped video at 100 Mbps. Sunshine does not, and BroLink's slider
+    // GFE capped video at 100 Mbps. Sunshine does not, and Latch's slider
     // goes to 150 Mbps, so latch as high as the user asked (still bounded).
     adjustedBitrate = adjustedBitrate > 150000 ? 150000 : adjustedBitrate;
 

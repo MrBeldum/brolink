@@ -1,28 +1,28 @@
 #!/bin/bash
-# Start a virtual desktop, the streaming engine, BroLink's control service,
+# Start a virtual desktop, the streaming engine, Latch's control service,
 # and (optionally) Tailscale so this container is a machine on the tailnet.
 set -euo pipefail
 
-log() { echo "[brolink-node] $*"; }
+log() { echo "[latch-node] $*"; }
 
-install -d -m 700 /root/.config/sunshine /root/.local/share/brolink /var/run/tailscale
-if [[ ! -x /usr/local/bin/brolink-engine && -x /usr/bin/sunshine ]]; then
-  cp /usr/bin/sunshine /usr/local/bin/brolink-engine
+install -d -m 700 /root/.config/sunshine /root/.local/share/latch /var/run/tailscale
+if [[ ! -x /usr/local/bin/latch-engine && -x /usr/bin/sunshine ]]; then
+  cp /usr/bin/sunshine /usr/local/bin/latch-engine
 fi
-ENGINE=/usr/local/bin/brolink-engine
+ENGINE=/usr/local/bin/latch-engine
 if [[ ! -x "$ENGINE" ]]; then
   ENGINE=/usr/bin/sunshine
 fi
 
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
-  log "starting Tailscale (userspace) as ${TS_HOSTNAME:-brolink-node}"
+  log "starting Tailscale (userspace) as ${TS_HOSTNAME:-latch-node}"
   tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state \
     --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &
   for _ in $(seq 1 20); do
     tailscale status >/dev/null 2>&1 && break
     sleep 0.5
   done
-  tailscale up --authkey="$TS_AUTHKEY" --hostname="${TS_HOSTNAME:-brolink-node}" \
+  tailscale up --authkey="$TS_AUTHKEY" --hostname="${TS_HOSTNAME:-latch-node}" \
     --accept-dns=false
 fi
 
@@ -41,7 +41,7 @@ CONF=/root/.config/sunshine/sunshine.conf
 cat >"$CONF" <<'EOF'
 system_tray = disabled
 origin_web_ui_allowed = pc
-credentials_file = /root/.config/sunshine/brolink-web.json
+credentials_file = /root/.config/sunshine/latch-web.json
 max_bitrate = 0
 minimum_fps_target = 60
 fec_percentage = 20
@@ -68,7 +68,7 @@ EOF
 
 # One persisted source of truth for the host and engine. Fails closed on a
 # damaged config, and never exposes the engine password in process arguments.
-python3 /opt/brolink/bootstrap.py
+python3 /opt/latch/bootstrap.py
 
 log "starting streaming engine"
 "$ENGINE" "$CONF" >/var/log/sunshine.log 2>&1 &
@@ -97,5 +97,5 @@ else:
     raise SystemExit("Streaming engine did not start listening within 15 seconds")
 PY
 
-log "starting BroLink control service"
-exec /usr/local/bin/brolink-host --background
+log "starting Latch control service"
+exec /usr/local/bin/latch-host --background

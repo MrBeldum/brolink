@@ -1,24 +1,24 @@
 [package]
-name = "brolink-host"
+name = "latch-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "BroLink: share this machine and connect to the others"
+description = "Latch: share this machine and connect to the others"
 build = "build.rs"
 
 [lib]
-name = "brolink_host"
+name = "latch_host"
 path = "src/lib.rs"
 
 [[bin]]
-name = "brolink-host"
+name = "latch-host"
 path = "src/main.rs"
 
 [dependencies]
-brolink-core.workspace = true
-brolink-client.workspace = true
-brolink-ui.workspace = true
+latch-core.workspace = true
+latch-client.workspace = true
+latch-ui.workspace = true
 anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

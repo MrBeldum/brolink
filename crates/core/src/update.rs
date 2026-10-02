@@ -1,12 +1,12 @@
-//! Finding and fetching BroLink releases on GitHub, for both apps' updaters.
+//! Finding and fetching Latch releases on GitHub, for both apps' updaters.
 //!
 //! A public repository needs no login. For a private one the calls carry a
-//! token: the caller's setting, `BROLINK_GITHUB_TOKEN`, or on macOS whatever
+//! token: the caller's setting, `LATCH_GITHUB_TOKEN`, or on macOS whatever
 //! git has stored for github.com, which is the login the install script
 //! uses too. Without one the requests still go out.
 //!
 //! Only the Mac talks to GitHub. It replaces its own bundle and sends each
-//! PC the new `brolink-host.exe` over the control API; see
+//! PC the new `latch-host.exe` over the control API; see
 //! [`crate::api::UPDATE_PATH`].
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -19,15 +19,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const REPO: &str = "MrBeldum/brolink";
-pub const MAC_ASSET: &str = "brolink-macos-arm64.tar.gz";
-pub const WINDOWS_ASSET: &str = "brolink-windows-x64.zip";
+pub const REPO: &str = "MrBeldum/latch";
+pub const MAC_ASSET: &str = "latch-macos-arm64.tar.gz";
+pub const WINDOWS_ASSET: &str = "latch-windows-x64.zip";
 /// The host executable inside [`WINDOWS_ASSET`].
-pub const HOST_EXE: &str = "brolink-host.exe";
+pub const HOST_EXE: &str = "latch-host.exe";
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HOPS: usize = 5;
-/// Nothing BroLink ships comes near this.
+/// Nothing Latch ships comes near this.
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,12 +70,12 @@ pub fn first_update() -> Version {
     Version::parse(crate::api::FIRST_UPDATE_VERSION).expect("FIRST_UPDATE_VERSION is semver")
 }
 
-/// Whether a running host can take `brolink-host.exe` from the Mac.
+/// Whether a running host can take `latch-host.exe` from the Mac.
 pub fn host_can_receive_update(running: &Version) -> bool {
     *running >= first_update()
 }
 
-/// Whether a peer takes a pushed `brolink-host.exe` over `/v1/update`:
+/// Whether a peer takes a pushed `latch-host.exe` over `/v1/update`:
 /// Windows only. `os` is the peer's `Status.os` (Tailscale's string), or
 /// empty from a host older than 4.0, which was always Windows.
 pub fn takes_pushed_host(os: &str) -> bool {
@@ -90,8 +90,8 @@ pub fn token(configured: Option<&str>) -> Option<String> {
         .filter(|t| !t.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            std::env::var("BROLINK_GITHUB_TOKEN")
-                .ok()
+            crate::legacy::env("LATCH_GITHUB_TOKEN")
+                .and_then(|t| t.into_string().ok())
                 .filter(|t| !t.trim().is_empty())
         })
         .or_else(git_token)
@@ -320,7 +320,7 @@ pub fn fetch(url: &str, token: Option<&str>, accept: &str, sink: &mut dyn Write)
         let auth = token.filter(|_| host == first_host);
         let mut tls = connect(&host)?;
         let mut head = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: brolink/{}\r\nAccept: {accept}\r\nConnection: close\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: latch/{}\r\nAccept: {accept}\r\nConnection: close\r\n",
             env!("CARGO_PKG_VERSION")
         );
         if let Some(t) = auth {
@@ -406,9 +406,9 @@ mod tests {
     const RELEASE: &str = r#"{
       "tag_name": "v3.1.0", "prerelease": false,
       "assets": [
-        {"name": "brolink-macos-arm64.tar.gz", "url": "https://api.github.com/repos/x/y/releases/assets/1",
+        {"name": "latch-macos-arm64.tar.gz", "url": "https://api.github.com/repos/x/y/releases/assets/1",
          "size": 5243666, "digest": "sha256:226CE7321E5185D10F6F83CD38916D25485D1734794119B279A72A9AF3CC4AB7"},
-        {"name": "brolink-windows-x64.zip", "url": "https://api.github.com/repos/x/y/releases/assets/2", "size": 28514670}
+        {"name": "latch-windows-x64.zip", "url": "https://api.github.com/repos/x/y/releases/assets/2", "size": 28514670}
       ]
     }"#;
 
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_cached_asset_is_rechecked_before_use() {
-        let dir = std::env::temp_dir().join(format!("brolink-verify-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latch-verify-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("x.bin");
         std::fs::write(&path, b"abc").unwrap();
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn a_bad_download_leaves_nothing_behind() {
-        let dir = std::env::temp_dir().join(format!("brolink-dl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latch-dl-{}", std::process::id()));
         let dest = dir.join("x.bin");
         let asset = Asset {
             name: "x.bin".into(),

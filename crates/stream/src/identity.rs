@@ -113,7 +113,7 @@ fn generate() -> Result<(String, String)> {
     params.distinguished_name = rcgen::DistinguishedName::new();
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "BroLink");
+        .push(rcgen::DnType::CommonName, "Latch");
     params.not_before = rcgen::date_time_ymd(2026, 1, 1);
     params.not_after = rcgen::date_time_ymd(2046, 1, 1);
     let cert = params.self_signed(&pair)?;
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn identity_is_created_once_and_signs_verifiably() {
-        let dir = std::env::temp_dir().join(format!("brolink-id-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latch-id-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let a = Identity::load_or_create(&dir).unwrap();
         let key_bytes = std::fs::read(dir.join("client.key")).unwrap();

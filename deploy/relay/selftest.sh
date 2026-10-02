@@ -45,13 +45,13 @@ make_stubs() { # $1 = sandbox dir
 		  fi
 		}
 		emit_old() {
-		  echo "brolink-relay: RELAY CONFIG OK port=40000"
+		  echo "latch-relay: RELAY CONFIG OK port=40000"
 		  echo "magicsock: old-lifecycle chatter"
 		}
 		emit_current() {
 		  case "$(marker_now)" in
-		    FAILED) echo "brolink-relay: RELAY CONFIG FAILED port=40000 - prefs not applied, this node is NOT a peer relay" ;;
-		    OK) echo "brolink-relay: RELAY CONFIG OK port=40000" ;;
+		    FAILED) echo "latch-relay: RELAY CONFIG FAILED port=40000 - prefs not applied, this node is NOT a peer relay" ;;
+		    OK) echo "latch-relay: RELAY CONFIG OK port=40000" ;;
 		  esac
 		  i=0
 		  while [ "$i" -lt "${STUB_VERBOSE:-0}" ]; do
@@ -77,9 +77,9 @@ make_stubs() { # $1 = sandbox dir
 		        port=${port%% #*}; wait=${wait%% #*}
 		        port=${port%\"}; port=${port#\"}
 		        wait=${wait%\"}; wait=${wait#\"}
-		        printf 'name: brolink-relay\nservices:\n  relay:\n    environment:\n      RELAY_PORT: "%s"\n      RELAY_WAIT_SECS: "%s"\n' "$port" "$wait"
+		        printf 'name: latch-relay\nservices:\n  relay:\n    environment:\n      RELAY_PORT: "%s"\n      RELAY_WAIT_SECS: "%s"\n' "$port" "$wait"
 		        exit 0 ;;
-		      up) echo "Container brolink-relay  Started"; exit 0 ;;
+		      up) echo "Container latch-relay  Started"; exit 0 ;;
 		    esac ;;
 		  volume)
 		    [ -n "${STUB_STATE_DIR:-}" ] || exit 1
@@ -92,16 +92,16 @@ make_stubs() { # $1 = sandbox dir
 		    exit 1 ;;
 		  exec)
 		    case "$*" in
-		      "brolink-relay tailscale status --json")
+		      "latch-relay tailscale status --json")
 		        printf '{\n\t"BackendState": "%s"\n}\n' "${STUB_BACKEND:-Running}"; exit 0 ;;
-		      "brolink-relay tailscale debug prefs")
+		      "latch-relay tailscale debug prefs")
 		        if [ -n "${STUB_PREFS_PORT:-}" ]; then
 		          printf '{\n\t"WantRunning": true,\n\t"RelayServerPort": %s\n}\n' "$STUB_PREFS_PORT"
 		        else
 		          printf '{\n\t"WantRunning": true\n}\n'
 		        fi; exit 0 ;;
-		      "brolink-relay tailscale status")
-		        echo "100.64.0.1   brolink-relay   me@   linux   -"; exit 0 ;;
+		      "latch-relay tailscale status")
+		        echo "100.64.0.1   latch-relay   me@   linux   -"; exit 0 ;;
 		    esac ;;
 		  inspect)
 		    cat "$STUB_DIR/started_at"; exit 0 ;;
@@ -187,7 +187,7 @@ run_case() { # $1 = sandbox dir ; remaining env comes from the caller
 	) >"$1/out" 2>&1
 }
 
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/brolink-relay-selftest.XXXXXX")
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/latch-relay-selftest.XXXXXX")
 # Sibling named like the old glob. If cleanup still does rm -rf .../relaykit.*,
 # this vanishes and the ownership check fails.
 DECOY=$(mktemp -d "${TMPDIR:-/tmp}/relaykit.XXXXXX")

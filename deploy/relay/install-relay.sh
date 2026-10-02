@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring up (or re-converge) the BroLink peer relay on this host. Safe to run twice:
+# Bring up (or re-converge) the Latch peer relay on this host. Safe to run twice:
 # every step checks before it changes anything, and the node keeps its identity
 # because state lives in a named volume.
 #
@@ -10,8 +10,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-CONTAINER=brolink-relay
-STATE_VOLUME=brolink-relay_relay-state
+CONTAINER=latch-relay
+STATE_VOLUME=latch-relay_relay-state
 # Overridable so ./selftest.sh can drive the real script instead of a patched copy.
 TUN_DEVICE=${TUN_DEVICE:-/dev/net/tun}
 AUTH_WAIT_SECS=${AUTH_WAIT_SECS:-120}
@@ -140,7 +140,7 @@ num  target     prot opt source               destination
 	[ "$out" = "60" ] || die "selftest: yaml wait, got '$out'"
 	out=$(printf '      RELAY_PORT: 40000\n' | yaml_env_value RELAY_PORT)
 	[ "$out" = "40000" ] || die "selftest: unquoted yaml, got '$out'"
-	out=$(printf '      TS_HOSTNAME: brolink-relay\n' | yaml_env_value RELAY_PORT)
+	out=$(printf '      TS_HOSTNAME: latch-relay\n' | yaml_env_value RELAY_PORT)
 	[ -z "$out" ] || die "selftest: absent yaml key produced '$out'"
 	out=$(printf '      RELAY_PORT: "99999999"\n' | yaml_env_value RELAY_PORT)
 	[ "$out" = "99999999" ] || die "selftest: malformed port was silently repaired to '$out'"
@@ -298,12 +298,12 @@ container_started_at() {
 	docker inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null || true
 }
 
-# Only `brolink-relay:` lines from the current start — never dump tailscaled.
+# Only `latch-relay:` lines from the current start — never dump tailscaled.
 configurator_lines() {
 	local since
 	since=$(container_started_at)
 	[ -n "$since" ] || return 0
-	docker logs --since "$since" "$CONTAINER" 2>&1 | grep 'brolink-relay:' || true
+	docker logs --since "$since" "$CONTAINER" 2>&1 | grep 'latch-relay:' || true
 }
 
 current_config_marker() {

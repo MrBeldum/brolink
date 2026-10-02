@@ -26,8 +26,8 @@ def atomic_write(path, content):
 def configure(host, credentials, environ):
     text = host.read_text() if host.exists() else "power_allowed = true\nstart_with_windows = true\nstay_awake = true\n"
     cfg = tomllib.loads(text)  # Do not overwrite a damaged or unreadable config.
-    user = environ.get("BROLINK_USER") or cfg.get("sunshine_user") or "brolink"
-    password = environ.get("BROLINK_PASS") or cfg.get("sunshine_pass") or secrets.token_urlsafe(24)
+    user = environ.get("LATCH_USER") or cfg.get("sunshine_user") or "latch"
+    password = environ.get("LATCH_PASS") or cfg.get("sunshine_pass") or secrets.token_urlsafe(24)
     for key, value in (("sunshine_user", user), ("sunshine_pass", password)):
         line = key + " = " + json.dumps(value) + "\n"
         pattern = re.compile(r"(?m)^" + key + r"\s*=.*(?:\n|$)")
@@ -45,5 +45,5 @@ def configure(host, credentials, environ):
 
 
 if __name__ == "__main__":
-    configure(Path("/root/.local/share/brolink/host.toml"),
-              Path("/root/.config/sunshine/brolink-web.json"), os.environ)
+    configure(Path("/root/.local/share/latch/host.toml"),
+              Path("/root/.config/sunshine/latch-web.json"), os.environ)

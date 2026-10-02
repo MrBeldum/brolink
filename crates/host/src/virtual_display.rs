@@ -9,7 +9,7 @@
 //! everything else the file says, and the service reports when any are
 //! missing so the setup card can say so.
 
-use brolink_core::screens::stream_modes;
+use latch_core::screens::stream_modes;
 
 /// The driver's name in Device Manager.
 pub const DEVICE: &str = "Virtual Display Driver";

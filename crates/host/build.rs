@@ -14,18 +14,18 @@ fn main() {
     println!("cargo:rerun-if-changed=../core/assets/logo-1024.png");
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("brolink.ico");
+        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("latch.ico");
         std::fs::write(&out, ico(&[16, 24, 32, 48, 64, 256])).expect("write icon");
         let mut res = winresource::WindowsResource::new();
         res.set_icon(out.to_str().unwrap())
-            .set("ProductName", "BroLink")
-            .set("FileDescription", "BroLink Host")
-            .set("CompanyName", "BroLink Contributors")
+            .set("ProductName", "Latch")
+            .set("FileDescription", "Latch Host")
+            .set("CompanyName", "Latch Contributors")
             .set(
                 "LegalCopyright",
-                "Copyright (c) 2026 BroLink Contributors. GPL-3.0-or-later",
+                "Copyright (c) 2026 Latch Contributors. GPL-3.0-or-later",
             )
-            .set("OriginalFilename", "brolink-host.exe");
+            .set("OriginalFilename", "latch-host.exe");
         if let Err(e) = res.compile() {
             println!("cargo:warning=no Windows resources embedded: {e}");
         }

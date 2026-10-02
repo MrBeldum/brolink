@@ -16,12 +16,12 @@ use crate::input::{self, press_chord, Held};
 use crate::path::Path;
 use crate::session::Live;
 use crate::video;
-use brolink_core::api::PowerAction;
-use brolink_ui::{self as ui, size, space, theme, Kv, Tone, PALETTE as P};
 use egui::{
     Align2, Color32, CursorIcon, Event, Frame, Id, Margin, Pos2, Rect, RichText, Vec2,
     ViewportCommand,
 };
+use latch_core::api::PowerAction;
+use latch_ui::{self as ui, size, space, theme, Kv, Tone, PALETTE as P};
 use semver::Version;
 use std::time::{Duration, Instant};
 
@@ -77,7 +77,7 @@ pub enum Action {
     Power(PowerAction),
     Fullscreen(bool),
     ToggleCmd,
-    /// Install a new BroLink Host on the PC through the stream.
+    /// Install a new Latch Host on the PC through the stream.
     InstallHost,
     ApplySettings(StreamSettings),
     /// Whether a click on the picture captures the mouse.
@@ -285,7 +285,7 @@ impl View {
             ));
         }
         #[cfg(test)]
-        let stats = brolink_stream::Stats {
+        let stats = latch_stream::Stats {
             video_problem: stats.video_problem.clone().or(self.problem.clone()),
             ..stats
         };
@@ -414,7 +414,7 @@ impl View {
         ctx: &egui::Context,
         env: &Env<'_>,
         region: Rect,
-        stats: &brolink_stream::Stats,
+        stats: &latch_stream::Stats,
     ) {
         let live = env.live;
         let mut close = false;
@@ -474,7 +474,7 @@ impl View {
                     }
                     ui.add_space(space::XS);
                     if ui::secondary_button(ui, "Copy diagnostics").clicked() {
-                        ctx.copy_text(format!("BroLink {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",
+                        ctx.copy_text(format!("Latch {}\n{}\nRequested: {} × {}, {} fps, {} Mbps\n{stats:#?}",
                             env!("CARGO_PKG_VERSION"), path.label(), live.requested.0, live.requested.1,
                             live.requested.2, live.settings.bitrate_kbps / 1000));
                     }
@@ -547,7 +547,7 @@ impl View {
                             if !overflow {
                                 let tag = ui::tag(ui, Some(path.tone()), &path.label());
                                 if path.relayed() {
-                                    tag.on_hover_text("The route in use right now. A relay adds delay; BroLink never lowers the bitrate for it.");
+                                    tag.on_hover_text("The route in use right now. A relay adds delay; Latch never lowers the bitrate for it.");
                                 } else if path.direct == Some(true) {
                                     tag.on_hover_text("Packets go straight to the machine.");
                                 }
@@ -622,7 +622,7 @@ impl View {
             question(ctx, "stream-install", rect, w, |ui| {
                 ui.label(
                     RichText::new(format!(
-                        "Install BroLink Host {} on {}?",
+                        "Install Latch Host {} on {}?",
                         latest.as_deref().unwrap_or("(latest)"),
                         live.pc
                     ))
@@ -632,7 +632,7 @@ impl View {
                 ui::muted(
                     ui,
                     format!(
-                        "{} runs {running}, which can't take updates over the network. BroLink presses Win+R on it, types one line that fetches the new version from this machine over Tailscale, and presses Enter. A PowerShell window opens there, swaps the file and restarts the service; the stream stays up.",
+                        "{} runs {running}, which can't take updates over the network. Latch presses Win+R on it, types one line that fetches the new version from this machine over Tailscale, and presses Enter. A PowerShell window opens there, swaps the file and restarts the service; the stream stays up.",
                         live.pc
                     ),
                 );
@@ -722,9 +722,9 @@ impl View {
         }
         if let Some((running, _)) = &env.old_host {
             ui::menu_separator(ui);
-            let label = format!("Update BroLink Host… (runs {running})");
+            let label = format!("Update Latch Host… (runs {running})");
             if ui::menu_item_enabled(ui, env.handover.is_none(), &label)
-                .on_hover_text("Installs the newest BroLink Host through this stream, so later updates arrive by themselves.")
+                .on_hover_text("Installs the newest Latch Host through this stream, so later updates arrive by themselves.")
                 .clicked()
             {
                 self.confirm_install = true;
@@ -750,7 +750,7 @@ impl View {
             if live.clipboard.unsupported() {
                 ui::menu_note(
                     ui,
-                    "Clipboard sync needs BroLink Host 3.1 or later there (PC menu → Update BroLink Host).",
+                    "Clipboard sync needs Latch Host 3.1 or later there (PC menu → Update Latch Host).",
                 );
             } else {
                 ui::menu_note(
@@ -943,7 +943,7 @@ impl View {
         screen: Rect,
         video: Rect,
         env: &Env<'_>,
-        stats: &brolink_stream::Stats,
+        stats: &latch_stream::Stats,
         in_gap: bool,
     ) {
         let live = env.live;
@@ -1097,7 +1097,7 @@ impl View {
             }
             return;
         }
-        // Ctrl+Alt is BroLink's host key. It is read before the keys-to-PC
+        // Ctrl+Alt is Latch's host key. It is read before the keys-to-PC
         // gate so it works even if an overlay took focus, and while it is
         // held nothing is forwarded: the PC must not see a held chord after
         // the toolbar opens (games and the Start menu react to one).
@@ -1277,7 +1277,7 @@ pub fn old_host(
     latest: Option<&Version>,
 ) -> Option<(Version, Option<Version>)> {
     let v = Version::parse(host_version).ok()?;
-    if brolink_core::update::host_can_receive_update(&v) {
+    if latch_core::update::host_can_receive_update(&v) {
         return None;
     }
     Some((v, latest.cloned()))
@@ -1434,7 +1434,7 @@ pub(crate) mod tests {
     /// toolbar and overlays with no picture behind them.
     pub(crate) fn dummy_live(ctx: &egui::Context) -> Live {
         let (tx, rx) = std::sync::mpsc::channel();
-        let frames = std::sync::Arc::new(brolink_stream::FrameSlot::default());
+        let frames = std::sync::Arc::new(latch_stream::FrameSlot::default());
         let path = crate::path::Path {
             direct: Some(false),
             relay: "tok".into(),
@@ -1442,15 +1442,15 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let settings = crate::config::StreamSettings::default();
-        let session = brolink_stream::Session::start(
-            brolink_stream::session::Server {
+        let session = latch_stream::Session::start(
+            latch_stream::session::Server {
                 address: "10.255.255.1".into(),
                 app_version: "7.1.431.-1".into(),
                 gfe_version: "3.23.0.74".into(),
                 rtsp_url: "rtsp://10.255.255.1:48010".into(),
                 codec_mode_support: 1,
             },
-            brolink_stream::Settings {
+            latch_stream::Settings {
                 width: 1920,
                 height: 1080,
                 fps: 60,
@@ -1484,7 +1484,7 @@ pub(crate) mod tests {
 
     fn paint(ctx: &egui::Context, f: &mut Fixture) {
         if !f.applied {
-            brolink_ui::apply(ctx);
+            latch_ui::apply(ctx);
             f.applied = true;
             return;
         }
@@ -1766,10 +1766,10 @@ pub(crate) mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, size);
         h.get_by_label(trigger).simulate_click();
         h.run_steps(3);
-        let menu = brolink_ui::open_menu_rect(&h.ctx).expect("the menu is open");
+        let menu = latch_ui::open_menu_rect(&h.ctx).expect("the menu is open");
         assert_inside(&format!("{trigger} menu at {size:?}"), menu, screen);
         tab_to(h, last);
-        let menu = brolink_ui::open_menu_rect(&h.ctx).expect("Tab keeps the menu open");
+        let menu = latch_ui::open_menu_rect(&h.ctx).expect("Tab keeps the menu open");
         assert_inside(&format!("{trigger} menu after Tab"), menu, screen);
         let item = node_rect(&h.get_by_label(last));
         assert_inside(&format!("{last:?} in the {trigger} menu"), item, menu);
@@ -1785,7 +1785,7 @@ pub(crate) mod tests {
 
     /// The last item each toolbar menu can show: the power items end the
     /// More menu, and with an old host the update item ends them.
-    const LAST_POWER_ITEM: &str = "Update BroLink Host… (runs 3.0.0)";
+    const LAST_POWER_ITEM: &str = "Update Latch Host… (runs 3.0.0)";
 
     #[test]
     fn every_toolbar_menu_fits_the_smallest_window_and_scrolls_to_its_end() {
@@ -1990,10 +1990,10 @@ pub(crate) mod tests {
                 .simulate_click();
             h.run_steps(3);
             let screen = Rect::from_min_size(Pos2::ZERO, min);
-            let list = brolink_ui::open_menu_rect(&h.ctx).expect("the list is open");
+            let list = latch_ui::open_menu_rect(&h.ctx).expect("the list is open");
             assert_inside("the frame rate list", list, screen);
             tab_to(&mut h, "240 fps");
-            let list = brolink_ui::open_menu_rect(&h.ctx).expect("Tab keeps the list open");
+            let list = latch_ui::open_menu_rect(&h.ctx).expect("Tab keeps the list open");
             assert_inside("240 fps", node_rect(&h.get_by_label("240 fps")), list);
             save(
                 h.render().unwrap(),
@@ -2100,12 +2100,12 @@ pub(crate) mod tests {
                 "toasts",
                 {
                     let mut v = View::default();
-                    v.toast(Tone::Warning, "Gaming-PC has no sound to send: it reports “Unable to initialize audio capture”. Its Sharing page in BroLink says more.");
+                    v.toast(Tone::Warning, "Gaming-PC has no sound to send: it reports “Unable to initialize audio capture”. Its Sharing page in Latch says more.");
                     v.set_poor(true);
                     v
                 },
                 Extra {
-                    handover: Some("Installing BroLink Host 4.0.2 on Gaming-PC: waiting for it to fetch the file…".into()),
+                    handover: Some("Installing Latch Host 4.1.0 on Gaming-PC: waiting for it to fetch the file…".into()),
                     ..windows()
                 },
                 None,

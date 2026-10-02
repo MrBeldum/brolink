@@ -1,10 +1,10 @@
 # macOS client (Apple Silicon)
 
-BroLink for the Mac is one native app: every machine on your Tailscale
+Latch for the Mac is one native app: every machine on your Tailscale
 account, a Connect button each, a power menu, the stream itself, and a
-**Sharing** tab so a Windows PC or another Mac can open this desktop. BroLink's stream protocol is compiled in, video is decoded by
+**Sharing** tab so a Windows PC or another Mac can open this desktop. Latch's stream protocol is compiled in, video is decoded by
 VideoToolbox (H.264 and HEVC), audio by Opus, and the picture is drawn in
-BroLink's own window under a toolbar.
+Latch's own window under a toolbar.
 
 ## Requirements
 
@@ -21,19 +21,19 @@ the [GitHub CLI](https://cli.github.com) and sign in
 (`brew install gh && gh auth login`) so the script can fall back to `gh`.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrBeldum/brolink/main/scripts/install-macos-release.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MrBeldum/latch/main/scripts/install-macos-release.sh | bash
 ```
 
 It checks the release SHA-256, verifies the ad-hoc signature, swaps the app
 into `/Applications` (the live copy is not deleted first) and opens it.
 
-By hand: download `brolink-macos-arm64.tar.gz` from the
-[latest release](https://github.com/MrBeldum/brolink/releases/latest), then
+By hand: download `latch-macos-arm64.tar.gz` from the
+[latest release](https://github.com/MrBeldum/latch/releases/latest), then
 
 ```bash
-tar xzf brolink-macos-arm64.tar.gz
-xattr -dr com.apple.quarantine BroLink.app
-open BroLink.app
+tar xzf latch-macos-arm64.tar.gz
+xattr -dr com.apple.quarantine Latch.app
+open Latch.app
 ```
 
 The `xattr` step is required for a browser download. The app is ad-hoc
@@ -48,7 +48,7 @@ quarantine flag is how you tell macOS you fetched it deliberately.
 ```
 
 builds for `aarch64-apple-darwin` (Xcode command line tools and CMake are
-needed for the C parts), bundles `dist/BroLink.app`, and installs it to
+needed for the C parts), bundles `dist/Latch.app`, and installs it to
 `/Applications`. A locally built app never carries the quarantine flag.
 
 ### Signing
@@ -59,9 +59,9 @@ notarize:
 
 ```bash
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/bundle-macos.sh
-ditto -c -k --keepParent dist/BroLink.app dist/BroLink.zip
-xcrun notarytool submit dist/BroLink.zip --keychain-profile "notary" --wait
-xcrun stapler staple dist/BroLink.app
+ditto -c -k --keepParent dist/Latch.app dist/Latch.zip
+xcrun notarytool submit dist/Latch.zip --keychain-profile "notary" --wait
+xcrun stapler staple dist/Latch.app
 ```
 
 ## First run
@@ -72,11 +72,11 @@ xcrun stapler staple dist/BroLink.app
    first. A dot and one line say whether each is ready, asleep, or
    missing something on its side.
 3. Click **Connect** (**Wake and connect** for a machine that is asleep).
-   The first time with a machine, BroLink pairs with it: it picks a
-   random PIN, sends it to BroLink on that machine over Tailscale, and
-   BroLink there enters it for you. You see the PIN but never need it. If
-   BroLink is not sharing on that machine, pairing cannot finish: open
-   BroLink there and set up sharing on its **Sharing** tab first.
+   The first time with a machine, Latch pairs with it: it picks a
+   random PIN, sends it to Latch on that machine over Tailscale, and
+   Latch there enters it for you. You see the PIN but never need it. If
+   Latch is not sharing on that machine, pairing cannot finish: open
+   Latch there and set up sharing on its **Sharing** tab first.
 4. The desktop appears.
 
 Command-1 opens **Machines**, Command-2 **Sharing** and Command-comma
@@ -112,12 +112,12 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | Toolbar item | What it does |
 |--------------|--------------|
 | **● Machine name · 1920×1080 · 60 fps · HEVC** | The stream as negotiated (the numbers show on wide windows); the dot turns amber while the connection is poor |
-| **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found and its round trip. Amber means every packet goes through one of Tailscale's shared relays, which adds delay; **Connection details** under the machine list say why and what would give a direct path. What BroLink asks for is the same on every path |
+| **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found and its round trip. Amber means every packet goes through one of Tailscale's shared relays, which adds delay; **Connection details** under the machine list say why and what would give a direct path. What Latch asks for is the same on every path |
 | **Mouse** | **Captured, for games** (the default): a click on the picture hides the cursor and sends raw movement, which games read; the host key frees it. **Free, for desktops**: the Mac cursor's position is sent 1:1 and nothing is captured. The choice is remembered, and is also in Settings |
 | **Keys** | Ctrl+Alt+Delete, Windows key, Alt+Tab, Escape, Print Screen; and **Command acts as Ctrl** |
 | **Stats** | The Stream performance panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
-| **PC** (or **Mac**, **Machine**) | Sleep, Restart…, Shut down… (the latter two ask first); **Update BroLink Host…** for a PC whose host is older than 3.1 |
+| **PC** (or **Mac**, **Machine**) | Sleep, Restart…, Shut down… (the latter two ask first); **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
 
@@ -130,9 +130,9 @@ they do on the Mac, and ⌘ can stay held across several of them.
 
 ### Clipboard
 
-With BroLink Host 3.1 or newer on the PC, the clipboard follows you both
+With Latch Host 3.1 or newer on the PC, the clipboard follows you both
 ways: text copied on the PC is in the Mac's clipboard a second later, and
-⌘V on the PC pastes the text the Mac has (BroLink sends it to the PC first,
+⌘V on the PC pastes the text the Mac has (Latch sends it to the PC first,
 then presses Ctrl+V there). Text only, up to 32 KB; an image or a file on
 either clipboard is left alone. Short notices under the toolbar say when
 something crossed. With an older host, ⌘V pastes what the PC last copied.
@@ -144,31 +144,31 @@ both routers. When it cannot, every packet goes through a relay: your own
 peer relay if you run one (**Relay** in Settings), otherwise one of
 Tailscale's (DERP). A relay adds a detour, and the round trip it adds is a
 floor under how quickly the PC answers a click; it changes nothing about
-what BroLink asks for. Recommended quality is this screen's size at 50
+what Latch asks for. Recommended quality is this screen's size at 50
 Mbps on every path, so a relayed stream is laggier, not blurrier. The
 encoder holds that rate (CBR); a still desktop no longer drops to a
 trickle.
 Tailscale's own relays are shared, so a stream through one can also
 stutter at busy times; a peer relay you run is yours alone.
 
-BroLink shows which case you are in next to each PC (**Relayed via Tokyo ·
+Latch shows which case you are in next to each PC (**Relayed via Tokyo ·
 210 ms**, **Via your relay · 60 ms**) and, when relayed, **Connection
 details** under the list says which router is in the way and what would
 fix it: UPnP or NAT-PMP turned on in the PC's router, a UDP port forwarded
 to the PC, or IPv6 on both networks. Both machines report their own side
-(`tailscale netcheck`); the PC's report needs BroLink Host 3.1.
+(`tailscale netcheck`); the PC's report needs Latch Host 3.1.
 
 ## A machine's menu
 
 The **…** button at the end of each row offers what that machine allows:
-**Wake** (asleep, and BroLink has learned how to wake it; sends the packet
+**Wake** (asleep, and Latch has learned how to wake it; sends the packet
 without connecting), **Test waking it from this network** (awake), **Sleep**,
 **Restart…** and **Shut down…** (when that machine allows remote power
 actions), and **Copy Tailscale address**. Restart and shut down ask first;
 both force-close programs there.
 
 **Test waking it from this network** sends the wake packet to the awake
-machine and asks BroLink there whether it arrived. A pass means waking it
+machine and asks Latch there whether it arrived. A pass means waking it
 from where you are will work; a failure means the packets are not reaching
 it from this network (see below).
 
@@ -186,7 +186,7 @@ it from this network (see below).
 | Command acts as Ctrl | Off makes ⌘ the Windows key (Mac only) |
 | App to open | The app on the PC to launch; "Desktop" is the whole screen. The list fills in after the first connection |
 | Offer to sleep a machine after a session | Off by default. Asleep, Tailscale is off there; this Mac can only wake it from its own network |
-| Keep BroLink up to date | Updates this app and the Windows PCs' BroLink Host; **Check now** checks at once |
+| Keep Latch up to date | Updates this app and the Windows PCs' Latch Host; **Check now** checks at once |
 | Relay | Whether a relay of your own is in use, and the grant it needs |
 | About | Version, licence, source, and the open-source notices |
 
@@ -196,14 +196,14 @@ asks for; the machine list shows the same. A session also reconnects by
 itself, at the new size, when this Mac's window moves to a display of a
 different size.
 
-Settings are saved in `~/Library/Application Support/dev.brolink.BroLink/client.toml`,
-along with the MAC, LAN address and pairing certificate of each PC BroLink
+Settings are saved in `~/Library/Application Support/com.bardbro.Latch/client.toml`,
+along with the MAC, LAN address and pairing certificate of each PC Latch
 has paired with.
 
 ## Waking a PC from another network
 
-Asleep, the PC's Tailscale is off, so BroLink cannot reach it over the
-tailnet. Leave the PC on (BroLink keeps it awake while plugged in)
+Asleep, the PC's Tailscale is off, so Latch cannot reach it over the
+tailnet. Leave the PC on (Latch keeps it awake while plugged in)
 if you want **Connect** from anywhere.
 
 The wake packet is sent to the LAN broadcast, to the PC's LAN address and
@@ -218,14 +218,14 @@ a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
 - **Local network**: macOS 15 may ask; allow it so the wake broadcast can
   go out.
 - **Incoming connections**: if the macOS firewall is on it may ask once,
-  the first time the Mac serves a BroLink Host install through the stream.
-- Nothing else. BroLink captures no screen and reads the keyboard and
+  the first time the Mac serves a Latch Host install through the stream.
+- Nothing else. Latch captures no screen and reads the keyboard and
   mouse only in its own window.
 
 ## Connected, but the picture is black
 
 A connection can carry valid video that contains only black pixels.
-BroLink now detects this after five seconds and shows a persistent message
+Latch now detects this after five seconds and shows a persistent message
 instead of presenting the stream as healthy. **Restart stream** reconnects
 and, for Desktop, resets the PC's capture session. If no video arrives or
 decoding fails, the message distinguishes those problems too.
@@ -255,29 +255,29 @@ capture failing while the desktop plainly has a picture.
 
 The app checks GitHub for a new release about every six hours and twenty
 seconds after it starts. A newer version is downloaded to
-`~/Library/Application Support/dev.brolink.BroLink/updates/<tag>/`, checked against the
+`~/Library/Application Support/com.bardbro.Latch/updates/<tag>/`, checked against the
 SHA-256 GitHub publishes for the asset and against its own code signature,
-and moved over `/Applications/BroLink.app` once no stream is running; the
-app then relaunches. The Mac also sends the new `brolink-host.exe` to each
-PC whose BroLink Host is older and already speaks `/v1/update` (3.1+).
+and moved over `/Applications/Latch.app` once no stream is running; the
+app then relaunches. The Mac also sends the new `latch-host.exe` to each
+PC whose Latch Host is older and already speaks `/v1/update` (3.1+).
 
 A PC still on 3.0 cannot take that, and nobody may be at the PC to install
-by hand. So the stream's **PC → Update BroLink Host…** does it through
-the stream: this Mac serves the new `brolink-host.exe` and a short
+by hand. So the stream's **PC → Update Latch Host…** does it through
+the stream: this Mac serves the new `latch-host.exe` and a short
 PowerShell script on its own Tailscale address (TCP 47851, to that one PC
 only, for ten minutes), presses Win+R on the PC, types one line
 (`powershell -ep bypass -c "irm http://<mac>:47851/u.ps1|iex"`) and
 presses Enter. A PowerShell window on the PC fetches the executable, checks
 its SHA-256 against the one in the script, stops the old service, swaps
 the file where it stands (found from the running process, or
-`%LOCALAPPDATA%\BroLink`), registers it to start at logon and starts it.
+`%LOCALAPPDATA%\Latch`), registers it to start at logon and starts it.
 The stream is not interrupted; the toolbar reports each step and the lobby
 shows the new version a few seconds later. The PC's desktop has to be
 unlocked and in front, since the Run box needs it. From then on updates
 arrive by themselves.
 
 Public releases need no GitHub login. If the repository is private, the
-app uses, in order: `github_token` in `client.toml`, `BROLINK_GITHUB_TOKEN`
+app uses, in order: `github_token` in `client.toml`, `LATCH_GITHUB_TOKEN`
 in the environment, and the token git has stored for github.com (which is
 there after `install-macos-release.sh` or any `git` use with the osxkeychain
 helper). Settings has the switch and a **Check now** button; the line under

@@ -1,5 +1,5 @@
 [package]
-name = "brolink-stream"
+name = "latch-stream"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ build = "build.rs"
 links = "moonlight-common-c"
 
 [dependencies]
-brolink-core.workspace = true
+latch-core.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 rand.workspace = true

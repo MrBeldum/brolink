@@ -1,7 +1,7 @@
-//! Getting a new BroLink Host onto a PC whose host is too old to take
+//! Getting a new Latch Host onto a PC whose host is too old to take
 //! `/v1/update`, with nobody at the PC: the stream itself is the way in.
 //!
-//! The Mac serves the new `brolink-host.exe` and a small PowerShell script
+//! The Mac serves the new `latch-host.exe` and a small PowerShell script
 //! on its own Tailscale address, to that one PC only, for a few minutes.
 //! Then it presses Win+R on the PC through the stream, types one line
 //! (`powershell … irm http://<mac>:47851/u.ps1 | iex`) and presses Enter.
@@ -13,10 +13,10 @@
 
 use crate::input::{self, press_chord};
 use anyhow::{anyhow, Context, Result};
-use brolink_core::http;
-use brolink_core::update::{self, Release};
-use brolink_core::HANDOVER_PORT;
-use brolink_stream::Input;
+use latch_core::http;
+use latch_core::update::{self, Release};
+use latch_core::HANDOVER_PORT;
+use latch_stream::Input;
 use parking_lot::Mutex;
 use semver::Version;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -114,7 +114,7 @@ impl Handover {
             .version
             .as_ref()
             .map(|v| v.to_string())
-            .unwrap_or_else(|| "the new BroLink Host".into());
+            .unwrap_or_else(|| "the new Latch Host".into());
         match &p.phase {
             Phase::Preparing => format!("Fetching {v} from GitHub…"),
             Phase::Serving => format!(
@@ -154,30 +154,30 @@ pub fn command(mac_ip: Ipv4Addr) -> String {
 /// the usual install folder, and replaces that file.
 pub fn script(mac_ip: Ipv4Addr, version: &Version, sha256_hex: &str) -> String {
     format!(
-        r#"# BroLink Host {version}: installed from your Mac through the stream.
+        r#"# Latch Host {version}: installed from your Mac through the stream.
 $ErrorActionPreference = 'Stop'
 $src = 'http://{mac_ip}:{port}'
-$host.UI.RawUI.WindowTitle = 'BroLink Host update'
-Write-Host "Installing BroLink Host {version} from your Mac..."
-$p = (Get-Process brolink-host -ErrorAction SilentlyContinue | Select-Object -First 1).Path
-if (-not $p) {{ $p = Join-Path $env:LOCALAPPDATA 'BroLink\brolink-host.exe' }}
+$host.UI.RawUI.WindowTitle = 'Latch Host update'
+Write-Host "Installing Latch Host {version} from your Mac..."
+$p = (Get-Process latch-host -ErrorAction SilentlyContinue | Select-Object -First 1).Path
+if (-not $p) {{ $p = Join-Path $env:LOCALAPPDATA 'Latch\latch-host.exe' }}
 $dir = Split-Path -Parent $p
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Write-Host "Downloading to $p.new"
-Invoke-WebRequest -UseBasicParsing "$src/brolink-host.exe" -OutFile "$p.new"
+Invoke-WebRequest -UseBasicParsing "$src/latch-host.exe" -OutFile "$p.new"
 $h = (Get-FileHash "$p.new" -Algorithm SHA256).Hash
 if ($h -ne '{sha}') {{ Remove-Item "$p.new" -Force; throw "the download did not match its SHA-256" }}
 Write-Host "Stopping the old service"
 try {{ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:47850/v1/quit -ContentType 'application/json' -Body '{{}}' -TimeoutSec 3 | Out-Null }} catch {{}}
 Start-Sleep -Milliseconds 800
-Get-Process brolink-host -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process latch-host -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
 if (Test-Path $p) {{ Move-Item $p "$p.old" -Force }}
 Move-Item "$p.new" $p -Force
 Remove-Item "$p.old" -Force -ErrorAction SilentlyContinue
-New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name BroLinkHost -Value "`"$p`" --background" -PropertyType String -Force | Out-Null
+New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name LatchHost -Value "`"$p`" --background" -PropertyType String -Force | Out-Null
 Start-Process -FilePath $p -ArgumentList '--background' -WorkingDirectory $dir
-Write-Host "Done: BroLink Host {version} is running. This window closes in 5 seconds."
+Write-Host "Done: Latch Host {version} is running. This window closes in 5 seconds."
 Start-Sleep 5
 "#,
         version = version,
@@ -221,7 +221,7 @@ fn run(
     };
     progress.lock().version = Some(rel.version.clone());
     ctx.request_repaint();
-    let exe = crate::update::host_exe(&rel, token).context("fetch brolink-host.exe")?;
+    let exe = crate::update::host_exe(&rel, token).context("fetch latch-host.exe")?;
     let sha = update::sha256_hex(&exe);
     let script = script(mac_ip, &rel.version, &sha);
     let listener = TcpListener::bind(SocketAddr::from((mac_ip, HANDOVER_PORT)))
@@ -277,7 +277,7 @@ fn run(
                             script.as_bytes(),
                         );
                     }
-                    ("GET", "/brolink-host.exe") => {
+                    ("GET", "/latch-host.exe") => {
                         tracing::info!("handover: {peer} fetching the executable");
                         let r =
                             http::write_bytes(&mut stream, 200, "application/octet-stream", &exe);
@@ -332,8 +332,8 @@ mod tests {
         let s = script(ip, &Version::new(3, 1, 0), "abcdef");
         assert!(s.contains("$src = 'http://100.64.0.20:47851'"), "{s}");
         assert!(s.contains("-ne 'ABCDEF'"), "the hash is compared uppercase");
-        assert!(s.contains("Get-Process brolink-host"), "{s}");
-        assert!(s.contains("BroLink\\brolink-host.exe"), "{s}");
+        assert!(s.contains("Get-Process latch-host"), "{s}");
+        assert!(s.contains("Latch\\latch-host.exe"), "{s}");
         assert!(s.contains("/v1/quit"), "{s}");
         assert!(s.contains("--background"), "{s}");
         assert!(!s.contains("ghp_"), "no token in the script");

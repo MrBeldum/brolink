@@ -2,11 +2,11 @@
 
 A harsh pass over every screen of the unified window, the Sharing page
 and the stream overlay, as rendered by the snapshot harness and as read
-in code. Severity is the effect on someone using BroLink, not the effort
+in code. Severity is the effect on someone using Latch, not the effort
 to fix. Every item was found on 4.0.2 (`f96e1a3`); the last column is
 its state on this branch.
 
-Renders: `cargo test -p brolink-client -p brolink-host snapshots -- --ignored`
+Renders: `cargo test -p latch-client -p latch-host snapshots -- --ignored`
 writes `target/ui-snapshots/`. Names below refer to that folder
 (`client-lobby-1280x800@2x.png` and so on).
 
@@ -67,16 +67,16 @@ All pairs are asserted in `crates/ui/src/theme.rs` and `widgets.rs` tests.
 | # | Severity | Finding | State |
 |---|----------|---------|-------|
 | U1 | High | "This Mac" everywhere, on Windows and Linux viewers too: errors, key-expiry notices, path explanations, settings hints. | Fixed: "this machine", or the right noun per OS. |
-| U2 | High | Errors sent people to a UI that no longer exists: "Open BroLink Host on the PC and run setup", "Check Wake-on-LAN in BroLink Host". | Fixed: they point at the Sharing tab and say what to do. |
+| U2 | High | Errors sent people to a UI that no longer exists: "Open Latch Host on the PC and run setup", "Check Wake-on-LAN in Latch Host". | Fixed: they point at the Sharing tab and say what to do. |
 | U3 | Medium | "Keep this machine awake while plugged in" on Mac and Linux, where `keep_awake` does nothing. | Fixed: Windows only. |
 | U4 | Medium | "Command key acts as Ctrl" on Windows and Linux viewers, which have no Command key. | Fixed: Mac only. |
 | U5 | Medium | Connect buttons vanished while any connection ran, reflowing the list. | Fixed: disabled in place, with a tooltip. |
 | U6 | Medium | "Wake" beside "Connect", which also wakes. | Fixed: "Wake and connect"; Wake alone is in the row's menu. |
 | U7 | Medium | The lobby's power menu was "PC" for every OS and hid Test wake behind power permissions. | Fixed: a "…" menu with what each machine allows, plus Copy Tailscale address. |
-| U8 | Medium | While the app updated itself the connection card had an empty title. | Fixed: "Installing a BroLink update". |
+| U8 | Medium | While the app updated itself the connection card had an empty title. | Fixed: "Installing a Latch update". |
 | U9 | Medium | Every failure offered "Try again at Smooth (1080p · 20 Mbps)", even a wake failure it cannot help, and a connection that never started was titled "… disconnected". | Fixed: "Couldn't connect to …" or "… disconnected"; the lighter profile only for stream failures. |
 | U10 | Medium | "Connecting failed at {stage} (code {code})." | Fixed: says the machine answered and points at the network. |
-| U11 | Medium | Pairing called the other side "BroLink Host"; a stuck PIN hand-off showed as a violet notice. | Fixed: PIN in boxes, plain explanation, amber notice. |
+| U11 | Medium | Pairing called the other side "Latch Host"; a stuck PIN hand-off showed as a violet notice. | Fixed: PIN in boxes, plain explanation, amber notice. |
 | U12 | Medium | "Tailscale: Tailscale is stopped." beside "Sign in to Tailscale to see your machines" over a list of remembered machines. | Fixed: one banner that says what happened and what to do; the list stays. |
 | U13 | Medium | Stream quality was two controls for one choice: four unselectable "quick profile" buttons plus Recommended/Manual, and a Reset. | Fixed: one control, Recommended · Smooth · Balanced · Sharp · Custom. |
 | U14 | Low | Settings was one long card; the licence only as raw NOTICE text. | Fixed: grouped sections and an About section. |
@@ -94,7 +94,7 @@ All pairs are asserted in `crates/ui/src/theme.rs` and `widgets.rs` tests.
 | U26 | Low | "Paired Macs", "Start the background service with Windows" on a Mac. | Fixed. |
 | U27 | Low | The poor-network toast said "Open Stats" without saying how to reach the toolbar. | Fixed. |
 | U28 | Low | The Sharing page's network line said "a Mac … reaches this PC" on a Mac. | Fixed in the page; the service log's own line is unchanged. |
-| U29 | Low | Phones on the tailnet were listed as "BroLink isn't installed". | Fixed. |
+| U29 | Low | Phones on the tailnet were listed as "Latch isn't installed". | Fixed. |
 | U30 | Low | A relayed path was red, like a failure. | Fixed: amber, with the explanation in Connection details. |
 
 ### Accessibility and input
@@ -102,7 +102,7 @@ All pairs are asserted in `crates/ui/src/theme.rs` and `widgets.rs` tests.
 | # | Severity | Finding | State |
 |---|----------|---------|-------|
 | X1 | High | Tab order ran backwards through right-aligned controls (egui focuses in creation order; right-to-left layouts create the rightmost first): a machine's menu before its Connect, the toolbar from Disconnect leftwards. | Fixed: `trailing` layout; tested. |
-| X2 | Medium | Focus rings drawn inside controls in text colour, and egui's own widgets showed focus only as the pressed style. | Fixed: a violet ring outside every custom control and on built-in ones. |
+| X2 | Medium | Focus rings drawn inside controls in text colour, and egui's own widgets showed focus only as the pressed style. | Fixed: a ring in the logo's blue outside every custom control and on built-in ones. |
 | X3 | Medium | No window shortcuts. | Fixed: Command/Ctrl-1, 2, comma; Escape. |
 | X4 | Low | Switch hit target 40×22 (< 24). | Fixed: 36×24. |
 | X5 | Low | Pills and other painted text were missing from the accessibility tree. | Fixed: status, tags, keycaps and the PIN report labels. |

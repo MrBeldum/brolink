@@ -67,7 +67,7 @@ impl Player {
         mapping: &[u8],
     ) -> Result<Self> {
         if channels == 0 || channels > MAX_CHANNELS || mapping.len() < channels {
-            bail!("audio with {channels} channels is not something BroLink plays");
+            bail!("audio with {channels} channels is not something Latch plays");
         }
         // Validate before any integer casts, allocation, or call into Opus.
         if !matches!(sample_rate, 8_000 | 12_000 | 16_000 | 24_000 | 48_000) {
