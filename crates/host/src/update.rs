@@ -317,6 +317,28 @@ mod tests {
     }
 
     #[test]
+    fn a_push_from_a_4_0_mac_is_accepted_under_the_old_header_names() {
+        let dir = std::env::temp_dir().join(format!("latch-legacy-upd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("brolink-host.exe");
+        let body = fake_exe();
+        let newer = format!("{}.0.0", update::current().major + 1);
+        let request = Request {
+            method: "POST".into(),
+            path: latch_core::api::UPDATE_PATH.into(),
+            headers: vec![
+                ("x-brolink-version".to_string(), newer.clone()),
+                ("x-brolink-sha256".to_string(), update::sha256_hex(&body)),
+            ],
+            body: body.clone(),
+        };
+        let v = stage(&request, &exe).unwrap();
+        assert_eq!(v.to_string(), newer);
+        assert_eq!(std::fs::read(staged(&exe)).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn uploads_are_checked_before_anything_is_written() {
         let dir = std::env::temp_dir().join(format!("latch-upd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
