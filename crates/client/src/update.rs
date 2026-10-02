@@ -590,20 +590,25 @@ fn runs_at_least(addr: SocketAddr, want: &Version, within: Duration) -> bool {
     }
 }
 
+/// The headers of a host-update push: this version's names and, because a
+/// host older than 4.1 knows only the old ones and is the one this push is
+/// most likely for, the old names too.
+fn push_headers<'a>(version: &'a str, sha: &'a str) -> [(&'static str, &'a str); 5] {
+    [
+        (UPDATE_VERSION_HEADER, version),
+        (UPDATE_SHA256_HEADER, sha),
+        (legacy::UPDATE_VERSION_HEADER, version),
+        (legacy::UPDATE_SHA256_HEADER, sha),
+        ("Content-Type", "application/octet-stream"),
+    ]
+}
+
 fn send_host(ip: Ipv4Addr, version: &str, sha: &str, exe: &[u8]) -> Result<()> {
     let r = http::request_with(
         (ip, CONTROL_PORT),
         "POST",
         UPDATE_PATH,
-        &[
-            (UPDATE_VERSION_HEADER, version),
-            (UPDATE_SHA256_HEADER, sha),
-            // A host older than 4.1 knows only the headers' old names, and
-            // is the one this push is most likely for.
-            (legacy::UPDATE_VERSION_HEADER, version),
-            (legacy::UPDATE_SHA256_HEADER, sha),
-            ("Content-Type", "application/octet-stream"),
-        ],
+        &push_headers(version, sha),
         exe,
         Duration::from_secs(120),
     )?;
@@ -734,6 +739,19 @@ mod tests {
         assert!(msg.contains("Update Latch Host"), "{msg}");
         assert!(!msg.contains("Broken pipe"), "{msg}");
         assert!(!msg.contains("os error"), "{msg}");
+    }
+
+    #[test]
+    fn a_push_carries_both_header_names_so_a_4_0_host_accepts_it() {
+        let h = push_headers("4.1.1", "abc");
+        let get = |name: &str| h.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+        assert_eq!(get("x-latch-version"), Some("4.1.1"));
+        assert_eq!(get("x-latch-sha256"), Some("abc"));
+        // What a 4.0 host reads, spelled out here so that renaming the
+        // constant in legacy.rs cannot silently break the push.
+        assert_eq!(get("x-brolink-version"), Some("4.1.1"));
+        assert_eq!(get("x-brolink-sha256"), Some("abc"));
+        assert_eq!(get("Content-Type"), Some("application/octet-stream"));
     }
 
     /// A one-reply HTTP server saying the host runs `version`.
