@@ -41,8 +41,12 @@ printf '[Unit]\nDescription=Latch\nAfter=network.target\n\n[Service]\nExecStart=
 echo "==> display cookie and wait script"
 env_file="$HOME/.config/environment.d/10-display.conf"
 if [[ -f "$env_file" ]]; then sed -i 's/brolink\.Xauthority/latch.Xauthority/g' "$env_file"; fi
-sudo install -D -m 0755 "$HERE/wait-engine.py" /usr/local/libexec/latch-wait-engine.py
-sudo rm -f /usr/local/libexec/brolink-wait-engine.py
+# The wait script is root's to install; LATCH_SKIP_ROOT=1 leaves it to someone
+# who already has (an account without sudo, run by an administrator).
+if [[ -z "${LATCH_SKIP_ROOT:-}" ]]; then
+	sudo install -D -m 0755 "$HERE/wait-engine.py" /usr/local/libexec/latch-wait-engine.py
+	sudo rm -f /usr/local/libexec/brolink-wait-engine.py
+fi
 
 echo "==> starting Latch"
 systemctl --user daemon-reload
