@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "latch-client"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2137,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "latch-core"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "latch-host"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "latch-stream"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "latch-ui"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "egui",
  "latch-core",

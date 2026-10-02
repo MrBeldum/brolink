@@ -213,7 +213,10 @@ impl HostApp {
         }
         let cfg = self.cfg.clone();
         let ctx = ctx.clone();
-        let install_engine = !status.streamer.installed || migrate || !status.streamer.running;
+        let install_engine = !status.streamer.installed
+            || migrate
+            || !status.streamer.running
+            || crate::streamer::find().is_some_and(|i| crate::streamer::in_old_folder(&i));
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
         std::thread::spawn(move || {
@@ -1249,7 +1252,7 @@ mod snapshots {
             }),
             setup: vec![],
             log: vec![
-                "Latch 4.1.0 listening on TCP 47850".into(),
+                "Latch 4.1.1 listening on TCP 47850".into(),
                 "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
                 "the streaming engine is running and Latch is signed in".into(),

@@ -692,9 +692,10 @@ pub fn run_as_admin() -> Result<()> {
         let kind = install.as_ref().map(|i| i.kind).unwrap_or("");
         let migrate = crate::migrate::uses_old_engine(kind);
         let running = install.is_some() && crate::streamer::running();
+        let old_folder = install.as_ref().is_some_and(crate::streamer::in_old_folder);
         let plan = Plan {
             exe: &exe,
-            install_engine: install.is_none() || migrate || !running,
+            install_engine: install.is_none() || migrate || !running || old_folder,
             migrate,
             dry_run: false,
             sunshine_user: &cfg.sunshine_user,
